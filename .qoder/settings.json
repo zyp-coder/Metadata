@@ -1,0 +1,15 @@
+﻿{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Program Files\\Git\\bin\\bash.exe\" \"D:/AIproject/MetaData002/.qoder/hooks/prjm-gate.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

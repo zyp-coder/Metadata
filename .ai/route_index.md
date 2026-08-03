@@ -1,0 +1,93 @@
+# 模块索引 + 调度表
+
+> 记录每个模块的状态、依赖拓扑和关键文件，供 prjm 路由决策使用。
+
+## 模块状态
+
+| 模块 | 阶段 | 状态 | 设计日记 | 开发日记 | Debug日记 |
+|------|------|------|---------|---------|----------|
+| modeling（建模引擎） | 可交付 | ✅ REQ-017计算字段全栈实现（公式引擎+DAG+重算+试算+前端组件） | design-diary-modeling.md | dev-diary-modeling.md | debug-diary-modeling.md |
+| archive（档案生成） | 可交付 | ✅ v17.1 记录列表「变更历史」入口弹窗 + canRollbackToPoint 防400（回滚报错根因：旧进程未加载端点，见 BUG-2026-0725-04）；✅ v17 变更日志回滚（单条+时间点）；ChangeType 加 ROLLBACK，_execute_field_rollback 共用执行器，前端 VersionManagement 回滚按钮 + ArchiveDetail 历史回滚时间线；✅ v16 信息架构收缩；✅ 双层存储重构落地；✅ 一致性检查独立页；✅ 刷新预检工作流；📝 待办：ArchiveApi 鉴权强化、源优先级配置(BR-018-1)、血缘历史时间线 | design-diary-archive.md | dev-diary-archive.md | debug-diary-archive.md |
+| quality（质量引擎） | 概念设计 | ⏳ 待启动 | - | - | - |
+| auth（权限管理） | 概念设计 | ⏳ 待启动 | - | - | - |
+
+## 依赖拓扑
+
+```
+modeling ← archive（档案基于建模引擎的标准字段模型，同步到数据源物理表）
+modeling ← quality（质量规则基于建模引擎的字段定义 + 字段等价组做跨表一致性校验）
+modeling ← auth（权限控制建模引擎的操作）
+archive ← auth
+quality ← auth
+```
+
+> 注：字段去重产生的 `FieldEquivalenceGroup`（等价组）是 modeling→quality 的关键契约——
+> quality 模块后续将消费等价组，生成跨表字段一致性校验规则（物理字段保留，仅靠等价关系约束）。
+
+## 关键文件索引
+
+### modeling 模块
+
+| 文件 | 职责 |
+|------|------|
+| `backend/apps/modeling/models.py` | Domain, Table, Field（含 distinct_values/distinct_synced_at 数据去重内容缓存，上限100条；**archive_category** unassigned/base/calculated 档案分类；**ownership** source/archive 字段维护方（源系统维护/档案维护），默认 source（迁移0025 含存量全刷））, FieldGroup, FieldOption, FieldMapping, DataSource, StandardField（含 **status** active/discarded、**ownership** source/archive、**primary_field[FK→Field SET_NULL]+primary_field_manual 主字段（档案更新数据源头，迁移0026 含存量取主表成员；auto_assign_primary_field() 自动分配：active成员仍有效不动→主表成员兑底→置空清manual）**；Table.set_as_primary 含自动分配主字段跟随循环）, **ComputedField**（计算字段：domain/code/name/expression/depends_on[M2M→Field]/depends_on_computed[M2M→self]/parsed_references[JSON]/execution_order/output_type/**group[FK→FieldGroup SET_NULL 迁移0024]**/release_to_archive/status）, FieldEquivalenceGroup（字段等价组/去重）, AIConfig（AI服务配置单例：provider/api_base/api_key/model/temperature/timeout/enabled + 4类可配置prompt：prompt_auto_group/semantic/dedup/infer；默认DeepSeek） |
+| `backend/apps/modeling/views.py` | DomainViewSet, TableViewSet, FieldViewSet（含 detect-duplicates/apply-equivalence/standard-fields/refresh-distinct/manual-candidates/archive-preview/field-categories/batch-update-attributes）, StandardFieldViewSet（含 members-distinct、**set-primary-field（主字段唯一写入口：field_id=id→manual=True，null→清标记重分配；非有效成员400；第八十五轮）**；create/add_member/remove_member+FieldViewSet.apply_standards 四入口均挂 auto_assign_primary_field 钩子）, **ComputedFieldViewSet**（CRUD + **create/update 前置 _code_conflict_response 编码冲突校验（区分废弃/活跃占用给友好指引）** + actions: validate_formula/validate_expression/preview_data/**generate_formula(AI自然语言生成表达式·工作流：字段→样本值→公式，prompt 携带 distinct_values 前3个样本值)**/trial_calculate/dependency_graph/batch_recalculate/available_functions/available_references + **技术函数插件管理5个action: plugins/upload(unload/reload/list/template)** + perform_create/update自动解析依赖）, AIConfigViewSet, FieldGroupViewSet, FieldMappingViewSet, DataSourceViewSet, FieldEquivalenceGroupViewSet；去重缓存工具已抽至 distinct_cache.py（本文件 import 别名 `_json_safe`/`_fetch_distinct_values`/`_ensure_distinct_cache` 兼容旧引用）；standard-fields action 输出行携带 distinct_values（equiv=成员并集/solo=自身缓存，限50）与 **tables[{name,is_primary}]+is_primary_key（第八十四轮：equiv=成员表去重/任一成员主键即true，solo=自身表与主键标记）**与 **primary_field_id/primary_field_label(表名.编码)/primary_field_manual（第八十五轮，仅 equiv；主字段失效视为未设置输出 null）**；members-distinct 输出行含 table_is_primary/is_primary_field |
+| `backend/apps/modeling/formula_engine.py` | 公式解析+求值引擎：Lexer(分词器) + Parser(递归下降 AST) + Evaluator(求值) + 32内置函数（FUNCTION_REGISTRY装饰器注册，五分类） + parse_references/validate_expression/evaluate/get_available_functions；末尾导入 custom_functions 插件保证注册表完整 |
+| `backend/apps/modeling/custom_functions.py` | 内置技术函数插件（方案A首批6函数：PAD_LEFT/REGEX_EXTRACT/REGEX_REPLACE/SPLIT_INDEX/MAP_VALUE/HASH_MD5）；依赖 formula_engine（register_function/FormulaRuntimeError），被 formula_engine 末尾导入；与用户上传插件共存（用户上传同名函数可覆盖） |
+| `backend/apps/modeling/plugin_loader.py` | 技术函数插件动态加载器：tech_plugins/ 目录管理 + AST 安全校验（白名单导入 re/hashlib/math/datetime/apps.modeling.formula_engine，禁止 os/sys/subprocess/open/eval/exec 等危险操作）+ load_plugin/unload_plugin/reload_plugin/list_plugins/load_all_plugins/get_plugin_template；apps.py ready() 启动时扫描加载；被 views.py ComputedFieldViewSet plugins/* 5个 action 调用 |
+| `backend/apps/modeling/computed_service.py` | 计算字段服务：resolve_dependencies(拓扑排序) + detect_cycle(循环检测 DFS三色) + batch_recalculate(全域重算) + recalculate_affected(单记录实时重算)；_build_param_space_from_distinct 对 distinct_values=None 的引用字段按需 ensure_distinct_cache（失败降级占位） |
+| `backend/apps/modeling/distinct_cache.py` | 去重取值缓存工具（第六十九轮从 views.py 抽出）：ENGINE_MAP 四库方言映射 + json_safe + fetch_distinct_values（本地/外部表 DISTINCT 查询，限100）+ ensure_distinct_cache（仅对 distinct_values=None 的字段查库回填，失败记 errors 不抛）；被 views.py 与 computed_service.py 依赖，**不得反向 import views** |
+| `backend/apps/modeling/serializers.py` | 各模型序列化器 + StandardFieldSerializer（含first_member_distinct_values第一个成员去重值；primary_field/primary_field_manual 只读——主字段只能走 set-primary-field 端点；get_members 含 table_is_primary/is_primary_field） + AIConfigSerializer（api_key write_only+has_api_key+prompt_defaults 供前端恢复默认） + FieldEquivalenceGroupSerializer |
+| `backend/apps/modeling/excel_service.py` | Excel 解析 + 本地建表（parse_excel, infer_field_types, create_local_table_from_excel） |
+| `backend/apps/modeling/ai_service.py` | AI 字段推断 + 跨表去重检测三层匹配 + 自动分组（_auto_group_llm/_heuristic 按**业务主题**分组，非数据类型）；配置解析 `_resolve_ai_config`（优先 DB AIConfig enabled 回退 env）/`_chat(cfg)`/`test_connection`/`_has_llm`；可配置prompt：DEFAULT_PROMPT_*内置默认+PROMPT_META+`_resolve_prompt(key,default)`（DB对应字段优先、空则内置默认）+`prompt_defaults()`，4个_llm运行时f-string追加字段数据JSON；`generate_formula(domain_id,description,selected_refs=None)` AI自然语言生成计算表达式（携带域内字段清单+38函数签名，无LLM时报错不降级；返回 {expression, explanation, reasoning, risk} 四字段；**传入 selected_refs 时 prompt 仅携带这些字段作为可用字段，缩小 AI 选择范围提升准确率**；prompt 规则 4 要求 LLM 评估数据风险返回 risk 字段；**生成后自动调 validate_expression 验证，失败则携带错误信息重试一次**，确保返回的表达式语法正确） |
+| `frontend/src/views/settings/AIConfig.vue` | AI 配置页（主区仅模型+API Key；模型用 a-select show-search 纯选择可搜索，选中预设模型经 MODEL_INDEX 自动带出厂商+接口地址；服务厂商/接口地址/温度/超时/名称/启用折叠进 a-collapse「高级设置」；prompt配置区可在线编辑/恢复默认+测试连接+保存；PROVIDERS预设 deepseek[deepseek-v4-flash/deepseek-v4-pro, api_base=https://api.deepseek.com]/openai/qwen/zhipu/moonshot/custom） |
+| `backend/config/pagination.py` | StandardPagination（启用 page_size_query_param，max_page_size=100000，支持前端拉全量） |
+| `frontend/src/views/modeling/TableList.vue` | 管理表页面（表列表+主键列+字段管理弹窗+新建表对话框+Excel导入+数据源分栏） |
+| `frontend/src/views/modeling/DomainFieldMapping.vue` | 关系管理页面（字段映射列表+ER图+全屏切换+位置持久化+重置布局） |
+| `frontend/src/views/modeling/DomainFieldConfig.vue` | 字段管理页面（三分类架构 + 计算字段视图增强：工具栏[新建/批量重算]（依赖图按钮第六十九轮下线，dependencyGraph API 保留） + 表格列[公式摘要/输出类型/执行顺序/操作(编辑/试算/废弃)] + 属性配置 Tab 11列：含「数据去重内容」列（tag前3+tooltip全量）、**「维护方」a-switch 列（源系统维护/档案维护，equiv→standardFieldApi.patch/solo→batchUpdateAttributes/computed 固定档案维护只读）**、**「所属表」列（表名+金色「主表」tag，equiv 列全成员表）+字段编码前主键金色 KeyOutlined 钥匙标（只读，第八十四轮）**，「释放到档案」「启用」两列已删（后端字段保留存量值生效）、**「主字段」列（第八十五轮：equiv 显示 label+自动/手动小标，未设置红标，可点开成员抽屉 openMembersDistinctFromAttr）**；组合字段表成员行金色「主字段/主表」tag；成员抽屉主字段卡片金边框+「设为主字段」链接（setPrimaryMember→standardFieldApi.setPrimaryField） + FormulaEditor/TrialCalculation modal集成） |
+| `frontend/src/views/modeling/components/FormulaEditor.vue` | 公式编辑器组件：modal 1680px 表单(code/name/output_type) + **AI 智能生成区块占满整行**（从 formula-main 提到 formula-editor-layout 上方，侧栏下移与「计算表达式」label 对齐；「AI 生成表达式」label + 右侧 hint + textarea monospace 13px + 按钮 size=small + explanation 黄色提示条 + **risk 橙色风险条（内容前加「风险：」前缀）** + **思考过程弱化折叠**（header 改「思考过程」去 icon、:bordered="false"、字号 11px、颜色 #8c8c8c、去边框去背景）；**后端 generate_formula 工作流重构：字段→样本值→公式**，prompt 携带 distinct_values 前3个样本值，AI 先通读字段清单+样本值判断数据特征再推导表达式） + formula textarea 实时验证 + **依赖字段可删减 tag**（validationResult.references 改 closable a-tag，**放在「计算表达式」label 上方**，删除后 AI 生成不再携带；handleValidate 验证成功后同步更新 selectedRefsForAi 保留用户已删除的补充新发现的）+ **未使用引用字段橙色警告条**（unusedReferences computed） + 侧栏两级级联（字段引用 **display_name 中文名优先** /函数库） + **侧栏第三Tab「技术函数」（插件上传/列表/重载/卸载/模板下载，上传成功后同步刷新函数库）** + **常驻数据预览面板·两行表头+冻结+「全部」切换**（第一行「输入参数」colspan=所有输入列蓝色背景+「输出结果」绿色背景；第二行每列「表名.字段中文名」+「结果值」；**第二行表头 position: sticky; top: 37px 冻结**；tbody 用 previewColumnList 展平列+分组分隔线+首行 border-top 2px 冻结区分线；**preview-header 右侧加「全部（N 条）/ 收起（前 50 条）」切换按钮，仅当 previewResult.valid && truncated 时显示，点击调 handleTogglePreviewAll 切换 showAllPreview 状态后重新拉取**） + 光标插入 |
+| `frontend/src/views/modeling/components/TrialCalculation.vue` | 枚举试算组件：modal式参数表格 + distinct_values自动填充 + 笛卡尔积执行 + 结果表格 |
+| `frontend/src/api/modeling.ts` | 前端 API 封装（含 standardFieldApi.membersDistinct/removeMember/**setPrimaryField** 、 aiConfigApi[current/update/testConnection]） |
+| `frontend/src/utils/apiError.ts` | 全局 API 错误解析工具 extractApiError(e)：链式解析 error→detail→message→DRF non_field_errors→字段级错误；被全前端 catch 统一依赖（DomainFieldConfig/FormulaEditor/TableList/TrialCalculation/DomainFieldMapping/TechFunctions/ArchiveDetail）；新增 catch 禁止再手写 e.response?.data?.xxx 链 |
+| `frontend/src/types/index.ts` | TypeScript 类型定义 |
+
+### archive 模块
+
+| 文件 | 职责 |
+|------|------|
+| `backend/apps/archive/models.py` | ArchiveRecord（**双层存储**：**source_data** 源同步底层（刷新整层替换）+ **manual_data** 人工覆盖层（仅 ownership='archive' 字段）+ **data** 合并物化结果；迁移0005 含存量拆分 RunPython；另含 overrides 修正保护 + lineage 字段血缘 JSONField）, ArchiveVersion, ArchiveSyncLog(仅留历史查看), ArchiveOperationLog(OperationType 含 SYNC/SCHEMA_SYNC), ArchiveApi（数据服务API：exposed_fields/filter_conditions/auth_roles）, **ArchiveChangeBatch（变更批次：change_source 枚举 sync/manual + operator + stats 汇总，零变更不建批次）**, **ArchiveChangeDetail（变更明细：change_type 枚举 created/updated/deactivated/reactivated + field_changes JSON [{field,name,old,new}] + record_key 主键快照，record FK SET_NULL，迁移0006）**，**ConsistencyIssue（一致性差异记录 v12：状态 open/reviewed/ignored/resolved，唯一键 archive+record_key+field_code+member_source，迁移0007；ChangeSource 加 consistency、ChangeType 加 reviewed/ignored）** |
+| `backend/apps/archive/views.py` | ArchiveViewSet(sync-schema 结构同步 + **refresh-data 立即刷新（不重生成 schema/不 bump schema_version）** + **refresh-preview 预检（v11 dry-run 零写入：schema diff 按 code 对比 added/removed/changed 逐属性 name/type/ownership/group_path + _preview_data_changes 数据试算：SimpleNamespace 模拟 _merge_record_data→would_create/update/deactivate+changes_sample≤20）** + _generate_schema_from_domain[DFS 分组序/group_path/ownership 下发，计算字段标记 source='computed'；**v11 重写 entries+sort_key 统一排序：有分组计算字段随真实分组组内排物理后，未分组兜底「计算字段」虚拟组**]，**_build_code_to_physical 从 _sync_data_from_sources 抽出供同步/预检共用；第八十五轮重写：组合字段已设主字段时仅映射主字段成员（primary_locked 防兑底追加），其余成员仅进一致性检查**)；**_validate_primary_fields 模块函数（第八十五轮：域内活跃且有成员的 SF 必须有效主字段，_sync_data_from_sources/_preview_data_changes 开头拦截 stats.errors+primary_field_missing）；一致性检查三方法 _build_code_checks/_collect_check_values/_run_consistency_check（每表拉取后按主键采集、字符串归一比对，产出 stats.consistency_check：checked_fields/mismatch_count/mismatch_records/samples≤20）**；**_merge_record_data 双层合并纯函数（computed 保留现值/source 底层直通清 manual 遗留/archive 字段 manual 优先否则回落，lineage 重建），供同步/编辑/刷新三处复用**；**_upsert_records_from_rows 换底引擎：全部记录（含停用）建匹配索引同主键 active 优先，stale 记录匹配到源行自动复活，手工停用只更新保持停用，无主键源行跳过；本表字段直写 source_data 零比对→merge→有差异才 version+1+快照(source_refreshed+changed_fields 新旧值 v11)**；**_sync_data_from_sources 收尾停用清扫：未匹配 active+synced/partial → deleted+stale（安全闸门：出错/无主键跳过），stats 含 records_deactivated/reactivated**；**变更日志采集：_sync_data_from_sources 维护 change_entries（复活优先于修改，停用清扫先抓身份，收尾建 sync 批次+bulk_create 明细，stats 返回 change_batch_id）**；**refresh_archive_data 模块级函数（端点/命令/定时线程三入口共用）**；_field_released 档案字段口径唯一收口, ArchiveRecordViewSet(未同步置顶，**create 直接 403 禁止人工新增**), SyncLogViewSet, OperationLogViewSet, ArchiveApiViewSet, **ChangeBatchViewSet+ChangeDetailViewSet（只读，过滤 archive/batch/record/change_type/change_source/record_key icontains，路由 /api/change-batches/ /api/change-details/；**➕ export action：GET /api/change-details/export/?archive=N 单档案导出 Excel（openpyxl 双 Sheet 批次汇总+变更明细，明细上限 5 万行，缺 archive 参数 400，文件名 filename*=UTF-8''）**）**, **RecordVersionViewSet（v10 只读 /api/record-versions/ 全局版本列表：select_related('record','record__archive') ordering -id，过滤 archive(record__archive_id)/record/operation_type/is_pinned('true'/'false')/operated_by icontains；pin/unpin 两 action 各写 PIN/UNPIN 操作日志，重复定版/取消 400）**，**consistency_check action（v12 POST /archives/{id}/consistency-check/：全量比对 _collect_full_mismatches + ConsistencyIssue upsert，无拉取错误时已消失差异自动 resolved）+ ConsistencyIssueViewSet（只读 /api/consistency-issues/ 过滤 archive/status/field_code/record_key + batch-review action：reviewed/ignored/reopen 每档案一个 consistency 批次）** |
+| `backend/apps/archive/serializers.py` | ArchiveRecordUpdateSerializer.update：ownership='source' 字段 400 拦截→变更 archive 字段写入 manual_data（**新值==底层源值时删键回落+overrides 解除保护**）→惰性导入 _merge_record_data 合并物化→**末尾落 manual 变更日志批次（status 切换判定 DEACTIVATED/REACTIVATED，_record_pk_key() 取主键快照）**；CreateSerializer.create 人工数据拆层（source_owned→source_data、其余→manual_data、computed 跳过）；**ChangeBatchSerializer/ChangeDetailSerializer（明细携带 batch 的 change_source/operator + archive_name）**；**GlobalVersionSerializer（v10 全局版本列表行：archive=record.archive_id/archive_name/operation_type_display，不回传 data/schema_snapshot 大字段）**；**ConsistencyIssueSerializer（v12 全只读 + status_display/archive_name）** |
+| `backend/apps/archive/apps.py` | ready() 启动定时刷新 daemon 线程：间隔 settings.ARCHIVE_AUTO_REFRESH_MINUTES（默认60，0禁用），RUN_MAIN 防 runserver 双启、仅服务类命令启动，循环调 refresh_archive_data 异常只记日志 |
+| `backend/apps/archive/management/commands/refresh_archives.py` | 外部调度刷新命令：遍历 status='active' 档案逐个 refresh_archive_data，支持 --archive-id |
+| `frontend/src/views/archive/` | 档案相关页面（v10 三菜单：档案管理/API管理/版本管理）：ArchiveList(档案管理CRUD，操作列深链 版本历史/**变更日志 ?tab=changes**，「API接口」深链已删)、**ApiManagement(API管理平铺页 /archive/api-management：全局 API 表格+档案/状态筛选+新建/编辑抽屉（所属档案下拉，编辑态 disabled，切档案重拉 schema+分组勾选）+查看数据抽屉承接原 ArchiveBrowse 只读能力)**、**VersionManagement(版本管理页 /archive/versions：全局记录版本平铺表格+档案/操作类型/是否定版/操作人四筛选+变更字段旧→新值渲染（限5行，兼容 rolled_back_to/source_refreshed）+定版📌tooltip+行操作 定版/取消定版/回滚/对比)**、ArchiveDetail(详情+记录+版本+**变更日志分区 activeTab='changes'（明细/批次双视图 radio，明细表字段级旧值→新值渲染+来源/类型/record_key 筛选+批次下钻，页头「变更日志」按钮，「导出 Excel」changeLogApi.exportExcel responseType:'blob'+通用 downloadBlob()）**；**v11 刷新预检：页头单「立即刷新」按钮（删「同步模型结构」）→doRefreshPreview 拉 refresh-preview→预检弹窗（schema 变更明细+数据试算样本）→confirmRefresh 分流 doSyncSchema/doRefreshData，无变化不弹窗**；**第八十五轮：showConsistencyWarning(stats)（consistency_check.mismatch_count>0 时 Modal.warning 展示不一致样本≤10 行，doRefreshData/doSyncSchema 各调一次）**；**v11 UI 收敛：记录表操作列删 sync_status 标签+停用改 a-switch，版本表 operated_at/抽屉时间 formatDateTime，详情/编辑抽屉 1100px——groupedSchemaColumns 按 level1 根分组分列+schemaGridStyle grid 最多3列（新增记录抽屉保持 groupedSchemaBlocks 单列），详情抽屉只删同步蓝标保留人工橙标（lineage source!=='sync' 才显），编辑抽屉所有权标注反转（archive 非 computed 标橙「以我为准」，source 字段仅 disabled 不标）**；**API接口 Tab 已删（v10，-286行，能力迁至 ApiManagement）**；schemaGroupTree 按 group_path 建嵌套分组树→groupedSchemaBlocks 展平块渲染抽屉嵌套标题（详情/编辑/新增抽屉共用），buildGroupColumns 递归多级表头；**编辑抽屉 source 字段 disabled+「以源为准」蓝 tag（分组/平铺两处）；同步向导与冲突审查 Tab 已删除（方案B）**；血缘展示：抽屉字段值旁 lineage 标签(人工橙/同步蓝)+tooltip，记录表格 overrides 命中前置🔒锁标（tooltip「人工修正值（以我为准）」）)；**ArchiveBrowse/OperationLog/ChangeLog 三页已删（v10），operationLogApi 已删（后端 /api/operation-logs/ 端点保留）**；**ConsistencyCheck.vue（v12 一致性检查独立页 /archive/:id/consistency：重新检查+四状态统计卡+状态/字段/记录标识筛选+批量标记已审核/忽略/重新打开；入口：ArchiveList 操作列「一致性检查」链接 + ArchiveDetail 刷新告警 Modal.confirm「前往一致性检查」引导；路由 ':id/consistency' 注册在 ':id' 之前）** |
+
+## Bug 记录
+
+| 模块 | Bug | 状态 | 日期 |
+|------|-----|------|------|
+| modeling | Django 6.0.7 ATOMIC_REQUESTS KeyError | ✅ 已修复 | 2026-07-17 |
+| archive | 同步死锁：sync_to_source 仅推送 status=ACTIVE，编辑后 deleted 记录被排除→永不推送也永不恢复启用 | ✅ 已修复（推送全部记录+回读校验通过后恢复 active+synced；注：第七十二轮已取消编辑自动停用，新编辑不再产生 deleted，恢复语句仅兼容存量） | 2026-07-23 |
+| archive | 同步整行 UPDATE 隐患：sync_to_source Phase3 整行 UPDATE 全部列，会覆盖数据源中不在本次变更范围内的字段 | ✅ 已修复（改为只 SET record_diff 差异字段） | 2026-07-23 |
+| frontend | axios 拦截器 reject(new Error) 丢弃 err.response，同步预览弹窗拿不到 sync_stats 只显「Request failed with status code 400」 | ✅ 已修复（保留 error.response+补 data.error） | 2026-07-23 |
+| modeling | @antv/x6 v2 shape:'rect' 不支持 html | ✅ 已修复 | 2026-07-13 |
+| modeling | 字段分组重命名报 400：fieldGroupApi.update 用 PUT 只发 {name}，但 FieldGroupSerializer.domain 非 read_only 触发 domain 必填校验 | ✅ 已修复（前端改 PATCH 部分更新） | 2026-07-23 |
+| archive | 档案 schema 字段口径/分组与建模脱节：_field_released 无三分类口径致 18 个未分配字段混入；改过记录不置顶 | ✅ 已修复（门控收口三分类+分组排序+unsynced置顶，详见 debug-diary-archive BUG-2026-0728-03） | 2026-07-28 |
+
+## 产出文件索引
+
+| 文件 | 说明 |
+|------|------|
+| `output/reqa/requirements.json` | 18条需求定义（含 REQ-018 MDM 主数据存活机制） |
+| `output/reqa/storylines/` | 18条故事线（含 REQ-018） |
+| `output/reqa/brainstorm.md` | 头脑风暴 |
+| `output/reqa/business-flow.md` | 业务流程图（含流程四：MDM 存活裁决与冲突审查） |
+| `output/reqa/concept-feature-list.md` | 53项功能清单（含 F-114~F-119 MDM 相关） |
+| `output/reqa/concept-architecture.md` | 概念架构+追溯矩阵 |
+| `output/darc/glossary.md` | 术语表 |
+| `output/darc/design-diary-modeling.md` | modeling模块详细设计 |
+| `output/darc/design-diary-archive.md` | archive模块详细设计 |
+| `output/darc/dev-diary-archive.md` | archive模块开发日记（MDM 第6/7批关键数据流与实现） |
+| `output/uxqa/ux-review-modeling.md` | modeling模块 UXQA 评审报告 |
+| `output/uxqa/ux-review-archive.md` | 档案与主表架构 UXQA 评审报告 |
+| `output/uxqa/rectification-list.md` | 整改清单（R-001~R-031 全部闭环；第九十轮 21 项含 R-024 已隔离待确认删除） |

@@ -1,0 +1,37 @@
+# 项目路由索引
+
+> 自动生成，用于追溯和状态管理
+
+---
+
+## REQA 产出文件
+
+| 文件 | 路径 | 状态 |
+|------|------|------|
+| 需求文档 | `output/reqa/requirements.json` | ✅ 已完成 |
+| 故事线 | `output/reqa/storylines/` | ✅ 12条已完成 |
+| 头脑风暴 | `output/reqa/brainstorm.md` | ✅ 已完成 |
+| 业务流程 | `output/reqa/business-flow.md` | ✅ 已完成 |
+| 功能清单 | `output/reqa/concept-feature-list.md` | ✅ 已完成 |
+| 概念架构 | `output/reqa/concept-architecture.md` | ✅ 已完成 |
+
+---
+
+## DARC 产出文件
+
+| 文件 | 路径 | 状态 |
+|------|------|------|
+| 术语表 | `output/darc/glossary.md` | ✅ 已完成 |
+| 设计日记 - modeling | `output/darc/design-diary-modeling.md` | ✅ 已完成 |
+| 设计日记 - archive | `output/darc/design-diary-archive.md` | ✅ 已完成 |
+
+---
+
+## 模块注册
+
+| 模块代号 | 模块名称 | 状态 |
+|----------|----------|------|
+| modeling | 主数据建模引擎 | 开发中（v7 StandardField 架构重构完成） |
+| archive | 档案维护中心 | 详细设计完成 |
+| auth | 权限与接口管理 | 待设计 |
+| quality | 质量规则引擎 | 待设计 |

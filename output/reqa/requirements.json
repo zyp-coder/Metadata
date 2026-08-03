@@ -1,0 +1,809 @@
+{
+  "requirements": [
+    {
+      "req_id": "REQ-013",
+      "title": "域→档案创建链路",
+      "description": "数据管理员在域管理页面点击「新建档案」按钮，系统将该域的标准模型（StandardField）转化为档案配置，生成档案入口放入档案列表。一个域只能创建一个档案。",
+      "scenarios": [
+        {
+          "when": "域已完成字段管理（有标准字段）",
+          "who": "数据管理员",
+          "where": "域管理-域列表页",
+          "action": "点击「新建档案」按钮",
+          "outcome": "系统创建档案配置，跳转到档案列表页，该档案可被业务人员使用",
+          "acceptance_criteria": [
+            "### Scenario: 正常创建档案 — 域列表出现「新建档案」按钮，点击后档案列表新增一条记录，状态为「草稿」",
+            "### Scenario: 域已创建档案 — 「新建档案」按钮置灰或隐藏，防止重复创建"
+          ]
+        },
+        {
+          "when": "域尚未完成字段管理（无标准字段）",
+          "who": "数据管理员",
+          "where": "域管理-域列表页",
+          "action": "点击「新建档案」按钮",
+          "outcome": "系统提示「请先完成字段管理」，阻止创建",
+          "acceptance_criteria": [
+            "### Scenario: 无标准字段时创建 — 弹出提示「请先完成字段管理配置标准字段」，不创建档案"
+          ]
+        }
+      ],
+      "business_rules": [
+        {
+          "rule_id": "BR-013-1",
+          "description": "一个域只能创建一个档案，重复创建时阻止",
+          "exception_handling": "提示用户该域已有档案，可跳转到档案列表"
+        },
+        {
+          "rule_id": "BR-013-2",
+          "description": "创建档案时，读取域下所有 StandardField 作为档案字段元数据",
+          "exception_handling": "无标准字段时阻止创建"
+        }
+      ],
+      "business_value": {
+        "pain_point": "档案与模型脱节，业务人员无法基于标准模型维护主数据",
+        "expected_improvement": "档案自动继承标准模型，保证模型与档案一致性"
+      },
+      "dependencies": ["modeling（StandardField 元数据）"]
+    },
+    {
+      "req_id": "REQ-014",
+      "title": "档案数据维护与同步",
+      "description": "业务人员在档案页面维护主数据（增删改查），档案数据本地存储。用户可手动点击「同步」按钮，将档案数据推送到关联的数据源物理表。同步前进行冲突检测，冲突时由用户决策。",
+      "scenarios": [
+        {
+          "when": "档案已创建且有标准字段",
+          "who": "业务人员",
+          "where": "档案列表→档案详情页",
+          "action": "点击「新增」填写表单提交",
+          "outcome": "档案记录创建成功，本地存储，生成版本快照和操作日志",
+          "acceptance_criteria": [
+            "### Scenario: 新增档案记录 — 表单按字段分组展示，提交后记录入库，版本号=1"
+          ]
+        },
+        {
+          "when": "档案记录已存在",
+          "who": "业务人员",
+          "where": "档案详情页",
+          "action": "修改数据并保存",
+          "outcome": "记录更新，生成新版本快照，记录操作日志",
+          "acceptance_criteria": [
+            "### Scenario: 编辑档案记录 — 保存后版本号+1，变更字段记录到日志"
+          ]
+        },
+        {
+          "when": "用户点击「同步到物理表」",
+          "who": "业务人员",
+          "where": "档案详情页或列表页",
+          "action": "选择一条或多条档案记录，点击同步",
+          "outcome": "系统检测冲突，无冲突则同步；有冲突则展示冲突列表让用户决策",
+          "acceptance_criteria": [
+            "### Scenario: 无冲突同步 — 档案数据写入所有关联物理表，同步状态显示成功",
+            "### Scenario: 有冲突同步 — 弹出冲突列表，用户逐条选择「保留档案/保留物理表/跳过」",
+            "### Scenario: 同步失败 — 记录失败原因，不影响其他记录"
+          ]
+        }
+      ],
+      "business_rules": [
+        {
+          "rule_id": "BR-014-1",
+          "description": "档案数据本地存储，同步是异步推送操作",
+          "exception_handling": "同步失败不影响档案本地数据"
+        },
+        {
+          "rule_id": "BR-014-2",
+          "description": "同步前必须进行冲突检测（物理表已有数据 vs 档案数据）",
+          "exception_handling": "冲突时展示冲突详情，用户逐条决策"
+        },
+        {
+          "rule_id": "BR-014-3",
+          "description": "同步按记录粒度：选择某条档案记录，同步到该记录关联的所有物理表",
+          "exception_handling": "某张物理表同步失败不影响其他表"
+        }
+      ],
+      "business_value": {
+        "pain_point": "主数据分散在多个物理表，维护困难，数据不一致",
+        "expected_improvement": "统一档案入口维护，按需同步到各物理表，保证数据一致性"
+      },
+      "dependencies": ["modeling（数据源连接、物理表结构）"]
+    },
+    {
+      "req_id": "REQ-015",
+      "title": "档案版本管理与定版",
+      "description": "档案支持完整版本管理，每次修改生成版本快照。用户可「定版」某个版本，定版后该版本锁定不可修改。未定版时可回滚到任意历史版本。支持操作日志追溯所有变更。",
+      "scenarios": [
+        {
+          "when": "档案记录已修改",
+          "who": "业务人员",
+          "where": "档案详情页→版本历史",
+          "action": "查看版本列表",
+          "outcome": "展示所有历史版本（版本号、操作人、时间、变更摘要）",
+          "acceptance_criteria": [
+            "### Scenario: 查看版本列表 — 按版本号倒序展示，每条显示操作人和变更字段数"
+          ]
+        },
+        {
+          "when": "用户想定版当前版本",
+          "who": "业务人员",
+          "where": "版本历史页",
+          "action": "点击「定版」按钮",
+          "outcome": "当前版本标记为「已定版」，锁定不可修改",
+          "acceptance_criteria": [
+            "### Scenario: 定版操作 — 版本状态变为「已定版」，编辑按钮置灰",
+            "### Scenario: 已定版后修改 — 系统自动创建新版本（草稿状态），原版本不变"
+          ]
+        },
+        {
+          "when": "用户想回滚到历史版本",
+          "who": "业务人员",
+          "where": "版本历史页",
+          "action": "选择历史版本点击「回滚」",
+          "outcome": "数据恢复到选中版本，生成新版本快照，记录回滚操作日志",
+          "acceptance_criteria": [
+            "### Scenario: 回滚到未定版版本 — 数据恢复，版本号+1，操作类型=rollback",
+            "### Scenario: 回滚到已定版版本 — 允许回滚，但新版本为草稿状态"
+          ]
+        },
+        {
+          "when": "审计员查看操作日志",
+          "who": "审计员",
+          "where": "档案详情页→操作日志",
+          "action": "查看该记录的所有操作记录",
+          "outcome": "展示操作时间、操作人、操作类型、变更摘要",
+          "acceptance_criteria": [
+            "### Scenario: 查看操作日志 — 按时间倒序展示，支持按操作类型筛选"
+          ]
+        }
+      ],
+      "business_rules": [
+        {
+          "rule_id": "BR-015-1",
+          "description": "每次数据变更（增/删/改/回滚）自动生成版本快照",
+          "exception_handling": "版本快照失败时事务回滚，数据不变"
+        },
+        {
+          "rule_id": "BR-015-2",
+          "description": "定版后版本锁定，不可修改；后续修改自动创建新版本",
+          "exception_handling": "定版版本只能查看，不能编辑"
+        },
+        {
+          "rule_id": "BR-015-3",
+          "description": "操作日志只追加不修改，记录完整审计链路",
+          "exception_handling": "日志写入失败时事务回滚"
+        }
+      ],
+      "business_value": {
+        "pain_point": "数据变更无法追溯，无法定版锁定关键节点",
+        "expected_improvement": "完整版本历史+定版锁定+操作日志，满足审计和合规要求"
+      },
+      "dependencies": []
+    },
+    {
+      "req_id": "REQ-016",
+      "title": "档案模型变更同步",
+      "description": "主数据域变更（新增/删除/修改标准字段）后，档案 schema 不会自动更新。档案管理员可手动点击「同步模型变更」，系统先备份当前版本，然后应用新的 schema（新增字段补默认值、删除字段标记废弃）。",
+      "scenarios": [
+        {
+          "when": "域的标准字段发生变更",
+          "who": "档案管理员",
+          "where": "档案详情页",
+          "action": "点击「同步模型变更」按钮",
+          "outcome": "系统备份当前版本，应用新的 schema，生成变更记录",
+          "acceptance_criteria": [
+            "### Scenario: 正常同步 — 备份当前版本，新增字段出现在表单中，删除字段标记废弃",
+            "### Scenario: 无变更 — 提示「模型无变更」，不执行备份"
+          ]
+        }
+      ],
+      "business_rules": [
+        {
+          "rule_id": "BR-016-1",
+          "description": "同步前必须备份当前版本",
+          "exception_handling": "备份失败时中止同步"
+        },
+        {
+          "rule_id": "BR-016-2",
+          "description": "新增字段使用默认值填充，删除字段标记废弃但保留数据",
+          "exception_handling": "无默认值的必填字段需用户手动填写"
+        }
+      ],
+      "business_value": {
+        "pain_point": "域变更后档案 schema 不一致，数据无法正确展示或同步",
+        "expected_improvement": "手动同步+备份，保证档案数据完整性"
+      },
+      "dependencies": ["REQ-013"]
+    },
+    {
+      "req_id": "REQ-017",
+      "title": "计算字段配置与自动计算",
+      "description": "数据管理员在域的字段管理-计算字段分类下，通过Excel风格公式编辑器配置计算字段。计算字段可引用同域内基础字段和组合字段（{表名.字段名}语法），系统自动解析依赖关系构建DAG并检测循环依赖。配置后支持枚举试算验证公式正确性。计算结果物化存储参与档案消费，数据源同步后和记录编辑保存时自动触发重算。",
+      "scenarios": [
+        {
+          "when": "域已有基础字段和组合字段，需要派生新的业务字段",
+          "who": "数据管理员",
+          "where": "域管理→字段管理→左栏分类导航→计算字段",
+          "action": "点击新建计算字段，填写编码/名称，编写Excel风格公式（如 IF/CONCAT/SWITCH），选择引用字段",
+          "outcome": "系统自动解析公式依赖，通过循环检测后保存计算字段定义",
+          "acceptance_criteria": [
+            "### Scenario: 新建简单计算字段 — 编写IF公式引用基础字段，保存成功，依赖列表正确展示",
+            "### Scenario: 引用其他计算字段 — 公式引用已有计算字段，系统正确识别为二级依赖，执行顺序正确",
+            "### Scenario: 循环依赖检测 — A依赖B、B依赖A时，保存时报错提示循环依赖"
+          ]
+        },
+        {
+          "when": "计算字段公式编写完成，保存前需要验证",
+          "who": "数据管理员",
+          "where": "计算字段编辑界面→试算区域",
+          "action": "输入参数值（系统自动从去重值填充可选项）或使用自动笛卡尔积枚举，点击计算查看结果",
+          "outcome": "展示每组参数组合对应的计算结果，用户验证逻辑正确性",
+          "acceptance_criteria": [
+            "### Scenario: 单组参数试算 — 输入各依赖字段的值，点击计算，展示结果",
+            "### Scenario: 自动枚举试算 — 系统基于字段去重值自动生成所有组合，批量展示结果表格",
+            "### Scenario: 公式错误提示 — 公式语法错误或引用字段不存在时，试算报错并高亮错误位置"
+          ]
+        },
+        {
+          "when": "数据源同步拉取了新数据到档案",
+          "who": "系统（自动）",
+          "where": "后端sync-schema流程末尾",
+          "action": "同步完成后自动按DAG顺序批量重算该域所有计算字段",
+          "outcome": "所有档案记录的计算字段值更新为最新结果",
+          "acceptance_criteria": [
+            "### Scenario: 同步后自动重算 — sync-schema完成后，计算字段值基于最新数据更新",
+            "### Scenario: 依赖链正确 — A依赖B，B先算完再算A，结果正确"
+          ]
+        },
+        {
+          "when": "用户手动编辑并保存档案记录",
+          "who": "业务人员",
+          "where": "档案详情页→编辑保存",
+          "action": "保存记录时系统检测变更字段是否被计算字段依赖，是则实时重算",
+          "outcome": "保存后该记录的计算字段值立即更新",
+          "acceptance_criteria": [
+            "### Scenario: 编辑触发重算 — 修改基础字段A，依赖A的计算字段自动更新",
+            "### Scenario: 无关字段不触发 — 修改的字段不被任何计算字段依赖，不触发重算"
+          ]
+        }
+      ],
+      "business_rules": [
+        {
+          "rule_id": "BR-017-1",
+          "description": "公式函数遵循Excel命名规范（IF/AND/OR/CONCAT/ISBLANK/SWITCH/IFS/IFERROR/LEFT/RIGHT/MID/VLOOKUP/MAXIFS等）",
+          "exception_handling": "用户输入未支持的函数时提示可用函数列表"
+        },
+        {
+          "rule_id": "BR-017-2",
+          "description": "依赖关系自动解析：从公式中提取 {表名.字段名} 引用，构建DAG有向无环图",
+          "exception_handling": "检测到循环依赖时阻止保存并高亮循环链路"
+        },
+        {
+          "rule_id": "BR-017-3",
+          "description": "计算字段可依赖其他计算字段，系统按DAG拓扑排序确定执行顺序",
+          "exception_handling": "被依赖的计算字段被删除/停用时，依赖方标记为异常状态"
+        },
+        {
+          "rule_id": "BR-017-4",
+          "description": "枚举试算参数自动从字段distinct_values填充可选项，支持自动笛卡尔积和手动输入",
+          "exception_handling": "字段无去重值缓存时提示先刷新去重数据"
+        },
+        {
+          "rule_id": "BR-017-5",
+          "description": "计算结果物化存储到档案记录中，可随档案同步到数据源物理表",
+          "exception_handling": "计算异常时该字段值置null并记录错误"
+        },
+        {
+          "rule_id": "BR-017-6",
+          "description": "自动触发重算：数据源同步后批量重算 + 记录编辑保存时实时重算",
+          "exception_handling": "重算失败时记录错误日志，不阻塞主流程"
+        }
+      ],
+      "business_value": {
+        "pain_point": "业务派生字段逻辑散落在ETL SQL中，修改需开发人员介入，无法可视化验证",
+        "expected_improvement": "业务人员通过Excel公式风格配置派生逻辑，试算验证后自动执行，降低ETL维护成本"
+      },
+      "dependencies": ["REQ-001（基础字段元数据）", "REQ-014（档案数据同步触发重算）"]
+    }
+  ]
+}
+{
+  "requirements": [
+    {
+      "req_id": "REQ-001",
+      "title": "主数据建模引擎",
+      "description": "用户通过主流程完成主数据模型定义：建域→建表（分数据源表/本地表）→配字段→AI字段分类+冗余检查→配置字段属性→配置字段映射关系",
+      "scenarios": [
+        {
+          "when": "企业需要管理新的主数据类型（如新增'供应商域'）",
+          "who": "数据管理员",
+          "where": "主数据建模页面",
+          "action": "创建新域，在域下创建实体表（选择数据源表指向外部库或本地表由系统建表），配置字段，AI分类并检查冗余，配置字段属性，配置字段映射关系",
+          "outcome": "系统生成完整的主数据模型，可被下游档案模块消费"
+        },
+        {
+          "when": "已有域需要接入外部系统的主数据",
+          "who": "数据管理员",
+          "where": "域下建表页面",
+          "action": "创建数据源表，配置外部数据库连接信息和表映射",
+          "outcome": "主数据系统直接读取外部库的表结构作为模型"
+        },
+        {
+          "when": "数据管理员需要联合主键关系",
+          "who": "数据管理员",
+          "where": "字段映射配置页面",
+          "action": "选择本表的一个或多个字段，映射到目标表的对应字段",
+          "outcome": "表间关联关系建立，支持联合主键"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-001", "description": "域是顶层隔离单元，域内表、关系、字段互不干扰", "exception_handling": "跨域引用需通过显式的跨域关联配置" },
+        { "rule_id": "BR-002", "description": "表类型分两种：数据源表（指向外部数据库表）和本地数据表（系统建表）", "exception_handling": "" },
+        { "rule_id": "BR-003", "description": "表间关系通过字段映射实现，支持单字段和多字段（联合主键）映射", "exception_handling": "映射字段类型不兼容时提示" },
+        { "rule_id": "BR-004", "description": "字段不允许物理删除，只能作废", "exception_handling": "作废后字段在档案界面隐藏、存量数据保留" }
+      ],
+      "business_value": {
+        "pain_point": "传统MDM建模依赖开发人员，变更周期长、响应慢",
+        "expected_improvement": "业务/数据管理员可自助完成建模，变更即时生效"
+      },
+      "dependencies": [],
+      "validation_criteria": [
+        { "criteria": "建模全流程可走通", "metric": "建域→建表→配字段→分类+冗余检查→属性配置→字段映射 六步无阻断" },
+        { "criteria": "数据源表可正常读取外部库", "metric": "配置外部库连接后成功拉取表结构" },
+        { "criteria": "字段映射正确", "metric": "联合主键映射后关系正确建立" }
+      ],
+      "assumptions": [
+        "采用逻辑建模方式（元数据+JSON存储），保证模型变更的灵活性",
+        "先按单组织设计，架构预留多租户扩展能力",
+        "用户认证先自建账号体系"
+      ]
+    },
+    {
+      "req_id": "REQ-002",
+      "title": "AI字段分类与冗余检查",
+      "description": "配置字段后，AI根据字段名称、类型、语义自动将字段归入业务分组，并识别可能冗余的字段给出建议；分类结果驱动档案页面的分组展示",
+      "scenarios": [
+        {
+          "when": "数据管理员配完一批字段后",
+          "who": "数据管理员",
+          "where": "字段配置页面",
+          "action": "点击AI分类按钮，系统自动将字段归入业务分组（如基本信息、财务信息、联系信息等），同时检测名称相似或含义重复的字段标记为疑似冗余",
+          "outcome": "字段按分类分组展示，冗余字段高亮标记，管理员可调整分类和确认/排除冗余"
+        },
+        {
+          "when": "业务人员打开档案维护页面",
+          "who": "业务人员",
+          "where": "档案维护页面",
+          "action": "档案信息按字段分类分组展示（Tab页或折叠面板）",
+          "outcome": "业务人员按分组浏览和填写，体验清晰"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-005", "description": "AI分类为建议，用户可手动调整、合并、重命名分类", "exception_handling": "用户拒绝AI分类时，保留原始顺序" },
+        { "rule_id": "BR-006", "description": "分类结果持久化，后续新增字段时AI参考已有分类体系", "exception_handling": "新增字段无法归类时放入'其他'分组" },
+        { "rule_id": "BR-007", "description": "AI在分类同时检测字段冗余（名称相似、语义重复等），给出建议", "exception_handling": "用户可确认冗余（标记为废弃）或排除（不再提示）" }
+      ],
+      "business_value": {
+        "pain_point": "字段平铺展示认知负担重，且字段可能有冗余导致维护混乱",
+        "expected_improvement": "分组展示降低认知负荷，AI帮助发现冗余字段"
+      },
+      "dependencies": ["REQ-001"],
+      "validation_criteria": [
+        { "criteria": "AI分类准确率", "metric": "首次分类准确率≥80%" },
+        { "criteria": "分类可调整", "metric": "用户可拖拽字段到不同分组、重命名分组" },
+        { "criteria": "冗余检测可用", "metric": "明显冗余字段被标记" }
+      ]
+    },
+    {
+      "req_id": "REQ-003",
+      "title": "档案维护",
+      "description": "业务人员在系统上直接维护主数据档案（增删改查），档案信息按AI分类分组展示，支持角色权限控制",
+      "scenarios": [
+        {
+          "when": "需要新增一条主数据记录（如新增供应商）",
+          "who": "业务人员",
+          "where": "档案维护页面",
+          "action": "按分组填写表单，提交保存",
+          "outcome": "主数据记录创建成功，可在列表中查看"
+        },
+        {
+          "when": "需要修改已有主数据",
+          "who": "业务人员",
+          "where": "档案维护页面",
+          "action": "搜索找到记录，修改字段值，保存",
+          "outcome": "修改生效，变更记录可追溯"
+        },
+        {
+          "when": "需要查看主数据详情",
+          "who": "业务人员",
+          "where": "档案列表/详情页",
+          "action": "搜索、筛选、查看档案详情",
+          "outcome": "按分类分组展示完整档案信息"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-008", "description": "档案页面字段按AI分类结果分组展示（Tab页或折叠面板）", "exception_handling": "未分类字段统一放入'其他'分组" },
+        { "rule_id": "BR-009", "description": "所有变更操作记录操作日志（谁、何时、改了什么）", "exception_handling": "" },
+        { "rule_id": "BR-010", "description": "支持列表搜索和多条件筛选", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "业务人员依赖IT才能维护主数据，效率低、响应慢",
+        "expected_improvement": "业务人员自助维护，响应速度从天级降到分钟级"
+      },
+      "dependencies": ["REQ-001", "REQ-002"],
+      "validation_criteria": [
+        { "criteria": "增删改查全流程可用", "metric": "四种操作均可正常执行" },
+        { "criteria": "分组展示正确", "metric": "档案字段按分类正确分组" }
+      ]
+    },
+    {
+      "req_id": "REQ-004",
+      "title": "档案导入导出",
+      "description": "支持通过Excel批量导入主数据档案，也支持将档案数据导出为Excel",
+      "scenarios": [
+        {
+          "when": "需要批量录入大量主数据（如初次上线导入500个供应商）",
+          "who": "业务人员",
+          "where": "档案维护页面",
+          "action": "下载导入模板，填写数据后上传Excel",
+          "outcome": "系统校验数据合法性，校验通过后批量导入"
+        },
+        {
+          "when": "需要将档案数据导出做线下分析或上报",
+          "who": "业务人员",
+          "where": "档案列表页面",
+          "action": "选择导出范围（全部/筛选结果/勾选记录），下载Excel",
+          "outcome": "生成Excel文件，字段按分类分组排列"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-011", "description": "导入前系统自动校验数据合法性（必填、类型、枚举值等）", "exception_handling": "校验失败的行标记错误原因，支持修正后重新导入" },
+        { "rule_id": "BR-012", "description": "导入模板根据当前模型字段自动生成", "exception_handling": "" },
+        { "rule_id": "BR-013", "description": "导出Excel按字段分类分组排列", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "大量主数据逐条录入效率极低",
+        "expected_improvement": "批量导入将初始化数据录入效率提升10倍以上"
+      },
+      "dependencies": ["REQ-001", "REQ-002", "REQ-003"],
+      "validation_criteria": [
+        { "criteria": "导入成功率", "metric": "合法数据100%导入成功" },
+        { "criteria": "错误提示准确", "metric": "非法数据100%标记错误原因" }
+      ]
+    },
+    {
+      "req_id": "REQ-005",
+      "title": "接口开放与权限配置",
+      "description": "为档案配置对外数据接口（API开放范围）和角色权限（谁能看、谁能改、谁能审批）",
+      "scenarios": [
+        {
+          "when": "需要将主数据开放给下游系统消费",
+          "who": "系统管理员",
+          "where": "接口配置页面",
+          "action": "选择要开放的档案、配置读写权限、生成API密钥",
+          "outcome": "下游系统可通过API读写主数据"
+        },
+        {
+          "when": "需要控制不同角色的操作权限",
+          "who": "系统管理员",
+          "where": "权限配置页面",
+          "action": "创建角色，分配对不同档案的查看/编辑/删除/审批权限",
+          "outcome": "不同角色登录后可见的档案和可执行的操作不同"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-014", "description": "权限粒度到档案级别（角色×档案×操作）", "exception_handling": "" },
+        { "rule_id": "BR-015", "description": "接口开放需配置认证方式（API Key/OAuth）", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "主数据无法安全地开放给下游系统，角色权限无法灵活控制",
+        "expected_improvement": "接口标准化开放，权限精细化管控"
+      },
+      "dependencies": ["REQ-003"],
+      "validation_criteria": [
+        { "criteria": "权限隔离有效", "metric": "无权限操作100%被拦截" },
+        { "criteria": "接口可用", "metric": "API调用成功率≥99%" }
+      ]
+    },
+    {
+      "req_id": "REQ-006",
+      "title": "数据质量规则引擎（AI驱动）",
+      "description": "用户从域入口进入，系统已去掉手动规则配置，全部通过AI语义配置规则；支持规则执行调度、违规告警和企微通知",
+      "scenarios": [
+        {
+          "when": "数据管理员需要为某个域配置质量规则",
+          "who": "数据管理员",
+          "where": "域详情页→质量规则页",
+          "action": "进入目标域，查看已有规则列表，点击'新增AI规则配置'或'批量创建规则'",
+          "outcome": "进入AI规则配置界面或批量建议列表"
+        },
+        {
+          "when": "需要保证供应商统一社会信用代码不重复",
+          "who": "数据管理员",
+          "where": "AI规则配置界面",
+          "action": "AI根据语义转化为唯一性规则，配置执行频率和通知对象",
+          "outcome": "系统定期检查，发现重复时通知相关人员"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-016", "description": "规则入口从域进入，选择域后列出该域所有已创建的规则", "exception_handling": "" },
+        { "rule_id": "BR-017", "description": "所有规则必须通过AI语义配置，不支持手动写表达式", "exception_handling": "AI转化失败时提示用户调整语义描述" },
+        { "rule_id": "BR-018", "description": "规则执行频率可配置（实时/每日/每周/自定义）", "exception_handling": "" },
+        { "rule_id": "BR-019", "description": "规则触发后通过企业微信通知指定用户或群组", "exception_handling": "企微接口异常时记录日志，待恢复后补发" }
+      ],
+      "business_value": {
+        "pain_point": "数据质量规则配置依赖技术能力，业务人员用不了",
+        "expected_improvement": "全AI驱动，业务人员'说话就能配规则'"
+      },
+      "dependencies": ["REQ-001"],
+      "validation_criteria": [
+        { "criteria": "规则执行准确", "metric": "规则检查结果100%准确" },
+        { "criteria": "通知及时", "metric": "规则触发后5分钟内收到通知" }
+      ]
+    },
+    {
+      "req_id": "REQ-007",
+      "title": "AI语义规则配置与批量生成",
+      "description": "支持AI对话式规则配置和批量规则创建：展示AI转译逻辑和技术语义、支持对话记录查看；批量创建规则仅在模型无规则时可使用",
+      "scenarios": [
+        {
+          "when": "数据管理员需要新增一条质量规则",
+          "who": "数据管理员",
+          "where": "域质量规则页→AI规则配置界面",
+          "action": "进入AI对话框，输入自然语言描述（如'供应商名称不能包含特殊字符，长度不超过100'），AI实时展示转译逻辑和生成的技术语义表达式，用户确认后保存",
+          "outcome": "规则创建成功，可在规则列表中看到"
+        },
+        {
+          "when": "新建一个域且尚未配置任何规则",
+          "who": "数据管理员",
+          "where": "域质量规则页",
+          "action": "点击'批量创建规则'，系统调用AI分析域模型结构，生成建议规则列表，用户点击每条建议可进入AI配置界面细化",
+          "outcome": "批量建议规则生成在列表中，用户逐条查看和完善"
+        },
+        {
+          "when": "数据管理员需要回顾之前用AI配置规则的对话过程",
+          "who": "数据管理员",
+          "where": "规则详情页",
+          "action": "点击'查看配置记录'，展示该条规则创建时的AI对话历史",
+          "outcome": "完整的AI对话记录可追溯"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-020", "description": "AI生成的规则必须经用户确认后才生效", "exception_handling": "用户可修改描述重新生成，或编辑AI生成的结果" },
+        { "rule_id": "BR-021", "description": "AI批量创建规则按钮仅在当前域没有任何已启用规则时可点击", "exception_handling": "已有规则时按钮置灰，提示'已有规则，请逐条新增'" },
+        { "rule_id": "BR-022", "description": "AI展示转译逻辑：自然语言→系统理解→规则表达式，逐步展示", "exception_handling": "" },
+        { "rule_id": "BR-023", "description": "AI对话记录持久化，支持历史查看", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "规则配置门槛高，需懂语法；新域搭建规则体系耗时",
+        "expected_improvement": "对话式配置零门槛，批量创建效率提升"
+      },
+      "dependencies": ["REQ-006"],
+      "validation_criteria": [
+        { "criteria": "语义规则转化率", "metric": "自然语言→规则的转化成功率≥85%" },
+        { "criteria": "批量创建条件正确", "metric": "有规则时批量按钮正确置灰" },
+        { "criteria": "对话记录可追溯", "metric": "规则创建时的AI对话完整可查" }
+      ]
+    },
+    {
+      "req_id": "REQ-008",
+      "title": "每日AI质量总结",
+      "description": "AI每日自动汇总全量质量检查结果，生成问题摘要、趋势分析、优先级建议，推送给管理者",
+      "scenarios": [
+        {
+          "when": "每日早晨",
+          "who": "数据管理者/部门负责人",
+          "where": "企业微信消息",
+          "action": "收到AI生成的质量日报",
+          "outcome": "了解昨日数据质量概况、新增问题、趋势变化、建议优先处理项"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-024", "description": "日报内容包括：问题总数、新增/已修复、趋势对比、优先级建议", "exception_handling": "" },
+        { "rule_id": "BR-025", "description": "推送时间可配置，推送对象可配置", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "管理者无法快速了解数据质量全貌，问题发现滞后",
+        "expected_improvement": "每日主动推送，问题发现从被动变主动"
+      },
+      "dependencies": ["REQ-006", "REQ-007"],
+      "validation_criteria": [
+        { "criteria": "日报准时推送", "metric": "每日按时生成并推送" },
+        { "criteria": "内容有价值", "metric": "管理者反馈日报对决策有帮助" }
+      ]
+    },
+    {
+      "req_id": "REQ-009",
+      "title": "数据版本管理与回滚",
+      "description": "每次档案数据修改时自动保留历史版本快照，支持查看变更记录、对比差异、回滚到指定版本",
+      "scenarios": [
+        {
+          "when": "业务人员发现某条主数据被误修改",
+          "who": "业务人员/数据管理员",
+          "where": "档案详情页",
+          "action": "查看变更历史，找到上一个正确版本，点击回滚",
+          "outcome": "数据恢复到指定版本，回滚操作记入日志"
+        },
+        {
+          "when": "审计员需要追溯某条数据的全部变更记录",
+          "who": "审计员",
+          "where": "档案变更历史页",
+          "action": "查看每次变更的快照、操作人、操作时间、变更前后对比",
+          "outcome": "完整的变更链条展示"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-026", "description": "每次新增/修改操作自动生成版本快照", "exception_handling": "导入操作每次导入生成一个版本批次" },
+        { "rule_id": "BR-027", "description": "回滚操作本身也生成一次新版本（不覆盖历史）", "exception_handling": "" },
+        { "rule_id": "BR-028", "description": "版本列表按时间倒序排列，展示版本号、操作人、操作时间、变更摘要", "exception_handling": "" },
+        { "rule_id": "BR-029", "description": "版本支持差异对比（高亮显示改动的字段）", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "误操作无法恢复，数据安全性差",
+        "expected_improvement": "任意时间点可回滚，数据安全性显著提升"
+      },
+      "dependencies": ["REQ-003"],
+      "validation_criteria": [
+        { "criteria": "版本自动生成", "metric": "每次修改生成一个新版本" },
+        { "criteria": "回滚正确", "metric": "回滚后数据与目标版本完全一致" }
+      ]
+    },
+    {
+      "req_id": "REQ-010",
+      "title": "字段属性配置界面",
+      "description": "AI字段分类和冗余检查完成后，提供一个专门的界面让用户轻松配置每个字段的可填内容、数据类型、校验规则等属性",
+      "scenarios": [
+        {
+          "when": "数据管理员完成AI字段分类后",
+          "who": "数据管理员",
+          "where": "字段属性配置界面",
+          "action": "选择一个字段，配置其类型（字符串/数字/日期/枚举/布尔等）、可填内容（如枚举值列表）、长度、必填、默认值、校验规则",
+          "outcome": "字段属性配置完成，档案维护页面自动反映配置"
+        },
+        {
+          "when": "数据管理员需要精细化控制字段的填写方式",
+          "who": "数据管理员",
+          "where": "字段属性配置界面",
+          "action": "配置字段为枚举类型，逐条添加枚举选项值",
+          "outcome": "档案页面该字段变为下拉选择框，只能选已配置的值"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-030", "description": "字段属性包括：名称、类型、长度、必填、默认值、校验规则、枚举值列表", "exception_handling": "" },
+        { "rule_id": "BR-031", "description": "枚举类型的字段在档案页面自动渲染为下拉选择框", "exception_handling": "" },
+        { "rule_id": "BR-032", "description": "字段类型变更时自动检查存量数据兼容性", "exception_handling": "不兼容时阻止并提示冲突记录" }
+      ],
+      "business_value": {
+        "pain_point": "字段属性分散配置，缺乏统一的配置界面，用户体验差",
+        "expected_improvement": "AI分类后统一界面集中配字段属性，操作流畅"
+      },
+      "dependencies": ["REQ-001", "REQ-002"],
+      "validation_criteria": [
+        { "criteria": "属性配置生效", "metric": "配置后档案页面正确渲染" },
+        { "criteria": "枚举值正确", "metric": "枚举字段只能选预设值" }
+      ]
+    },
+    {
+      "req_id": "REQ-011",
+      "title": "模型文档导出",
+      "description": "将主数据模型定义（域、表、关系、字段、属性）导出为结构化文档，方便团队协作和跨系统沟通",
+      "scenarios": [
+        {
+          "when": "需要将主数据模型文档交付给下游系统开发团队",
+          "who": "数据管理员",
+          "where": "建模页面/域详情页",
+          "action": "选择目标域，点击'导出模型文档'",
+          "outcome": "生成PDF或Markdown文档，包含域信息、所有表及其字段定义、字段映射关系"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-033", "description": "文档包含：域概览、表列表、字段详情（名称/类型/长度/必填/默认值/校验规则/枚举值）、字段映射关系", "exception_handling": "" },
+        { "rule_id": "BR-034", "description": "支持导出格式：PDF（适合交付）、Markdown（适合嵌入Wiki）", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "模型信息口头传递或散落在代码中，协作困难",
+        "expected_improvement": "一键导出结构化文档，团队沟通效率提升"
+      },
+      "dependencies": ["REQ-001"],
+      "validation_criteria": [
+        { "criteria": "文档完整性", "metric": "模型内容100%体现在文档中" }
+      ]
+    },
+    {
+      "req_id": "REQ-012",
+      "title": "审计角色与日志查询",
+      "description": "提供独立的只读审计角色，专门查看操作日志和档案变更历史，不可触碰业务数据",
+      "scenarios": [
+        {
+          "when": "审计员需要审查某段时间内所有档案变更记录",
+          "who": "审计员",
+          "where": "审计日志页面",
+          "action": "按时间范围、操作人、档案类型筛选日志",
+          "outcome": "展示符合条件的操作日志列表（时间、操作人、操作类型、操作摘要）"
+        },
+        {
+          "when": "审计员需要查看某条数据的完整变更链条",
+          "who": "审计员",
+          "where": "审计日志详情页",
+          "action": "点击一条日志记录查看变更详情（修改了哪些字段、旧值→新值）",
+          "outcome": "完整的变更对比展示"
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-035", "description": "审计员角色只读，不可新增/修改/删除任何数据", "exception_handling": "尝试写操作时返回403" },
+        { "rule_id": "BR-036", "description": "日志保留策略可配置（默认保留2年）", "exception_handling": "" },
+        { "rule_id": "BR-037", "description": "日志支持导出为Excel", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "数据变更无迹可查，合规审计困难",
+        "expected_improvement": "全量变更可追溯，满足合规审计要求"
+      },
+      "dependencies": ["REQ-003", "REQ-005"],
+      "validation_criteria": [
+        { "criteria": "审计员只读", "metric": "所有写操作100%被拒绝" },
+        { "criteria": "日志完整", "metric": "所有操作均有日志记录" }
+      ]
+    },
+    {
+      "req_id": "REQ-018",
+      "title": "MDM 主数据存活机制（Golden Record + 修正保护 + 冲突审查 + 字段级回写）",
+      "description": "档案记录作为 Golden Record，同步拉数时按字段级存活规则（人工修正 > 源优先级 > 最新时间戳）逐字段裁决取值；人工修正过的字段受保护不被源覆盖，所有字段值差异均生成冲突项进入人工审查队列，人工逐项裁决「保留档案值/接受源值」；裁决保留档案值后可手动触发字段级回写源系统（现有 sync-to-source 从记录级重做为字段级）。",
+      "scenarios": [
+        {
+          "when": "同步拉数时源值与档案值不一致，且该字段无人工修正记录",
+          "who": "系统",
+          "where": "档案详情页-同步拉数",
+          "action": "执行 sync-schema 拉数",
+          "outcome": "差异字段不直接覆盖，生成冲突项进入审查队列，档案值维持原状",
+          "acceptance_criteria": [
+            "### Scenario: 无修正字段差异 — 同步后档案值不变，冲突队列新增一条待审查项（字段/档案值/源值/源表）",
+            "### Scenario: 源值与档案值一致 — 不产生冲突项，不重复入队"
+          ]
+        },
+        {
+          "when": "同步拉数时差异字段存在人工修正记录（修正保护标记）",
+          "who": "系统",
+          "where": "档案详情页-同步拉数",
+          "action": "执行 sync-schema 拉数",
+          "outcome": "受保护字段绝不被覆盖，冲突项标记「修正保护」进入审查队列",
+          "acceptance_criteria": [
+            "### Scenario: 修正字段受保护 — 人工修正过的字段同步后值不变，冲突项带修正人/修正时间信息"
+          ]
+        },
+        {
+          "when": "冲突队列存在待审查项",
+          "who": "数据管理员",
+          "where": "档案详情页-冲突审查Tab",
+          "action": "逐项或批量裁决「保留档案值」或「接受源值」",
+          "outcome": "接受源值→档案字段更新并生成版本快照；保留档案值→字段加修正保护标记；冲突项闭环归档",
+          "acceptance_criteria": [
+            "### Scenario: 接受源值 — 档案字段更新为源值，版本+1，冲突项状态变「已裁决-接受源」",
+            "### Scenario: 保留档案值 — 字段记入修正保护（override），后续同步不再覆盖，冲突项状态变「已裁决-保留」",
+            "### Scenario: 批量裁决 — 支持按字段/按源表维度批量选择后一键裁决"
+          ]
+        },
+        {
+          "when": "人工裁决「保留档案值」后需要将正确值回写源系统",
+          "who": "数据管理员",
+          "where": "档案详情页-同步到数据源",
+          "action": "手动触发字段级回写（两阶段：预检差异→确认执行）",
+          "outcome": "仅回写选中的差异字段到源表，而非整条记录覆盖；回写结果记同步日志",
+          "acceptance_criteria": [
+            "### Scenario: 字段级回写 — 预检展示字段级差异清单，用户可勾选字段，执行后源表仅勾选字段变更",
+            "### Scenario: 回写失败 — 失败字段明细进同步日志，不影响其他字段回写"
+          ]
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-018-1", "description": "存活规则三级优先：人工修正（override）> 源优先级 > 最新时间戳；粒度为字段级", "exception_handling": "无源优先级配置时退化为时间戳优先" },
+        { "rule_id": "BR-018-2", "description": "所有字段值差异均不自动覆盖，全部生成冲突项人工审查（用户选择：安全优先）", "exception_handling": "同一字段重复冲突只保留最新一条待审查项，旧项自动作废" },
+        { "rule_id": "BR-018-3", "description": "人工编辑档案字段即自动登记该字段的修正保护标记（含修正人/时间/原值）", "exception_handling": "接受源值裁决后解除该字段保护" },
+        { "rule_id": "BR-018-4", "description": "冲突裁决产生的档案变更必须生成版本快照与操作日志", "exception_handling": "" },
+        { "rule_id": "BR-018-5", "description": "回写源系统为字段级（现有记录级 sync-to-source 重做），保持两阶段确认，仅手动触发", "exception_handling": "回写失败不回滚档案值，记录失败明细供重试" },
+        { "rule_id": "BR-018-6", "description": "字段级血缘：每个字段值记录来源（源表/人工/裁决）与更新时间", "exception_handling": "存量无血缘数据首次同步时补建" }
+      ],
+      "business_value": {
+        "pain_point": "sync-schema 拉数无条件覆盖档案，用户人工修正的正确值被源系统脏数据刷掉，无法保证主数据正确性",
+        "expected_improvement": "档案成为真正的 Golden Record：修正不丢失、冲突可追踪闭环、正确值可回写源系统形成治理闭环"
+      },
+      "dependencies": ["REQ-014（同步流程）", "REQ-015（版本快照）", "modeling（数据源元数据）"]
+    }
+  ]
+}
