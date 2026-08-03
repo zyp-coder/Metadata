@@ -4,7 +4,7 @@
 
 ## 当前会话状态
 
-- **当前阶段：**第九十轮 UXQA 全站交付验收已完成（21 项整改全部闭环）；待办：R-024 待用户确认删除 legacy/ 目录、ArchiveApi 鉴权强化、源优先级配置(BR-018-1)、血缘历史时间线
+- **当前阶段：**第九十一轮 better-harness 基础设施优化完成（Git 初始化 + 测试套件 + 交付验收标准）；待办：R-024 待用户确认删除 legacy/ 目录、ArchiveApi 鉴权强化、源优先级配置(BR-018-1)、血缘历史时间线
 - **活跃模块**：uxqa、archive、modeling
 
 
@@ -18,6 +18,7 @@
 
 | 轮次 | 日期 | 模块 | 功能标签 | 一句话摘要 | 完整性 | 确认点 |
 |------|------|------|----------|------------|--------|--------|
+| 第九十一轮 | 2026-08-03 | project | 基础设施、Git、测试、验收标准 | better-harness 报告 3 项优化：Git 初始化(236文件)+后端12冒烟测试+前端 vue-tsc 0 errors+交付验收标准 | 闸✓记✓拓✓ | 1问 |
 | 第九十轮 | 2026-07-25 | uxqa、archive、modeling、settings | 全站、交付验收、菜单、弹窗、scroll.x、死代码 | UXQA 全站17页交付验收巡检，21项整改(R-011~031)全部闭环，4批次执行 vue-tsc 0 errors | - | - |
 | 第八十九轮 | 2026-07-25 | archive | /archive/versions、/archive/5、回滚、变更日志、版本 | v17 回滚前端落地+回滚报错修复（旧进程未加载端点）+v17.1 记录列表「变更历史」入口弹窗 | - | - |
 | 第八十八轮 | 2026-07-30 | archive、modeling、uxqa、project | /modeling/domains/8/fields、/archive/5、同步、计算字段、版本 | 测试报告 7 项全栈整改（/modeling/domains/8/fields 3 项 + /archive/5 3 项… | - | - |

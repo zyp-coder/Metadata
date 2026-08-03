@@ -2,6 +2,24 @@
 
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
 
+### 第九十一轮（2026-08-03）标签：基础设施优化
+
+**来源**：better-harness 分析报告（`.qoder/better-harness/2026-08-03/111845-metadata002/findings.json`）
+
+**变更文件**：
+- 新建 `.gitignore`（49 行，覆盖 Python/Node/Django/IDE/OS 临时文件）
+- 新建 `backend/apps/modeling/tests.py`（56 行，3 个测试类 6 个用例）
+- 新建 `backend/apps/archive/tests.py`（62 行，3 个测试类 6 个用例）
+- 新建 `output/delivery-checklist.md`（36 行，9 项验收检查）
+
+**变更摘要**：
+- Git 初始化：`git init` + 初始提交（236 文件，34150 行）
+- 后端测试：12 个冒烟测试全部通过（模型导入/URL 解析/CRUD/403 拦截）
+- 前端类型检查：`vue-tsc --noEmit` 0 errors
+- 交付验收标准：3 类 9 项检查（自动化 P0 + 功能 P0 + 质量 P1）
+
+**状态**：完成
+
 ### 第六十五轮（2026-07-28）标签：测试报告
 
 - **更早操作**：2026-07-28 — 第六十五轮：测试报告 5 项（FormulaEditor）。①AI 区块与基础信息行间隔：`.ai-generate-block` margin-bottom 8→20px；②AI 生成携带全部引用：handleAiGenerate 改用 refUnion = selectedRefsForAi ∪ validationResult.references（已依赖）∪ unusedReferences（未引用），确保未在表达式中使用的字段也传给 AI 重新生成时考虑；③AI 生成完自动格式化：抽出纯函数 formatExpressionText(raw)（手动格式化与 AI 生成后复用），handleAiGenerate 设置表达式时直接过格式化；④未引用字段合并进依赖行：删除独立 unused-warn 警告条（模板+CSS 全删），dep-list 改为蓝 tag（已引用）+橙 tag（未引用，title 提示）同行展示，v-if 改为两者任一非空；⑤侧栏加宽：`.formula-sidebar` 580→720px、`.cascade-l1` 200→300px（表达式列不需过宽，空间让给字段引用，长表名不再截断）。验证：vue-tsc 0 errors、grep unused-warn 清零；浏览器实跑量化：间隔实测 20px、侧栏 720px、一级栏 300px、.unused-warn 查询为 null（截图工具超时未出图，尺寸均经 getBoundingClientRect 实测）
