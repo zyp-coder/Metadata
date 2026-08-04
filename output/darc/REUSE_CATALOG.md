@@ -41,3 +41,26 @@
 | formula_engine / computed_service / custom_functions / plugin_loader | backend/apps/modeling/*.py | 公式解析执行引擎、计算字段服务、内置函数、技术函数插件加载 |
 | excel_service | backend/apps/modeling/excel_service.py | Excel 预览/导入解析 |
 | _field_released / _generate_schema_from_domain | backend/apps/archive/views.py L23/L45 | 档案字段释放门控判断；从域模型生成档案 schema（模块私有约定 `_` 前缀） |
+
+## 六、测试基础设施
+| 名称 | 位置 | 用途 |
+|---|---|---|
+| modeling/tests.py | backend/apps/modeling/tests.py | 27 个测试：模型导入/URL 路由/Domain CRUD/Table CRUD/DataSource/FieldGroup |
+| archive/tests.py | backend/apps/archive/tests.py | 18 个测试：模型导入/URL 路由/Archive/Record/ChangeBatch/ChangeDetail/Api |
+| check-all.ps1 | scripts/check-all.ps1 | 一键全量检查：Django check + 45 测试 + vue-tsc + vite build |
+| pre-push hook | .githooks/pre-push | Git 推送前自动跑后端测试 + 前端类型检查 |
+
+**测试数据工厂模式**（setUp 复用）：
+```python
+# 域 + 表基础数据
+self.domain = Domain.objects.create(name='测试域', code='XXX')
+self.table = Table.objects.create(domain=self.domain, name='测试表', code='T1')
+
+# 档案 + 记录
+self.archive = Archive.objects.create(domain=self.domain, name='测试档案')
+self.record = ArchiveRecord.objects.create(archive=self.archive, data={}, created_by='system')
+
+# 变更批次 + 明细
+batch = ArchiveChangeBatch.objects.create(archive=self.archive, change_source='sync', operator='system')
+detail = ArchiveChangeDetail.objects.create(batch=batch, archive=self.archive, record=self.record, record_key='K1', change_type='updated', field_changes=[...])
+```

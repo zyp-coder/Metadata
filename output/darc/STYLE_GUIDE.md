@@ -63,3 +63,36 @@
 - Serializer 模式：ModelSerializer + 显式 `fields` 列表 + `read_only_fields`；关联名用 `serializers.CharField(source='domain.name', read_only=True)`；统计列用 `SerializerMethodField`；敏感字段 `write_only`（password）。
 - 路由：每 app 一个 `urls.py`，`DefaultRouter().register(r'kebab-case', ViewSet, basename=…)`；个别函数视图直接 `path()`（domain-change-stats）。
 - 模块级私有 helper 以 `_` 前缀放在 views.py 顶部（`_field_released`、`_generate_schema_from_domain`）。
+
+## 四、后端测试骨架（Django TestCase + DRF APIClient）
+来源：`apps/modeling/tests.py`、`apps/archive/tests.py`
+
+### 1. 文件组织
+- 每 app 一个 `tests.py`，按功能域分 class，class 命名 `XxxTest(TestCase)`
+- 测试方法命名：`test_<动作>_<预期结果>`（如 `test_create_domain`、`test_domain_code_unique`）
+- 每个 class 顶部 docstring 说明覆盖范围
+
+### 2. 测试分层（由浅到深，每层必过）
+| 层 | 内容 | 示例 |
+|---|---|---|
+| 模型导入 | `hasattr(model, '_meta')` | 验证模型结构完整可导入 |
+| URL 路由 | `reverse('xxx-list')` | 验证 API 端点可解析 |
+| 模型操作 | `Model.objects.create()` + 断言 | `__str__`、唯一约束、业务方法 |
+| API CRUD | `APIClient().post/get/patch/delete` | 状态码 + 数据断言 |
+| 业务逻辑 | 组合操作 + 状态流转 | set_as_primary、双层存储、版本追踪 |
+
+### 3. setUp 模式
+```python
+class XxxCRUDTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.domain = Domain.objects.create(name='测试域', code='XXX_TEST')
+        # 需要外键依赖时逐层建好
+```
+
+### 4. 关键约定
+- **禁止依赖真实外部服务**：测试用内存数据库（`manage.py test` 默认）
+- **API 测试用 APIClient**：`from rest_framework.test import APIClient`，不用 requests
+- **断言优先用精确匹配**：`assertEqual` > `assertIn` > `assertTrue`；状态码必断言
+- **403/400 测试必写**：权限拦截和唯一约束是高频回归点
+- **JSON 字段测试**：直接传 dict，Django TestCase 自动处理序列化

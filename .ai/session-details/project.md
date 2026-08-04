@@ -2,6 +2,23 @@
 
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
 
+### 第一百轮（2026-08-04）标签：测试扩展、CI、better-harness
+
+**来源**：better-harness 评分发现的 Medium 级问题（测试覆盖面浅）
+
+**变更文件**：
+- 重写 `backend/apps/modeling/tests.py`（171 行，27 个测试）
+- 重写 `backend/apps/archive/tests.py`（186 行，18 个测试）
+
+**变更摘要**：
+- 测试覆盖从 12 扩展到 45（33 个新增）
+- modeling 新增：Table CRUD（含域外键）、唯一约束、set_as_primary 逻辑、DataSource CRUD、FieldGroup 嵌套与后代查询
+- archive 新增：Archive 创建与 OneToOne 约束、ArchiveRecord 版本追踪/双层存储/状态转换、ChangeBatch/ChangeDetail 创建（正确字段：stats JSONField、field_changes JSONField）、ArchiveApi 创建与路径唯一性
+- 修正 6 个失败：URL 名称（data-source-list/field-group-list）、模型字段（无 description/field_code/old_value/new_value）
+- 45 测试全 PASS，vue-tsc 0 errors
+
+**状态**：完成
+
 ### 第九十一轮（2026-08-03）标签：基础设施优化
 
 **来源**：better-harness 分析报告（`.qoder/better-harness/2026-08-03/111845-metadata002/findings.json`）
