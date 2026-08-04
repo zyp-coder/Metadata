@@ -4,11 +4,15 @@
 
 ## 自动化检查（P0 阻断项）
 
+**一键全量检查：** `.\scripts\check-all.ps1`（自动跑以下全部 3 项）
+
 | # | 检查项 | 命令 | 通过标准 |
 |---|--------|------|----------|
-| 1 | 后端测试 | `cd backend && .\venv\Scripts\python.exe manage.py test` | 全部 OK，0 failures/errors |
-| 2 | 前端类型检查 | `cd frontend && npx vue-tsc --noEmit` | 0 errors |
-| 3 | 后端启动 | `cd backend && .\venv\Scripts\python.exe manage.py check` | System check: 0 issues |
+| 1 | 后端测试 | `.\scripts\check-all.ps1` 或 `cd backend; .\venv\Scripts\python.exe manage.py test apps.modeling apps.archive` | 全部 OK，0 failures/errors |
+| 2 | 前端类型检查 | `.\scripts\check-all.ps1` 或 `cd frontend; npx vue-tsc --noEmit` | 0 errors |
+| 3 | 后端启动 | `.\scripts\check-all.ps1` 或 `cd backend; .\venv\Scripts\python.exe manage.py check` | System check: 0 issues |
+
+**Git pre-push hook：** 已配置 `.githooks/pre-push`，每次 `git push` 前自动跑后端测试 + 前端类型检查，失败则阻断推送。
 
 ## 功能验证（P0 阻断项）
 

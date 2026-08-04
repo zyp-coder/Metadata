@@ -1,0 +1,56 @@
+#!/bin/bash
+# pre-push hook — 推送前自动跑全量检查
+# 安装方式：复制此文件到 .git/hooks/pre-push（去掉 .sample）
+# 或运行：git config core.hooksPath .githooks
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  pre-push: 推送前自动检查"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# 定位项目根目录（hook 在 .git/hooks/ 下运行）
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# ── 后端检查 ──
+PYTHON="$ROOT/backend/venv/Scripts/python.exe"
+MANAGE="$ROOT/backend/manage.py"
+
+if [ -f "$PYTHON" ]; then
+    echo ""
+    echo "━━━ 后端: Django 系统检查 ━━━"
+    "$PYTHON" "$MANAGE" check
+    if [ $? -ne 0 ]; then
+        echo "FAIL: Django 系统检查未通过，推送已阻断" >&2
+        exit 1
+    fi
+
+    echo ""
+    echo "━━━ 后端: 运行测试 ━━━"
+    "$PYTHON" "$MANAGE" test --verbosity 1
+    if [ $? -ne 0 ]; then
+        echo "FAIL: 后端测试未通过，推送已阻断" >&2
+        exit 1
+    fi
+else
+    echo "SKIP: 后端虚拟环境未找到"
+fi
+
+# ── 前端检查 ──
+FRONTEND="$ROOT/frontend"
+
+if [ -f "$FRONTEND/package.json" ]; then
+    echo ""
+    echo "━━━ 前端: TypeScript 类型检查 ━━━"
+    (cd "$FRONTEND" && npx vue-tsc --noEmit)
+    if [ $? -ne 0 ]; then
+        echo "FAIL: 前端类型检查未通过，推送已阻断" >&2
+        exit 1
+    fi
+else
+    echo "SKIP: 前端目录未找到"
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  ALL PASS - 允许推送"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+exit 0
