@@ -16,11 +16,13 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     # 第三方
     'rest_framework',
+    'rest_framework.authtoken',
     'django_filters',
     'drf_spectacular',
     # 本地应用
     'apps.modeling',
     'apps.archive',
+    'apps.auth',
 ]
 
 MIDDLEWARE = [
@@ -92,6 +94,14 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'config.pagination.StandardPagination',
     'PAGE_SIZE': 20,
+    # REQ-019：全局强制登录（BR-019-1），豁免由各视图 permission_classes=AllowAny 声明（仅登录接口）
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
         'rest_framework.filters.SearchFilter',

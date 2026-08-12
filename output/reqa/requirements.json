@@ -804,6 +804,68 @@
         "expected_improvement": "档案成为真正的 Golden Record：修正不丢失、冲突可追踪闭环、正确值可回写源系统形成治理闭环"
       },
       "dependencies": ["REQ-014（同步流程）", "REQ-015（版本快照）", "modeling（数据源元数据）"]
+    },
+    {
+      "req_id": "REQ-019",
+      "title": "角色权限与档案字段可见/可编辑控制（auth 模块落地）",
+      "description": "用户可以登录系统；系统管理员在系统管理页维护用户与角色，并按角色×档案域配置字段的可见性与可编辑性（白名单制）；普通用户访问档案列表/详情/编辑时，后端按角色仅下发可见字段、仅接受可编辑字段的写入",
+      "scenarios": [
+        {
+          "when": "用户访问系统",
+          "who": "普通用户",
+          "where": "登录页",
+          "action": "输入账号密码登录",
+          "outcome": "登录成功后进入系统，会话携带角色身份；未登录访问任何页面被重定向到登录页",
+          "acceptance_criteria": ["### Scenario: 账号密码登录 — 正确凭据获得会话，错误凭据被拒绝并提示", "### Scenario: 未登录拦截 — 未登录直接访问/请求被重定向登录页/返回401"]
+        },
+        {
+          "when": "需要控制不同角色的字段权限",
+          "who": "系统管理员",
+          "where": "系统管理页",
+          "action": "创建角色，为角色按档案域勾选可见字段与可编辑字段（白名单）",
+          "outcome": "角色权限集保存生效，该角色用户下次请求即按新权限过滤",
+          "acceptance_criteria": ["### Scenario: 角色×域字段配置 — 勾选保存后该角色用户请求仅返回可见字段"]
+        },
+        {
+          "when": "普通用户浏览/维护档案",
+          "who": "普通用户",
+          "where": "档案列表/详情/编辑",
+          "action": "查看档案列表与详情、编辑档案记录",
+          "outcome": "仅可见字段呈现（后端不下发隐藏字段数据，接口响应中即无隐藏字段）；仅可编辑字段可修改，保存时对不可编辑字段的修改被忽略",
+          "acceptance_criteria": ["### Scenario: 列表字段过滤 — 隐藏字段不出现在列且接口响应不含其数据", "### Scenario: 详情同步过滤 — 详情与列表可见字段集一致", "### Scenario: 编辑过滤 — 不可编辑字段只读；伪造请求修改被忽略且保存其余字段成功"]
+        },
+        {
+          "when": "管理员维护账号",
+          "who": "系统管理员",
+          "where": "系统管理页",
+          "action": "新建/禁用用户、重置密码、分配角色",
+          "outcome": "用户账号生效；禁用用户会话即时失效",
+          "acceptance_criteria": ["### Scenario: 用户管理 — 新建/禁用/重置密码/分配角色可用，内置 admin 不可删除", "### Scenario: 禁用即时生效 — 用户被禁用后下次请求即 401"]
+        },
+        {
+          "when": "管理员访问任意档案",
+          "who": "管理员（内置角色）",
+          "where": "档案列表/详情/编辑",
+          "action": "查看/编辑任意域任意字段",
+          "outcome": "全部字段可见可编辑，不受角色配置限制",
+          "acceptance_criteria": ["### Scenario: 管理员全量 — admin 角色可见可编辑全部字段，不受白名单限制"]
+        }
+      ],
+      "business_rules": [
+        { "rule_id": "BR-019-1", "description": "除登录接口外全部接口要求登录；未登录返回 401", "exception_handling": "" },
+        { "rule_id": "BR-019-2", "description": "白名单制：角色在某个域未配置到的字段默认隐藏", "exception_handling": "" },
+        { "rule_id": "BR-019-3", "description": "可编辑以可见为前提：不可见字段必不可编辑（配置时自动约束）", "exception_handling": "" },
+        { "rule_id": "BR-019-4", "description": "内置管理员角色看全部+用户/角色管理权限，不可删除", "exception_handling": "" },
+        { "rule_id": "BR-019-5", "description": "一个用户可分配多个角色，字段权限取并集", "exception_handling": "" },
+        { "rule_id": "BR-019-6", "description": "字段过滤在后端序列化层执行（数据不下发）；写请求中不可编辑字段被忽略不报错", "exception_handling": "" },
+        { "rule_id": "BR-019-7", "description": "生效范围：档案列表列+记录详情+编辑；变更日志与对外 API 本期不叠加", "exception_handling": "" },
+        { "rule_id": "BR-019-8", "description": "新增字段/新增域默认隐藏（白名单语义），需管理员显式授权", "exception_handling": "" }
+      ],
+      "business_value": {
+        "pain_point": "系统无身份识别，所有人看到并改动全部字段，敏感主数据字段无法按角色限制访问",
+        "expected_improvement": "登录+角色体系落地，档案字段按角色精细可见/可编辑，权限在后端强制执行而非前端展示"
+      },
+      "dependencies": ["REQ-003（档案维护）", "REQ-005（权限配置场景2）", "modeling（域/字段集）"]
     }
   ]
 }

@@ -6,9 +6,10 @@ from django.db import transaction
 from django.db.models import F, Case, When, Value, IntegerField, Count
 from django.utils import timezone
 from .models import (
-    Archive, ArchiveRecord, ArchiveRecordVersion,
-    ArchiveSyncLog, ArchiveOperationLog, ArchiveApi,
+    Archive, ArchiveRecord, ArchiveRecordDetail, ArchiveRecordVersion,
+    ArchiveSchemaSnapshot, ArchiveSyncLog, ArchiveOperationLog, ArchiveApi,
     ArchiveChangeBatch, ArchiveChangeDetail, ConsistencyIssue,
+    ConsistencyCheckRule, ApiKey, ApiKeyGrant, ApiCallLog,
 )
 from .serializers import (
     ArchiveListSerializer, ArchiveDetailSerializer, ArchiveCreateSerializer,
@@ -17,6 +18,7 @@ from .serializers import (
     VersionSerializer, RollbackSerializer, GlobalVersionSerializer,
     SyncLogSerializer, OperationLogSerializer, ArchiveApiSerializer,
     ChangeBatchSerializer, ChangeDetailSerializer, ConsistencyIssueSerializer,
+    ConsistencyCheckRuleSerializer, ApiKeySerializer, ApiCallLogSerializer,
 )
 
 
@@ -393,9 +395,13 @@ class ArchiveViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='consistency-check')
     def consistency_check(self, request, pk=None):
-        """一致性检查（独立执行）：拉取源表，比对组合字段非主字段成员值与主字段值，
-        全量差异 upsert 到 ConsistencyIssue（新差异=open、仍存在=更新值、已消失=resolved）。
+        """一致性检查（支持 4 种检查类型）：
+        1. composite_member: 组合字段非主字段成员值≠主字段值
+        2. archive_source_diff: 档案侧人工覆盖与源侧数据差异
+        3. orphan_source_record: 源侧数据无法关联主表主键
+        4. schema_drift: 档案 schema 与当前建模结构不一致
 
+        已失效的规则（ConsistencyCheckRule.disabled=True）不产生新差异。
         零写入档案数据、不回写任何源表（Hub 式 MDM 宪法）。
         """
         from apps.modeling.models import Table, Field
@@ -405,6 +411,14 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         if not domain:
             return Response({'error': '档案未关联域'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # 加载已失效的规则集合: (check_type, field_code, member_source)
+        disabled_rules = set()
+        for rule in ConsistencyCheckRule.objects.filter(archive=archive, disabled=True):
+            disabled_rules.add((rule.check_type, rule.field_code, rule.member_source))
+
+        def _is_rule_disabled(check_type, field_code='', member_source=''):
+            return (check_type, field_code, member_source) in disabled_rules
+
         schema_type_map = {i['code']: i['type'] for i in (archive.schema or []) if i.get('code')}
         field_name_map = {i.get('code'): i.get('name') or i.get('code') for i in (archive.schema or [])}
         code_to_physical = self._build_code_to_physical(domain, schema_type_map)
@@ -412,12 +426,10 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         stats = {'checked_fields': len(code_checks), 'tables_checked': 0,
                  'mismatch_count': 0, 'mismatch_records': 0,
                  'new_issues': 0, 'reopened_issues': 0, 'resolved_issues': 0,
-                 'open_total': 0, 'errors': [], 'checked_at': timezone.now().isoformat()}
-        if not code_checks:
-            stats['message'] = '该档案没有已设主字段且含其他成员的组合字段，无需检查'
-            return Response(stats)
+                 'open_total': 0, 'errors': [], 'checked_at': timezone.now().isoformat(),
+                 'by_type': {}}
 
-        # 主键字段（与同步引擎同口径）
+        # 主键字段
         primary_table = domain.get_primary_table()
         pk_fields = []
         if primary_table:
@@ -430,43 +442,95 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             ).first()
             if first_pk:
                 pk_fields = [first_pk.code]
-        if not pk_fields:
-            return Response({'error': '域内没有主键字段，无法按记录比对'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 拉源表采集主字段值/成员值（只读）
-        cc_primary_values, cc_member_values = {}, {}
-        for table in Table.objects.filter(domain=domain, status=Table.Status.ACTIVE):
-            try:
-                rows = self._query_local_table(table) if not table.data_source \
-                    else self._query_external_table(table)
-                if rows is not None:
-                    self._collect_check_values(table, rows, code_checks, pk_fields,
-                                               code_to_physical, cc_primary_values, cc_member_values)
-                    stats['tables_checked'] += 1
-            except Exception as e:
-                stats['errors'].append(f'{table.name}: {str(e)}')
+        now = timezone.now()
+        all_mismatches = []  # 汇总所有检查类型的差异
 
-        mismatches = self._collect_full_mismatches(
-            code_checks, cc_primary_values, cc_member_values, field_name_map)
-        stats['mismatch_count'] = len(mismatches)
-        stats['mismatch_records'] = len({m['record_key'] for m in mismatches})
+        # ===== 检查类型 1: composite_member =====
+        cm_stats = {'new': 0, 'reopened': 0, 'resolved': 0, 'open': 0}
+        if code_checks and pk_fields:
+            cc_primary_values, cc_member_values = {}, {}
+            for table in Table.objects.filter(domain=domain, status=Table.Status.ACTIVE):
+                try:
+                    rows = self._query_local_table(table) if not table.data_source \
+                        else self._query_external_table(table)
+                    if rows is not None:
+                        self._collect_check_values(table, rows, code_checks, pk_fields,
+                                                   code_to_physical, cc_primary_values, cc_member_values)
+                        stats['tables_checked'] += 1
+                except Exception as e:
+                    stats['errors'].append(f'{table.name}: {str(e)}')
+            mismatches = self._collect_full_mismatches(
+                code_checks, cc_primary_values, cc_member_values, field_name_map)
+            for m in mismatches:
+                m['check_type'] = ConsistencyIssue.CheckType.COMPOSITE_MEMBER
+            all_mismatches.extend(mismatches)
+            cm_stats['open'] = len(mismatches)
+        stats['by_type']['composite_member'] = cm_stats
 
-        # 差异关联档案记录（主键快照 → record_id）
+        # ===== 检查类型 2: archive_source_diff =====
+        asd_stats = {'new': 0, 'reopened': 0, 'resolved': 0, 'open': 0}
+        if pk_fields:
+            asd_mismatches = self._check_archive_source_diff(
+                archive, domain, pk_fields, code_to_physical, field_name_map, stats)
+            for m in asd_mismatches:
+                m['check_type'] = ConsistencyIssue.CheckType.ARCHIVE_SOURCE_DIFF
+                if not _is_rule_disabled(m['check_type'], m.get('field', ''), ''):
+                    all_mismatches.append(m)
+            asd_stats['open'] = len([m for m in asd_mismatches
+                                     if not _is_rule_disabled(
+                                         ConsistencyIssue.CheckType.ARCHIVE_SOURCE_DIFF,
+                                         m.get('field', ''), '')])
+        stats['by_type']['archive_source_diff'] = asd_stats
+
+        # ===== 检查类型 3: orphan_source_record =====
+        osr_stats = {'new': 0, 'reopened': 0, 'resolved': 0, 'open': 0}
+        if pk_fields:
+            osr_mismatches = self._check_orphan_source_records(
+                archive, domain, pk_fields, code_to_physical, stats)
+            for m in osr_mismatches:
+                m['check_type'] = ConsistencyIssue.CheckType.ORPHAN_SOURCE_RECORD
+                if not _is_rule_disabled(m['check_type'], '', ''):
+                    all_mismatches.append(m)
+            osr_stats['open'] = len([m for m in osr_mismatches
+                                     if not _is_rule_disabled(
+                                         ConsistencyIssue.CheckType.ORPHAN_SOURCE_RECORD, '', '')])
+        stats['by_type']['orphan_source_record'] = osr_stats
+
+        # ===== 检查类型 4: schema_drift =====
+        sd_stats = {'new': 0, 'reopened': 0, 'resolved': 0, 'open': 0}
+        sd_mismatches = self._check_schema_drift(archive, domain, field_name_map)
+        for m in sd_mismatches:
+            m['check_type'] = ConsistencyIssue.CheckType.SCHEMA_DRIFT
+            if not _is_rule_disabled(m['check_type'], m.get('field', ''), ''):
+                all_mismatches.append(m)
+        sd_stats['open'] = len([m for m in sd_mismatches
+                                if not _is_rule_disabled(
+                                    ConsistencyIssue.CheckType.SCHEMA_DRIFT,
+                                    m.get('field', ''), '')])
+        stats['by_type']['schema_drift'] = sd_stats
+
+        # ===== 汇总 upsert =====
+        stats['mismatch_count'] = len(all_mismatches)
+        stats['mismatch_records'] = len({m['record_key'] for m in all_mismatches})
+
+        # 差异关联档案记录
         record_map = {}
-        for rec in ArchiveRecord.objects.filter(archive=archive).only('id', 'data'):
-            k = '/'.join(str((rec.data or {}).get(pk, '')) for pk in pk_fields)
-            if any(part for part in k.split('/')):
-                record_map.setdefault(k, rec.id)
+        if pk_fields:
+            for rec in ArchiveRecord.objects.filter(archive=archive).only('id', 'data'):
+                k = '/'.join(str((rec.data or {}).get(pk, '')) for pk in pk_fields)
+                if any(part for part in k.split('/')):
+                    record_map.setdefault(k, rec.id)
 
         def _txt(v):
             return None if v is None else str(v)
 
-        now = timezone.now()
-        existing = {(i.record_key, i.field_code, i.member_source): i
+        existing = {(i.record_key, i.field_code, i.member_source, i.check_type): i
                     for i in ConsistencyIssue.objects.filter(archive=archive)}
         seen, to_create, to_update = set(), [], []
-        for m in mismatches:
-            key = (m['record_key'][:200], m['field'], m['member_source'])
+        for m in all_mismatches:
+            ct = m.get('check_type', ConsistencyIssue.CheckType.COMPOSITE_MEMBER)
+            key = (m['record_key'][:200], m.get('field', ''), m.get('member_source', ''), ct)
             if key in seen:
                 continue
             seen.add(key)
@@ -474,29 +538,36 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             if issue is None:
                 to_create.append(ConsistencyIssue(
                     archive=archive, record_id=record_map.get(m['record_key']),
-                    record_key=m['record_key'][:200], field_code=m['field'],
-                    field_name=m['name'] or '', primary_source=m['primary_source'],
-                    primary_value=_txt(m['primary_value']), member_source=m['member_source'],
-                    member_value=_txt(m['member_value']), last_checked_at=now,
+                    record_key=m['record_key'][:200], field_code=m.get('field', ''),
+                    field_name=m.get('name', '') or field_name_map.get(m.get('field', ''), ''),
+                    check_type=ct,
+                    check_rule_key=m.get('check_rule_key', ''),
+                    primary_source=m.get('primary_source', ''),
+                    primary_value=_txt(m.get('primary_value')),
+                    member_source=m.get('member_source', ''),
+                    member_value=_txt(m.get('member_value')),
+                    detail=m.get('detail'),
+                    last_checked_at=now,
                 ))
             else:
-                issue.primary_value = _txt(m['primary_value'])
-                issue.member_value = _txt(m['member_value'])
+                issue.primary_value = _txt(m.get('primary_value'))
+                issue.member_value = _txt(m.get('member_value'))
+                issue.detail = m.get('detail', issue.detail)
                 issue.record_id = issue.record_id or record_map.get(m['record_key'])
                 issue.last_checked_at = now
                 if issue.status == ConsistencyIssue.Status.RESOLVED:
-                    issue.status = ConsistencyIssue.Status.OPEN  # 差异重现
+                    issue.status = ConsistencyIssue.Status.OPEN
                     stats['reopened_issues'] += 1
                 to_update.append(issue)
         ConsistencyIssue.objects.bulk_create(to_create)
         if to_update:
             ConsistencyIssue.objects.bulk_update(
-                to_update, ['primary_value', 'member_value', 'record', 'last_checked_at', 'status'])
+                to_update, ['primary_value', 'member_value', 'record', 'last_checked_at',
+                            'status', 'detail'])
 
-        # 历史快照：为所有本次发现的差异 append 一条历史记录
+        # 历史快照
         from .models import ConsistencyIssueHistory
         history_records = []
-        # 新建的差异：先 bulk_create 后才有 id，需重新查询
         if to_create:
             new_issues = ConsistencyIssue.objects.filter(
                 archive=archive, last_checked_at=now
@@ -505,7 +576,6 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 history_records.append(ConsistencyIssueHistory(
                     issue=issue, checked_at=now,
                     primary_value=issue.primary_value, member_value=issue.member_value))
-        # 已存在且仍有差异的
         for issue in to_update:
             history_records.append(ConsistencyIssueHistory(
                 issue=issue, checked_at=now,
@@ -513,7 +583,7 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         if history_records:
             ConsistencyIssueHistory.objects.bulk_create(history_records)
 
-        # 已消失的差异自动关闭（仅在无拉取错误时，防源库瞬时故障误关）
+        # 已消失的差异自动关闭
         if not stats['errors']:
             gone = [i for k, i in existing.items()
                     if k not in seen and i.status != ConsistencyIssue.Status.RESOLVED]
@@ -529,6 +599,425 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             archive=archive, status=ConsistencyIssue.Status.OPEN).count()
         return Response(stats)
 
+    @action(detail=True, methods=['post'], url_path='rollback-detail')
+    def rollback_detail(self, request, pk=None):
+        """重新同步明细子表：从源库拉全量数据覆盖，作为明细行回滚手段。
+        不改变主表记录版本（代表行随明细同步自动更新）。
+
+        POST /archives/{id}/rollback-detail/  body: {detail_fm_id: int, operated_by: str}
+        """
+        from apps.modeling.models import FieldMapping, Field as MField, Table
+
+        archive = self.get_object()
+        domain = archive.domain
+        if not domain:
+            return Response({'error': '档案未关联域'}, status=status.HTTP_400_BAD_REQUEST)
+
+        detail_fm_id = request.data.get('detail_fm_id')
+        operated_by = request.data.get('operated_by', 'system')
+        if not detail_fm_id:
+            return Response({'error': '必须提供 detail_fm_id'}, status=status.HTTP_400_BAD_REQUEST)
+
+        detail_fm = get_object_or_404(
+            FieldMapping, pk=detail_fm_id, relation_type=FieldMapping.RelationType.DETAIL)
+        table = detail_fm.source_table
+        if not table or not table.data_source:
+            return Response({'error': '明细子表未配置数据源'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 构造同步上下文（复用 _sync_data_from_sources 的公共逻辑）
+        schema_type_map = {i['code']: i['type'] for i in (archive.schema or []) if i.get('code')}
+        code_to_physical = self._build_code_to_physical(domain, schema_type_map)
+        pk_fields = []
+        primary_table = domain.get_primary_table()
+        if primary_table:
+            pk_fields = list(MField.objects.filter(
+                table=primary_table, is_primary_key=True, status=MField.Status.ACTIVE
+            ).values_list('code', flat=True))
+        match_channels = {}
+        for code, mappings in code_to_physical.items():
+            seen = set()
+            for tbl_id, phys in mappings:
+                if tbl_id not in seen:
+                    match_channels.setdefault(code, []).append((tbl_id, phys))
+                    seen.add(tbl_id)
+
+        stats = {'records_created': 0, 'records_updated': 0, 'records_deactivated': 0,
+                 'records_reactivated': 0, 'details_created': 0, 'details_updated': 0,
+                 'details_deactivated': 0, 'tables_synced': 0, 'errors': [],
+                 'warnings': []}
+        matched_ids = set()
+        change_entries = []
+        created_in_this_batch = set()
+        sync_exclude_codes = set()
+
+        try:
+            rows = self._query_external_table(table)
+            if rows is None:
+                return Response({'error': f'明细子表 {table.name} 查询失败'}, status=500)
+            self._sync_detail_rows(
+                archive, table, rows, detail_fm, code_to_physical, pk_fields,
+                match_channels, operated_by, stats, matched_ids, change_entries,
+                created_in_this_batch, sync_exclude_codes,
+            )
+        except Exception as e:
+            stats['errors'].append(str(e))
+            return Response({'error': str(e)}, status=500)
+
+        # 有变更 → 建批次
+        if change_entries:
+            batch = ArchiveChangeBatch.objects.create(
+                archive=archive,
+                change_source=ArchiveChangeBatch.ChangeSource.SYNC,
+                operator=operated_by,
+                stats={k: stats[k] for k in ('records_created', 'records_updated',
+                                             'records_deactivated', 'records_reactivated',
+                                             'details_created', 'details_updated',
+                                             'details_deactivated') if k in stats},
+            )
+            from .serializers import _composite_label_codes, _build_record_label
+            label_codes = _composite_label_codes(domain)
+            rec_ids = [e['record_id'] for e in change_entries if e.get('record_id')]
+            data_map = {}
+            for i in range(0, len(rec_ids), 500):
+                for r in ArchiveRecord.objects.filter(id__in=rec_ids[i:i + 500]).only('id', 'data'):
+                    data_map[r.id] = r.data or {}
+            ArchiveChangeDetail.objects.bulk_create([
+                ArchiveChangeDetail(
+                    batch=batch, archive=archive,
+                    record_id=e.get('record_id'),
+                    record_key=e.get('record_key', '')[:200],
+                    record_label=_build_record_label(label_codes, data_map.get(e.get('record_id'))),
+                    change_type=e['change_type'],
+                    field_changes=e.get('field_changes', []),
+                    version_before=e.get('version_before'),
+                    version_after=e.get('version_after'),
+                    detail_group_id=e.get('detail_group'),
+                    detail_row_key=e.get('detail_row_key', ''),
+                ) for e in change_entries
+            ])
+            stats['change_batch_id'] = batch.id
+
+        ArchiveOperationLog.objects.create(
+            archive=archive,
+            operator=operated_by,
+            operation_type=ArchiveOperationLog.OperationType.SYNC,
+            change_summary={'action': f'明细子表重新同步（{table.name}）', 'detail_stats': stats},
+        )
+        return Response(stats)
+
+    @action(detail=True, methods=['get'], url_path='permission-overview')
+    def permission_overview(self, request, pk=None):
+        """权限全景（仅管理员，只读审计视图）：一次聚合本档案的
+        机器权限（API/暴露字段/授权密钥/调用统计）与人用权限（角色/字段授权/用户）。"""
+        from apps.auth.views import IsMdmAdmin
+        if not IsMdmAdmin().has_permission(request, self):
+            return Response({'detail': '仅管理员可查看权限全景'},
+                            status=status.HTTP_403_FORBIDDEN)
+        archive = self.get_object()
+        field_names = {i.get('code'): i.get('name') for i in (archive.schema or [])}
+
+        # ── 机器权限：API + 密钥授权 + 调用统计（日志保留 90 天，按密钥聚合）──
+        apis = []
+        for api in ArchiveApi.objects.filter(archive=archive).order_by('id').prefetch_related('key_grants__api_key'):
+            grants = [{
+                'key_name': g.api_key.name,
+                'key_status': g.api_key.status,
+                'allowed_operations': g.allowed_operations or [],
+            } for g in api.key_grants.all()]
+            stats_by_key = {}
+            total = 0
+            last_at = None
+            for log in ApiCallLog.objects.filter(api_id=api.id).iterator():
+                total += 1
+                if last_at is None or log.created_at > last_at:
+                    last_at = log.created_at
+                entry = stats_by_key.setdefault(
+                    log.key_name or '(密钥已删除)',
+                    {'count': 0, 'last_at': None, 'ips': set()})
+                entry['count'] += 1
+                if entry['last_at'] is None or log.created_at > entry['last_at']:
+                    entry['last_at'] = log.created_at
+                if log.client_ip and len(entry['ips']) < 5:
+                    entry['ips'].add(log.client_ip)
+            apis.append({
+                'id': api.id,
+                'name': api.name,
+                'slug': api.slug,
+                'status': api.status,
+                'allowed_operations': api.allowed_operations or [],
+                'exposed_fields': api.exposed_fields or [],
+                'grants': grants,
+                'call_stats': {
+                    'total': total,
+                    'last_at': last_at,
+                    'by_key': [
+                        {'key_name': k, 'count': v['count'],
+                         'last_at': v['last_at'], 'ips': sorted(v['ips'])}
+                        for k, v in sorted(stats_by_key.items(),
+                                           key=lambda x: -x[1]['count'])
+                    ],
+                },
+            })
+
+        # ── 人用权限：角色×本域字段授权 + 挂靠用户 ──
+        from apps.auth.models import RoleFieldPermission
+        roles = []
+        perms = RoleFieldPermission.objects.filter(
+            domain_id=archive.domain_id).select_related('role').order_by('role_id')
+        for perm in perms:
+            role = perm.role
+            users = [{
+                'username': up.user.username,
+                'display_name': up.display_name or up.user.username,
+                'is_active': up.user.is_active,
+            } for up in role.user_profiles.select_related('user').all()]
+            roles.append({
+                'role_id': role.id,
+                'role_name': role.name,
+                'is_builtin': role.is_builtin,
+                'visible_codes': perm.visible_codes or [],
+                'editable_codes': perm.editable_codes or [],
+                'users': users,
+            })
+
+        return Response({
+            'archive': {'id': archive.id, 'name': archive.name,
+                        'domain_name': archive.domain.name},
+            'field_names': field_names,
+            'apis': apis,
+            'roles': roles,
+        })
+
+    @action(detail=True, methods=['get'], url_path='field-distinct-values')
+    def field_distinct_values(self, request, pk=None):
+        """档案各字段去重值统计：从档案记录实时聚合每个 schema 字段的去重值及计数。"""
+        archive = self.get_object()
+        schema = archive.schema or []
+        if not schema:
+            return Response({'fields': [], 'total_records': 0})
+
+        total_records = ArchiveRecord.objects.filter(
+            archive=archive, status=ArchiveRecord.Status.ACTIVE
+        ).count()
+
+        # 按 schema code 收集去重值
+        result = []
+        for item in schema:
+            code = item.get('code', '')
+            if not code:
+                continue
+            # 从所有活跃记录的 data JSON 中提取该字段的值
+            value_counts = {}
+            for rec in ArchiveRecord.objects.filter(
+                archive=archive, status=ArchiveRecord.Status.ACTIVE
+            ).only('data').iterator():
+                val = (rec.data or {}).get(code)
+                if val is None or val == '':
+                    continue
+                # 统一转为字符串作为 key（JSON 值可能是 int/float/bool/str）
+                key = str(val)
+                value_counts[key] = value_counts.get(key, 0) + 1
+
+            # 按计数降序排列，取前 200 个
+            sorted_values = sorted(value_counts.items(), key=lambda x: -x[1])[:200]
+            result.append({
+                'code': code,
+                'name': item.get('name', code),
+                'group': item.get('group', ''),
+                'type': item.get('type', 'string'),
+                'distinct_count': len(value_counts),
+                'values': [{'value': v, 'count': c} for v, c in sorted_values],
+            })
+
+        return Response({'fields': result, 'total_records': total_records})
+
+    def _check_archive_source_diff(self, archive, domain, pk_fields, code_to_physical, field_name_map, stats):
+        """检查类型 2: 档案侧人工覆盖与源侧数据差异。
+        比对档案记录 manual_data 中的人工修改值与源表当前值。
+        """
+        from apps.modeling.models import Table, Field
+
+        mismatches = []
+        schema = archive.schema or []
+        # 找出档案维护(ownership=archive)或有修正保护的字段
+        manual_owned = {i['code'] for i in schema
+                        if i.get('ownership') == 'archive' and i.get('source') != 'computed'}
+
+        if not manual_owned:
+            return mismatches
+
+        # 采集源表数据（按主键索引）
+        source_by_pk = {}
+        for table in Table.objects.filter(domain=domain, status=Table.Status.ACTIVE):
+            try:
+                rows = self._query_local_table(table) if not table.data_source \
+                    else self._query_external_table(table)
+                if rows is None:
+                    continue
+                # 构建物理列→schema code 映射
+                phys_to_schema = {}
+                for sc, mappings in code_to_physical.items():
+                    for tbl_id, pc in mappings:
+                        if tbl_id == table.id:
+                            phys_to_schema[pc] = sc
+                for row in rows:
+                    record_data = {}
+                    for col_name, value in row.items():
+                        sc = phys_to_schema.get(col_name, col_name)
+                        record_data[sc] = value
+                    key = tuple(str(record_data.get(pk, '')) for pk in pk_fields)
+                    if any(k for k in key):
+                        source_by_pk[key] = record_data
+            except Exception as e:
+                stats['errors'].append(f'archive_source_diff/{table.name}: {str(e)}')
+
+        # 比对档案记录
+        for rec in ArchiveRecord.objects.filter(archive=archive, status='active'):
+            rec_key = '/'.join(str((rec.data or {}).get(pk, '')) for pk in pk_fields)
+            if not any(part for part in rec_key.split('/')):
+                continue
+            overrides = rec.overrides or {}
+            source_row = source_by_pk.get(tuple(rec_key.split('/')))
+            if not source_row:
+                continue
+            for code in manual_owned:
+                if code not in overrides:
+                    continue  # 没有人工覆盖的不检查
+                archive_val = (rec.manual_data or {}).get(code)
+                source_val = source_row.get(code)
+                if archive_val is not None and str(archive_val) != str(source_val) if source_val is not None else True:
+                    mismatches.append({
+                        'record_key': rec_key,
+                        'field': code,
+                        'name': field_name_map.get(code, code),
+                        'primary_source': f'档案人工覆盖',
+                        'primary_value': archive_val,
+                        'member_source': f'源侧数据',
+                        'member_value': source_val,
+                        'check_rule_key': f'archive_source_diff:{code}',
+                        'detail': {'archive_record_id': rec.id, 'override_info': overrides.get(code)},
+                    })
+        return mismatches
+
+    def _check_orphan_source_records(self, archive, domain, pk_fields, code_to_physical, stats):
+        """检查类型 3: 源侧模型中存在没有关联上主表主键的数据。
+        即源表中有数据但其主键值在档案中找不到对应记录。
+        """
+        from apps.modeling.models import Table
+
+        mismatches = []
+        # 采集档案中已有的主键值集合
+        archive_pk_set = set()
+        for rec in ArchiveRecord.objects.filter(archive=archive).only('data'):
+            k = tuple(str((rec.data or {}).get(pk, '')) for pk in pk_fields)
+            if any(part for part in k):
+                archive_pk_set.add(k)
+
+        # 遍历源表，找不在档案中的记录
+        primary_table = domain.get_primary_table()
+        tables_to_check = Table.objects.filter(domain=domain, status=Table.Status.ACTIVE)
+        if primary_table:
+            tables_to_check = tables_to_check.filter(id=primary_table.id)
+
+        for table in tables_to_check:
+            try:
+                rows = self._query_local_table(table) if not table.data_source \
+                    else self._query_external_table(table)
+                if rows is None:
+                    continue
+                # 构建物理列→schema code 映射
+                phys_to_schema = {}
+                for sc, mappings in code_to_physical.items():
+                    for tbl_id, pc in mappings:
+                        if tbl_id == table.id:
+                            phys_to_schema[pc] = sc
+                for row in rows:
+                    record_data = {}
+                    for col_name, value in row.items():
+                        sc = phys_to_schema.get(col_name, col_name)
+                        record_data[sc] = value
+                    key = tuple(str(record_data.get(pk, '')) for pk in pk_fields)
+                    if not any(k for k in key):
+                        continue
+                    if key not in archive_pk_set:
+                        pk_display = '/'.join(key)
+                        mismatches.append({
+                            'record_key': pk_display,
+                            'field': '',
+                            'name': '',
+                            'primary_source': '',
+                            'primary_value': pk_display,
+                            'member_source': f'{table.name}',
+                            'member_value': pk_display,
+                            'check_rule_key': f'orphan_source_record:{table.name}',
+                            'detail': {'table': table.name, 'pk_values': dict(zip(pk_fields, key)),
+                                       'sample_data': {k: v for k, v in list(record_data.items())[:5]}},
+                        })
+            except Exception as e:
+                stats['errors'].append(f'orphan/{table.name}: {str(e)}')
+        return mismatches
+
+    def _check_schema_drift(self, archive, domain, field_name_map):
+        """检查类型 4: 档案 schema 与当前建模结构不一致。
+        检测 schema 中的字段在当前建模中是否还存在、类型是否匹配。
+        """
+        from apps.modeling.models import StandardField, Field, Table
+
+        mismatches = []
+        schema = archive.schema or []
+        if not schema:
+            return mismatches
+
+        # 当前建模中的所有标准字段
+        current_sf = {}
+        for sf in StandardField.objects.filter(domain=domain, status='active', is_active=True):
+            current_sf[sf.standard_code] = sf
+
+        # 当前建模中的所有物理字段
+        current_fields = {}
+        for f in Field.objects.filter(table__domain=domain, status=Field.Status.ACTIVE):
+            current_fields[f.code or f.name] = f
+
+        for item in schema:
+            code = item.get('code', '')
+            if not code:
+                continue
+            source = item.get('source', '')
+            if source == 'computed':
+                continue  # 计算字段不参与漂移检查
+
+            if code not in current_sf and code not in current_fields:
+                # schema 中的字段在建模中已不存在
+                mismatches.append({
+                    'record_key': '',
+                    'field': code,
+                    'name': field_name_map.get(code, code),
+                    'primary_source': '档案 schema',
+                    'primary_value': f'{item.get("type", "?")} ({source})',
+                    'member_source': '建模结构',
+                    'member_value': '字段已不存在',
+                    'check_rule_key': f'schema_drift:{code}:removed',
+                    'detail': {'issue': 'field_removed', 'schema_item': item},
+                })
+            elif code in current_sf:
+                sf = current_sf[code]
+                # 检查类型是否变化
+                schema_type = item.get('type', '')
+                if schema_type and sf.field_type and schema_type != sf.field_type:
+                    mismatches.append({
+                        'record_key': '',
+                        'field': code,
+                        'name': field_name_map.get(code, code),
+                        'primary_source': '档案 schema',
+                        'primary_value': schema_type,
+                        'member_source': '建模结构',
+                        'member_value': sf.field_type,
+                        'check_rule_key': f'schema_drift:{code}:type_change',
+                        'detail': {'issue': 'type_changed', 'schema_type': schema_type,
+                                   'modeling_type': sf.field_type},
+                    })
+        return mismatches
+
     def _preview_data_changes(self, archive, domain, new_schema):
         """数据变化试算（只读不写）：按与 _sync_data_from_sources 同口径拉源行，
         跨表累积后用 _merge_record_data 模拟合并，统计将新增/更新/停用的记录数及字段变化样本。"""
@@ -537,30 +1026,37 @@ class ArchiveViewSet(viewsets.ModelViewSet):
 
         schema_type_map = {i['code']: i['type'] for i in new_schema if i.get('code')}
         field_name_map = {i.get('code'): i.get('name') or i.get('code') for i in new_schema}
+        # v18 预检告警：档案维护字段（非 source）被源侧刷新波及的统计
+        archive_owned_codes = {i['code'] for i in new_schema
+                               if i.get('code') and (i.get('ownership') or 'archive') != 'source'}
         code_to_physical = self._build_code_to_physical(domain, schema_type_map)
         stats = {'tables_checked': 0, 'would_create': 0, 'would_update': 0,
-                 'would_deactivate': 0, 'changes_sample': [], 'errors': []}
+                 'would_deactivate': 0, 'changes_sample': [], 'errors': [], 'warnings': [],
+                 'archive_owned_impact': {'records': 0, 'fields': []}}
 
-        # 主字段拦截（与正式同步同口径）：预检阶段就提前暴露
+        # 主字段告警（不阻断）：组合字段未设主字段时仅告警，其余字段正常同步
         missing_pf = _validate_primary_fields(domain)
         if missing_pf:
             names = '、'.join(f"{m['name']}({m['code']})" for m in missing_pf)
-            stats['errors'].append(f'以下组合字段未设置主字段，刷新将被拦截：{names}（请到属性配置页设置）')
+            stats['warnings'].append(f'以下组合字段未设置主字段，其成员数据将全部写入（建议到属性配置页设置）：{names}')
             stats['primary_field_missing'] = missing_pf
-            return stats
 
         primary_table = domain.get_primary_table()
         pk_fields = []
         if primary_table:
-            pk_fields = list(Field.objects.filter(
-                table=primary_table, is_primary_key=True, status=Field.Status.ACTIVE
-            ).values_list('code', flat=True))
+            for f in Field.objects.filter(table=primary_table, is_primary_key=True, status=Field.Status.ACTIVE):
+                sf = f.standard_field
+                if sf:
+                    pk_fields.append(sf.standard_code)
+                else:
+                    pk_fields.append(f.code)
         if not pk_fields:
             first_pk = Field.objects.filter(
                 table__domain=domain, is_primary_key=True, status=Field.Status.ACTIVE
             ).first()
             if first_pk:
-                pk_fields = [first_pk.code]
+                sf = first_pk.standard_field
+                pk_fields = [sf.standard_code if sf else first_pk.code]
         if not pk_fields:
             stats['errors'].append('未配置主键字段，无法试算')
             return stats
@@ -603,7 +1099,9 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 record_data = {}
                 for col_name, value in row.items():
                     sc = physical_to_schema.get(col_name)
-                    if not sc and col_name in schema_type_map:
+                    # 同名兜底仅限主键列（记录匹配必需）：未映射给本表的其他同名列
+                    # 不得写入，否则他表同名空列会偷渡清空已有值造成假变更（BUG-2026-0805-01）
+                    if not sc and col_name in pk_fields and col_name in schema_type_map:
                         sc = col_name
                     if sc:
                         record_data[sc] = value
@@ -619,6 +1117,8 @@ class ArchiveViewSet(viewsets.ModelViewSet):
 
         stats['would_create'] = len(new_keys)
         matched_ids = set()
+        impact_keys = set()      # v18：被波及的记录主键
+        impact_fields = {}       # v18：档案维护字段 → 波及记录数
         for key, record_data in updates_by_key.items():
             existing = existing_records[key]
             matched_ids.add(existing.id)
@@ -636,6 +1136,12 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             )
             if changed_codes:
                 stats['would_update'] += 1
+                # v18：源侧刷新波及档案维护字段（无人工覆盖层时值取自源层）→ 预检告警素材
+                owned_hit = [c for c in changed_codes if c in archive_owned_codes]
+                if owned_hit:
+                    impact_keys.add(key)
+                    for c in owned_hit:
+                        impact_fields[c] = impact_fields.get(c, 0) + 1
                 if len(stats['changes_sample']) < 20:
                     stats['changes_sample'].append({
                         'record_key': '/'.join(k for k in key),
@@ -651,6 +1157,12 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 archive=archive, status=ArchiveRecord.Status.ACTIVE,
                 sync_status__in=['synced', 'partial'],
             ).exclude(id__in=matched_ids).count()
+        # v18 预检告警：档案维护字段被源侧刷新波及（提醒用户确认，不阻断刷新）
+        stats['archive_owned_impact'] = {
+            'records': len(impact_keys),
+            'fields': [{'code': c, 'name': field_name_map.get(c, c), 'records': n}
+                       for c, n in sorted(impact_fields.items(), key=lambda x: -x[1])],
+        }
         return stats
 
     def _sync_data_from_sources(self, archive, domain, schema_type_map, operated_by):
@@ -662,32 +1174,38 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         3. 先处理主表数据，创建记录
         4. 用主键字段匹配，合并其他表数据
         """
-        from apps.modeling.models import Table, Field, StandardField
+        from apps.modeling.models import Table, Field, StandardField, FieldMapping
         from apps.modeling.views import DataSourceViewSet, _json_safe
         from django.db import connections
 
         stats = {'records_created': 0, 'records_updated': 0, 'tables_synced': 0,
-                 'records_deactivated': 0, 'records_reactivated': 0, 'errors': []}
+                 'records_deactivated': 0, 'records_reactivated': 0,
+                 'details_created': 0, 'details_updated': 0, 'details_deactivated': 0,
+                 'errors': [], 'warnings': []}
         # 本轮刷新中匹配到源行的记录 id（跨表共享，用于收尾停用清扫）
         matched_ids = set()
         # 本轮变更明细（源侧同步，收尾统一落变更日志批次）
         change_entries = []
+        # 本轮同步中刚创建的记录 ID（后续表同步到这些记录时不计入「修改」）
+        created_in_this_batch = set()
 
-        # ===== 主字段拦截：组合字段必须全部设置主字段（数据源头）后才允许刷新 =====
+        # ===== 主字段告警（不阻断）：组合字段未设主字段时仅告警，其余字段正常同步 =====
         missing_pf = _validate_primary_fields(domain)
         if missing_pf:
             names = '、'.join(f"{m['name']}({m['code']})" for m in missing_pf)
-            stats['errors'].append(f'以下组合字段未设置主字段，已中止刷新：{names}（请到属性配置页设置）')
+            stats['warnings'].append(f'以下组合字段未设置主字段，其成员数据将全部写入（建议到属性配置页设置）：{names}')
             stats['primary_field_missing'] = missing_pf
-            return stats
 
-        # 获取主表及其主键字段
+        # 获取主表及其主键字段（用 schema code 而非 Field.code，因为 record_data 以 schema code 为 key）
         primary_table = domain.get_primary_table()
         pk_fields = []
         if primary_table:
-            pk_fields = list(Field.objects.filter(
-                table=primary_table, is_primary_key=True, status=Field.Status.ACTIVE
-            ).values_list('code', flat=True))
+            for f in Field.objects.filter(table=primary_table, is_primary_key=True, status=Field.Status.ACTIVE):
+                sf = f.standard_field
+                if sf:
+                    pk_fields.append(sf.standard_code)
+                else:
+                    pk_fields.append(f.code)
         
         # 如果没有主表或主键字段，使用默认的第一个字段作为匹配键
         if not pk_fields:
@@ -696,7 +1214,8 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 table__domain=domain, is_primary_key=True, status=Field.Status.ACTIVE
             ).first()
             if first_pk:
-                pk_fields = [first_pk.code]
+                sf = first_pk.standard_field
+                pk_fields = [sf.standard_code if sf else first_pk.code]
         
         all_tables = Table.objects.filter(domain=domain, status=Table.Status.ACTIVE)
         
@@ -708,21 +1227,46 @@ class ArchiveViewSet(viewsets.ModelViewSet):
 
         # 构建 schema code → 物理字段映射
         code_to_physical = self._build_code_to_physical(domain, schema_type_map)
+        # 匹配通道：组合字段非主成员列（外键）仅用于构建记录 key，不写入
+        match_channels = self._build_match_channels(domain, pk_fields)
 
         # 一致性检查准备：非主字段成员只检查不写入
         code_checks = self._build_code_checks(domain)
         cc_primary_values = {}
         cc_member_values = {}
+        # 构建同步排除集合：组合字段的非主字段成员不写入档案（只用于一致性检查）
+        sync_exclude_codes = self._build_sync_exclude_codes(code_checks, code_to_physical)
+
+        # 各表确定性排序列（主键物理列，1:n 取首条折叠用）
+        pk_col_by_table = {}
+        for t in tables:
+            f = Field.objects.filter(table=t, is_primary_key=True, status=Field.Status.ACTIVE).first()
+            if f:
+                pk_col_by_table[t.id] = f.physical_name or f.code or f.name
+
+        def _has_direct_pk_mapping(t):
+            """该表是否有物理列可直接映射到档案主键（直接匹配 vs 经 FieldMapping 中转）。"""
+            for pk in pk_fields:
+                for tbl_id, phys in list(code_to_physical.get(pk, [])) + list(match_channels.get(pk, [])):
+                    if tbl_id == t.id:
+                        return True
+            return False
+
+        is_primary_id = primary_table.id if primary_table else None
 
         # 处理每个表
         for table in tables:
+            is_primary_table = (table.id == is_primary_id)
+            # 仅非主表排序（1:n 折叠确定性）；主表保持原查询语义，避免 ORDER BY 改变 TOP 截断集合
+            order_by = pk_col_by_table.get(table.id) if not is_primary_table else None
             if not table.data_source:
                 try:
                     rows = self._query_local_table(table)
                     if rows is not None:
                         self._upsert_records_from_rows(
                             archive, table, rows, code_to_physical, schema_type_map, 
-                            pk_fields, operated_by, stats, matched_ids, change_entries
+                            pk_fields, operated_by, stats, matched_ids, change_entries, created_in_this_batch,
+                            sync_exclude_codes, match_channels, is_primary_table
                         )
                         self._collect_check_values(table, rows, code_checks, pk_fields,
                                                    code_to_physical, cc_primary_values, cc_member_values)
@@ -731,16 +1275,85 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     stats['errors'].append(f'本地表 {table.name}: {str(e)}')
                 continue
 
-            try:
-                rows = self._query_external_table(table)
+            # ===== 子表关系分支（2026-08-08/08-11）：该表配置 relation_type=detail 的 FieldMapping 时，
+            # 整表作为明细致子表同步（保留全部行），不进入直连/中转路径。
+            # 2026-08-11 多挂载改造：先查 DetailTableConfig（先注册后挂载），
+            # 有则循环多挂载；无注册则回退查询旧内嵌配置兼容。
+            # =====
+            detail_fms = []
+            if table.data_source:
+                from apps.modeling.models import DetailTableConfig
+                cfg = DetailTableConfig.objects.filter(domain=archive.domain, table=table).first()
+                if cfg:
+                    # 子表已注册：查出挂载的全部 detail 映射（一子表多挂载）
+                    detail_fms = list(FieldMapping.objects.filter(
+                        detail_config=cfg,
+                        source_field__status='active',
+                    ).select_related('row_key_field', 'display_sort_field', 'detail_config'))
+                else:
+                    # 存量兼容：查旧内嵌 detail 配置（deprecated）
+                    old_fm = FieldMapping.objects.filter(
+                        source_table=table,
+                        relation_type=FieldMapping.RelationType.DETAIL,
+                        source_field__status='active',
+                    ).select_related('row_key_field', 'display_sort_field').first()
+                    if old_fm:
+                        stats['warnings'].append(
+                            f'明细子表 {table.name}：使用旧内嵌配置（未注册子表配置），'
+                            f'建议在关系管理注册子表后再挂载')
+                        detail_fms = [old_fm]
+            if detail_fms:
+                # TODO（2026-08-11 性能优化）：多挂载时 rows 只拉一次，多路复用
+                # conditions 从第一个挂载的 detail_config（或 fm 自身 deprecated）取
+                first_fm = detail_fms[0]
+                cfg = first_fm.detail_config
+                conds = None
+                if cfg and cfg.conditions:
+                    conds = cfg.conditions
+                elif first_fm.conditions:
+                    conds = first_fm.conditions
+                rows = self._query_external_table(table, order_by=order_by, conditions=conds)
                 if rows is not None:
-                    self._upsert_records_from_rows(
-                        archive, table, rows, code_to_physical, schema_type_map,
-                        pk_fields, operated_by, stats, matched_ids, change_entries
-                    )
+                    # 预组合平铺（2026-08-11 第三轮）：注册配了头表时，头表全量 JOIN 进明细行
+                    # （头表字段以 __hdr__ 前缀并入，一行=一条明细+头字段重复）
+                    if cfg and cfg.header_table_id and cfg.header_link_field_id and cfg.detail_link_field_id:
+                        rows = self._join_header_rows(table, cfg, rows)
+                    for detail_fm in detail_fms:
+                        try:
+                            self._sync_detail_rows(
+                                archive, table, rows, detail_fm, code_to_physical,
+                                pk_fields, match_channels, operated_by, stats, matched_ids,
+                                change_entries, created_in_this_batch, sync_exclude_codes,
+                            )
+                        except Exception as e:
+                            stats['errors'].append(f'数据源表 {table.name}（明细子表）: {str(e)}')
                     self._collect_check_values(table, rows, code_checks, pk_fields,
                                                code_to_physical, cc_primary_values, cc_member_values)
                     stats['tables_synced'] += 1
+                continue
+
+            try:
+                if _has_direct_pk_mapping(table):
+                    rows = self._query_external_table(table, order_by=order_by)
+                    if rows is not None:
+                        self._upsert_records_from_rows(
+                            archive, table, rows, code_to_physical, schema_type_map,
+                            pk_fields, operated_by, stats, matched_ids, change_entries, created_in_this_batch,
+                            sync_exclude_codes, match_channels, is_primary_table
+                        )
+                        self._collect_check_values(table, rows, code_checks, pk_fields,
+                                                   code_to_physical, cc_primary_values, cc_member_values)
+                        stats['tables_synced'] += 1
+                else:
+                    # 维度表（无主键直映）：经 FieldMapping 中转匹配主记录（如价目表 NAME 经明细 FID 关联物料）
+                    rows = self._query_external_table(table, order_by=order_by)
+                    if rows is not None:
+                        self._upsert_dimension_via_mapping(
+                            archive, table, rows, code_to_physical, schema_type_map,
+                            pk_fields, match_channels, operated_by, stats, matched_ids,
+                            change_entries, created_in_this_batch
+                        )
+                        stats['tables_synced'] += 1
             except Exception as e:
                 stats['errors'].append(f'数据源表 {table.name}: {str(e)}')
 
@@ -754,22 +1367,32 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         # ===== 停用清扫：源侧已删除的记录标记停用（只标不删） =====
         # 安全闸门：任一表同步出错或无主键时跳过，防止源库瞬时故障引发误停用
         if stats['tables_synced'] > 0 and not stats['errors'] and pk_fields:
-            stale_qs = ArchiveRecord.objects.filter(
+            # matched_ids 可达 20 万+：先拉候选 id 集与 matched 求差（内存），再按 500/批
+            # id__in 分批处理。禁止用多次 exclude(id__in=...)——AND 嵌套 NOT IN 仍超 SQLite
+            # 999 变量上限（实测 too many SQL variables，见 BUG-2026-0808-02）
+            candidate_ids = set(ArchiveRecord.objects.filter(
                 archive=archive, status=ArchiveRecord.Status.ACTIVE,
                 sync_status__in=['synced', 'partial'],
-            ).exclude(id__in=matched_ids)
+            ).values_list('id', flat=True))
+            stale_ids = sorted(candidate_ids - matched_ids)
             # 先抓取待停用记录身份（变更日志用），再批量更新
-            for rec in stale_qs.only('id', 'data'):
-                change_entries.append({
-                    'record_id': rec.id,
-                    'record_key': '/'.join(str(rec.data.get(pk, '')) for pk in pk_fields),
-                    'change_type': ArchiveChangeDetail.ChangeType.DEACTIVATED,
-                    'field_changes': [],
-                })
-            stats['records_deactivated'] = stale_qs.update(
-                status=ArchiveRecord.Status.DELETED, sync_status='stale',
-                updated_by=operated_by, updated_at=timezone.now(),
-            )
+            for i in range(0, len(stale_ids), 500):
+                chunk = stale_ids[i:i + 500]
+                for rec in ArchiveRecord.objects.filter(id__in=chunk).only('id', 'data', 'version'):
+                    change_entries.append({
+                        'record_id': rec.id,
+                        'record_key': '/'.join(str(rec.data.get(pk, '')) for pk in pk_fields),
+                        'change_type': ArchiveChangeDetail.ChangeType.DEACTIVATED,
+                        'field_changes': [],
+                        # 停用清扫不动数据层，无版本变动（v18 版本映射）
+                        'version_before': rec.version,
+                        'version_after': rec.version,
+                    })
+                ArchiveRecord.objects.filter(id__in=chunk).update(
+                    status=ArchiveRecord.Status.DELETED, sync_status='stale',
+                    updated_by=operated_by, updated_at=timezone.now(),
+                )
+            stats['records_deactivated'] = len(stale_ids)
 
         # ===== 变更日志：本轮有变更才建批次（零变更不产生噪声） =====
         if change_entries:
@@ -784,8 +1407,11 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             from .serializers import _composite_label_codes, _build_record_label
             label_codes = _composite_label_codes(domain)
             rec_ids = [e['record_id'] for e in change_entries if e.get('record_id')]
-            data_map = {r.id: (r.data or {}) for r in
-                        ArchiveRecord.objects.filter(id__in=rec_ids).only('id', 'data')}
+            # id 列表可达 20 万+，分批查询避免 SQLite 变量上限（与停用清扫同口径）
+            data_map = {}
+            for i in range(0, len(rec_ids), 500):
+                for r in ArchiveRecord.objects.filter(id__in=rec_ids[i:i + 500]).only('id', 'data'):
+                    data_map[r.id] = r.data or {}
             ArchiveChangeDetail.objects.bulk_create([
                 ArchiveChangeDetail(
                     batch=batch, archive=archive,
@@ -794,6 +1420,10 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     record_label=_build_record_label(label_codes, data_map.get(e.get('record_id'))),
                     change_type=e['change_type'],
                     field_changes=e.get('field_changes', []),
+                    version_before=e.get('version_before'),
+                    version_after=e.get('version_after'),
+                    detail_group_id=e.get('detail_group'),
+                    detail_row_key=e.get('detail_row_key', ''),
                 ) for e in change_entries
             ])
             stats['change_batch_id'] = batch.id
@@ -818,19 +1448,20 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 continue
             pf = next((m for m in members if m.id == sf.primary_field_id and m.status == 'active'), None)
             if pf is not None:
-                # 主字段作为唯一数据源头
-                code_to_physical[sf.standard_code] = [(pf.table_id, pf.code or pf.name)]
+                # 主字段作为唯一数据源头（用 physical_name 保留原始列名，改名不影响同步）
+                code_to_physical[sf.standard_code] = [(pf.table_id, pf.physical_name or pf.code or pf.name)]
                 primary_locked.add(sf.id)
             else:
-                code_to_physical[sf.standard_code] = [(m.table_id, m.code or m.name) for m in members]
+                code_to_physical[sf.standard_code] = [(m.table_id, m.physical_name or m.code or m.name) for m in members]
 
         all_fields = Field.objects.filter(
             table__domain=domain, status=Field.Status.ACTIVE
         ).select_related('table')
+        # solo 字段：按 Field.code 匹配 schema code，用 physical_name 作为物理列名
         for f in all_fields:
-            phys_code = f.code or f.name
-            if phys_code in schema_type_map and phys_code not in code_to_physical:
-                code_to_physical[phys_code] = [(f.table_id, phys_code)]
+            if f.code in schema_type_map and f.code not in code_to_physical:
+                code_to_physical[f.code] = [(f.table_id, f.physical_name or f.code or f.name)]
+        for f in all_fields:
             if f.standard_field_id and f.standard_field_id not in primary_locked:
                 sf_code = None
                 for sf in standard_fields:
@@ -839,7 +1470,7 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                         break
                 if sf_code and sf_code in schema_type_map:
                     existing = code_to_physical.get(sf_code, [])
-                    entry = (f.table_id, f.code or f.name)
+                    entry = (f.table_id, f.physical_name or f.code or f.name)
                     if entry not in existing:
                         existing.append(entry)
                         code_to_physical[sf_code] = existing
@@ -848,6 +1479,33 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             if code not in code_to_physical:
                 code_to_physical[code] = []
         return code_to_physical
+
+    def _build_match_channels(self, domain, pk_fields):
+        """构建主键匹配通道：pk_fields 对应组合字段的全部成员列（含非主成员）。
+
+        返回 {schema_code: [(table_id, physical), ...]}。
+        维度表（如价目明细）的外键列仅用于构建记录匹配 key，不写入档案（防多源覆盖）。
+        """
+        from apps.modeling.models import StandardField, Field, Table
+
+        channels = {}
+        for pk_code in pk_fields:
+            entries = []
+            sf = StandardField.objects.filter(domain=domain, standard_code=pk_code).first()
+            if sf:
+                for m in sf.members.all():
+                    if m.table and m.table.status == Table.Status.ACTIVE:
+                        entries.append((m.table_id, m.physical_name or m.code or m.name))
+            # solo 字段兜底（无组合字段时按 code 直配）
+            for f in Field.objects.filter(
+                code=pk_code, status=Field.Status.ACTIVE, table__domain=domain
+            ):
+                entry = (f.table_id, f.physical_name or f.code or f.name)
+                if entry not in entries:
+                    entries.append(entry)
+            if entries:
+                channels[pk_code] = entries
+        return channels
 
     def _build_code_checks(self, domain):
         """构建一致性检查映射：已设主字段的组合字段，非主字段成员的取值与主字段比对。
@@ -874,6 +1532,19 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     'others': others,
                 }
         return checks
+
+    def _build_sync_exclude_codes(self, code_checks, code_to_physical):
+        """构建同步排除集合：组合字段的非主字段成员不写入档案。
+
+        返回 {(table_id, physical_column), ...} 集合，
+        _upsert_records_from_rows 遇到这些字段时跳过不写入。
+        """
+        exclude = set()
+        for schema_code, check_info in code_checks.items():
+            # 非主字段成员的 (table_id, physical_column) 加入排除集合
+            for table_id, phys_col, _ in check_info.get('others', []):
+                exclude.add((table_id, phys_col))
+        return exclude
 
     def _collect_check_values(self, table, rows, code_checks, pk_fields, code_to_physical,
                               primary_values, member_values):
@@ -964,7 +1635,7 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         from django.db import connection
         try:
             with connection.cursor() as cursor:
-                cursor.execute(f'SELECT * FROM "{table.code}" LIMIT 1000')
+                cursor.execute(f'SELECT * FROM "{table.code}"')
                 columns = [desc[0] for desc in cursor.description]
                 rows = []
                 for row in cursor.fetchall():
@@ -973,9 +1644,19 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         except Exception:
             return None
 
-    def _query_external_table(self, table):
-        """查询外部数据源表数据"""
+    def _query_external_table(self, table, order_by=None, conditions=None):
+        """查询外部数据源表数据（全量，无行数截断）。order_by 为物理列名时附加确定性排序（取首条折叠用）。
+
+        conditions（2026-08-08 新增）：结构化 ON/WHERE 筛选条件（AND 组合），
+        每项 {"field": 物理列名或字段编码, "operator": "eq/ne/gt/ge/lt/le/in", "value": 值}；
+        字段名白名单校验（仅本表 active 字段的 physical_name/code），值全部参数化，禁 SQL 拼接注入。
+
+        2026-08-08：去除 TOP 1000 截断——多表各取前 N 行且物理序不一致，导致不同表匹配不同批次记录
+        （真实根因：表 28↔表 22 截断交集为 0 致 NAME/PRICE 全空、表 24 与表 22 截断批次分裂致 1334 漂移）。
+        fetchmany 分批转换防 pyodbc C 层一次性物化全部行（全量行仍驻留 Python 内存供折叠）。
+        """
         from apps.modeling.views import DataSourceViewSet, _json_safe
+        from apps.modeling.models import Field as MField
         from django.db import connections
 
         ds = table.data_source
@@ -1011,28 +1692,461 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             conn.ensure_connection()
             schema = table.schema or {'postgresql': 'public', 'sqlserver': 'dbo', 'oracle': '', 'mysql': ''}.get(ds.db_type, '')
             ext_table = table.external_table_name
+            order_sql = ''
+            if order_by:
+                if ds.db_type == 'sqlserver':
+                    order_sql = f' ORDER BY [{order_by}]'
+                elif ds.db_type == 'oracle':
+                    order_sql = f' ORDER BY "{order_by}"'
+                elif ds.db_type == 'mysql':
+                    order_sql = f' ORDER BY `{order_by}`'
+                else:
+                    order_sql = f' ORDER BY "{order_by}"'
+            where_sql = ''
+            where_params = []
+            if conditions:
+                where_sql, where_params = self._build_conditions_sql(table, conditions, ds.db_type)
             with conn.cursor() as cursor:
                 if ds.db_type == 'sqlserver':
                     full_table = f'[{schema}].[{ext_table}]'
-                    cursor.execute(f'SELECT TOP 1000 * FROM {full_table}')
+                    cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
                 elif ds.db_type == 'oracle':
                     owner = schema.upper() if schema else ''
                     full_table = f'"{owner}"."{ext_table}"' if owner else f'"{ext_table}"'
-                    cursor.execute(f'SELECT * FROM {full_table} WHERE ROWNUM <= 1000')
+                    cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
                 elif ds.db_type == 'mysql':
-                    cursor.execute(f'SELECT * FROM `{ext_table}` LIMIT 1000')
+                    cursor.execute(f'SELECT * FROM `{ext_table}`{where_sql}{order_sql}', where_params)
                 else:
                     full_table = f'"{schema}"."{ext_table}"'
-                    cursor.execute(f'SELECT * FROM {full_table} LIMIT 1000')
+                    cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
                 columns = [desc[0] for desc in cursor.description]
                 rows = []
-                for row in cursor.fetchall():
-                    rows.append({col: _json_safe(val) for col, val in zip(columns, row)})
+                while True:
+                    chunk = cursor.fetchmany(10000)
+                    if not chunk:
+                        break
+                    rows.extend({col: _json_safe(val) for col, val in zip(columns, row)} for row in chunk)
                 return rows
         finally:
             connections.databases.pop(alias, None)
 
-    def _upsert_records_from_rows(self, archive, table, rows, code_to_physical, schema_type_map, pk_fields, operated_by, stats, matched_ids=None, change_entries=None):
+    def _build_conditions_sql(self, table, conditions, db_type):
+        """结构化条件 → 方言化 WHERE 子句（字段白名单校验 + 值参数化，禁拼接注入）。"""
+        from apps.modeling.models import Field as MField
+        valid_phys = {}
+        for f in MField.objects.filter(table=table, status=MField.Status.ACTIVE):
+            phys = f.physical_name or f.code
+            if phys:
+                valid_phys[phys] = phys
+                valid_phys.setdefault(f.code, phys)
+        if db_type == 'sqlserver':
+            def _q(col):
+                return f'[{col}]'
+        elif db_type == 'oracle':
+            def _q(col):
+                return f'"{col}"'
+        elif db_type == 'mysql':
+            def _q(col):
+                return f'`{col}`'
+        else:
+            def _q(col):
+                return f'"{col}"'
+        clauses = []
+        params = []
+        for cond in conditions or []:
+            col = str(cond.get('field', '')).strip()
+            op = str(cond.get('operator', 'eq')).strip()
+            val = cond.get('value')
+            if col not in valid_phys:
+                raise ValueError(f'条件字段 {col} 不在表 {table.name} 字段白名单中')
+            quoted = _q(valid_phys[col])
+            if op == 'eq':
+                clauses.append(f'{quoted} = %s'); params.append(val)
+            elif op == 'ne':
+                clauses.append(f'{quoted} <> %s'); params.append(val)
+            elif op == 'gt':
+                clauses.append(f'{quoted} > %s'); params.append(val)
+            elif op == 'ge':
+                clauses.append(f'{quoted} >= %s'); params.append(val)
+            elif op == 'lt':
+                clauses.append(f'{quoted} < %s'); params.append(val)
+            elif op == 'le':
+                clauses.append(f'{quoted} <= %s'); params.append(val)
+            elif op == 'in':
+                if not isinstance(val, list):
+                    raise ValueError(f'条件 {col} 的 in 操作符 value 必须是数组')
+                placeholders = ', '.join(['%s'] * len(val))
+                clauses.append(f'{quoted} IN ({placeholders})'); params.extend(val)
+            else:
+                raise ValueError(f'不支持的条件操作符 {op}（支持 eq/ne/gt/ge/lt/le/in）')
+        if not clauses:
+            return '', []
+        return ' WHERE ' + ' AND '.join(clauses), params
+
+    def _join_header_rows(self, table, cfg, rows):
+        """预组合平铺（2026-08-11 第三轮）：头表全量拉取，按 header_link_field↔detail_link_field
+        JOIN 进明细行。头表字段以 `__hdr__{物理列名}` 前缀并入（与明细字段重名不冲突）；
+        头表查询失败或未命中时降级保留纯明细行（不阻断同步）。
+        同值多行取排序后最后一条（确定性，与 nested_sources 一致）。"""
+        from apps.modeling.models import Field as MField
+        header_table = cfg.header_table
+        h_link = cfg.header_link_field
+        d_link = cfg.detail_link_field
+        h_phys = h_link.physical_name or h_link.code
+        d_phys = d_link.physical_name or d_link.code
+        t_pk = MField.objects.filter(
+            table=header_table, is_primary_key=True, status=MField.Status.ACTIVE).first()
+        header_rows = self._query_external_table(
+            header_table, order_by=(t_pk.physical_name or t_pk.code) if t_pk else None)
+        if header_rows is None:
+            return rows  # 头表查询失败：降级为纯明细（头字段缺失，同步不阻断）
+        hindex = {}
+        for hr in header_rows:
+            val = hr.get(h_phys)
+            if val is None:
+                continue
+            hindex[str(val)] = hr
+        out = []
+        for row in rows:
+            dv = row.get(d_phys)
+            hr = hindex.get(str(dv)) if dv is not None else None
+            if hr:
+                merged = dict(row)
+                for k, v in hr.items():
+                    merged[f'__hdr__{k}'] = v
+                out.append(merged)
+            else:
+                out.append(row)
+        return out
+
+    def _sync_detail_rows(self, archive, table, rows, detail_fm, code_to_physical, pk_fields,
+                          match_channels, operated_by, stats, matched_ids, change_entries,
+                          created_in_this_batch, sync_exclude_codes):
+        """子表关系同步（2026-08-08）：明细行全量保留写 ArchiveRecordDetail + 代表行折叠写主表。
+
+        - 行键：detail_fm.row_key_field 配置优先；未配置 → _detect_unique_column 自动检测唯一列并回填配置；
+        - 嵌套属性：target_table=本表的 reference 映射（一级透传），源表属性以 `__nested__{code}` 前缀
+          并入明细行（同值多行取排序后最后一条，确定性）；
+        - 代表行：display_sort_field 排序（空值垫底）+ 行键 DESC 次级键取首条写主表
+          （生效日期最新 + 同日期取行键最大，确定性可复现）；
+        - 明细 upsert：source_data 整层替换 + manual_data 保留，merged 有差异才 save；
+          批1 明细变更不进 change_entries（防假明细 BUG-2026-0805-01 教训），批2 扩展 ChangeDetail 时统一加；
+        - 明细停用清扫：源侧消失的行标 DELETED（安全闸门：无同步错误时执行）。
+        """
+        from apps.modeling.models import FieldMapping, Field as MField
+
+        schema = archive.schema or []
+        field_name_map = {i.get('code'): i.get('name') or i.get('code') for i in schema}
+        source_table_name = table.name or table.code
+
+        # 本表物理列 → schema code（本表映射字段写入用）
+        # 2026-08-11 第三轮：预组合平铺时头表物理列同样纳入（__hdr__ 前缀字段按基础列名映射）
+        physical_to_schema = {}
+        detail_cfg0 = detail_fm.detail_config
+        header_table_id = detail_cfg0.header_table_id if (detail_cfg0 and detail_cfg0.header_table_id) else None
+        for schema_code, mappings in code_to_physical.items():
+            for tbl_id, phys_col in mappings:
+                if tbl_id == table.id or tbl_id == header_table_id:
+                    physical_to_schema[phys_col] = schema_code
+
+        # 本表物理列 → 主键 schema code（明细归属主记录 + 代表行 key 构建用）
+        # 2026-08-11 第三轮修复：预组合时头表物理列同样纳入（头表字段可作挂载关联键，
+        # 平铺行中以其 `__hdr__` 前缀形态被 _record_key_for_row 取值）
+        pk_physical_to_schema = {}
+        for pk in pk_fields:
+            for tbl_id, phys in list(code_to_physical.get(pk, [])) + list(match_channels.get(pk, [])):
+                if tbl_id == table.id or tbl_id == header_table_id:
+                    pk_physical_to_schema[phys] = pk
+        if not pk_physical_to_schema:
+            stats['warnings'].append(
+                f'明细子表 {source_table_name}：本表无映射到档案主键的物理列，'
+                f'明细行无法归属主记录（请在关系管理配置指向主表主键的映射）')
+            return
+
+        # 行键列：detail_config 优先；未配置自动检测唯一列并回填配置（一次检测全表复用）
+        detail_cfg = detail_fm.detail_config
+        row_key_field = detail_cfg.row_key_field if (detail_cfg and detail_cfg.row_key_field_id) else detail_fm.row_key_field
+        row_key_phys = None
+        if row_key_field:
+            row_key_phys = row_key_field.physical_name or row_key_field.code
+        else:
+            row_key_phys = self._detect_unique_column(table, rows)
+            if not row_key_phys:
+                stats['warnings'].append(
+                    f'明细子表 {source_table_name}：未配置行键列且自动检测未找到唯一列，'
+                    f'跳过明细同步（可在关系管理手动指定行键列）')
+                return
+            mf = (MField.objects.filter(table=table, physical_name=row_key_phys).first()
+                  or MField.objects.filter(table=table, code=row_key_phys).first())
+            if mf:
+                if detail_cfg:
+                    detail_cfg.row_key_field = mf
+                    detail_cfg.save(update_fields=['row_key_field'])
+                else:
+                    detail_fm.row_key_field = mf
+                    detail_fm.save(update_fields=['row_key_field'])
+                stats['warnings'].append(
+                    f'明细子表 {source_table_name}：行键列自动检测为 {row_key_phys}，已回填关系配置')
+
+        # 代表行排序字段（空值垫底；日期 ISO 字典序=时间序；行键次级键保证确定性）
+        display_field = detail_cfg.display_sort_field if (detail_cfg and detail_cfg.display_sort_field_id) else detail_fm.display_sort_field
+        display_phys = (display_field.physical_name or display_field.code) if display_field else None
+        sort_desc = detail_cfg.display_sort_desc if (detail_cfg and detail_cfg.id) else detail_fm.display_sort_desc
+        if display_phys is None:
+            stats['warnings'].append(
+                f'明细子表 {source_table_name}：未配置代表行排序字段，主表展示字段未更新'
+                f'（可在关系管理配置，如 EFFECTIVE_DATE）')
+
+        # 嵌套属性源表：target_table=本表的 reference 映射（一级透传，如 27.NAME/DESCRIPTION 并进 28 行）
+        nested_sources = []
+        for fm in FieldMapping.objects.filter(
+                target_table=table,
+                relation_type=FieldMapping.RelationType.REFERENCE,
+                source_field__status='active', target_field__status='active',
+        ).select_related('source_table', 'source_field', 'target_field'):
+            src = fm.source_table
+            if not src.data_source:
+                continue
+            src_phys = fm.source_field.physical_name or fm.source_field.code
+            tgt_phys = fm.target_field.physical_name or fm.target_field.code
+            if not src_phys or not tgt_phys:
+                continue
+            # 源表映射到 schema 的字段（仅透传已释放字段）
+            src_physical_to_schema = {}
+            for schema_code, mappings in code_to_physical.items():
+                for tbl_id, phys_col in mappings:
+                    if tbl_id == src.id:
+                        src_physical_to_schema[phys_col] = schema_code
+            t_pk = MField.objects.filter(
+                table=src, is_primary_key=True, status=MField.Status.ACTIVE).first()
+            src_rows = self._query_external_table(
+                src, order_by=(t_pk.physical_name or t_pk.code) if t_pk else None)
+            if src_rows is None:
+                continue
+            tindex = {}
+            for srow in src_rows:
+                val = srow.get(src_phys)
+                if val is None:
+                    continue
+                tindex[str(val)] = srow  # 同值多行取排序后最后一条（确定性）
+            nested_sources.append((tgt_phys, tindex, src_physical_to_schema, src.id))
+
+        def _rk(v):
+            return '' if v is None else str(v)
+
+        # 预加载本档案已有明细（含停用），按 (record_id, row_key) 索引
+        existing_details = {}
+        for d in ArchiveRecordDetail.objects.filter(
+                mapping=detail_fm, record__archive=archive).order_by('id'):
+            existing_details[(d.record_id, d.row_key)] = d
+
+        # 预加载该档案全部记录（active 优先），代表行/明细归属匹配用
+        existing_records = {}
+        for rec in ArchiveRecord.objects.filter(archive=archive).order_by('id'):
+            key = tuple(str(rec.data.get(pk, '')) for pk in pk_fields)
+            if not any(k for k in key):
+                continue
+            prev = existing_records.get(key)
+            if prev is not None and prev.status == ArchiveRecord.Status.ACTIVE:
+                continue
+            if prev is None or rec.status == ArchiveRecord.Status.ACTIVE:
+                existing_records[key] = rec
+
+        def _record_key_for_row(row):
+            key_parts = []
+            for pk in pk_fields:
+                pk_val = ''
+                for phys, code in pk_physical_to_schema.items():
+                    if code == pk:
+                        # 2026-08-11 第三轮修复：头表字段在平铺行中以 __hdr__ 前缀存在，同样参与归属匹配
+                        if phys in row:
+                            pk_val = row[phys]
+                            break
+                        hdr_key = f'__hdr__{phys}'
+                        if hdr_key in row:
+                            pk_val = row[hdr_key]
+                            break
+                key_parts.append('' if pk_val is None else str(pk_val))
+            return tuple(key_parts)
+
+        # 代表行排序（display_sort DESC/ASC + 行键次级键；空值永远垫底）
+        sorted_rows = rows
+        if display_phys:
+            non_null = [r for r in rows if r.get(display_phys) is not None]
+            null_rows = [r for r in rows if r.get(display_phys) is None]
+            non_null.sort(key=lambda r: (str(r.get(display_phys)), _rk(r.get(row_key_phys))),
+                          reverse=sort_desc)
+            sorted_rows = non_null + null_rows
+
+        detail_no_change = []
+        record_no_change = []
+        matched_detail_ids = set()
+        blank_rk = 0
+        for row in sorted_rows:
+            # —— 明细行归属主记录（行内映射到主键的物理列构建 key）——
+            rec_key = _record_key_for_row(row)
+            existing = existing_records.get(rec_key)
+            if not existing:
+                continue  # 无法归属主记录：跳过（外键引用非独立实体）
+
+            # —— 明细行数据：本表映射字段 + 嵌套属性透传（__nested__ 前缀独立命名空间）——
+            # 2026-08-11 第三轮：__hdr__ 前缀字段按基础列名映射头表物理列（预组合平铺）
+            detail_data = {}
+            for col_name, value in row.items():
+                is_hdr = col_name.startswith('__hdr__')
+                base_col = col_name[7:] if is_hdr else col_name
+                schema_code = physical_to_schema.get(base_col)
+                if not schema_code:
+                    continue
+                if (table.id, base_col) in sync_exclude_codes and schema_code not in pk_fields:
+                    continue
+                detail_data[schema_code] = value
+            for tgt_phys, tindex, src_phys_to_schema, src_id in nested_sources:
+                tgt_val = row.get(tgt_phys)
+                if tgt_val is None:
+                    continue
+                srow = tindex.get(str(tgt_val))
+                if not srow:
+                    continue
+                for sc, sv in srow.items():
+                    sc_code = src_phys_to_schema.get(sc)
+                    if not sc_code or sc_code in pk_fields:
+                        continue
+                    if (src_id, sc) in sync_exclude_codes:
+                        continue
+                    detail_data[f'__nested__{sc_code}'] = sv
+            if not detail_data:
+                continue  # 无任何档案字段的明细行不落库
+
+            rk = _rk(row.get(row_key_phys))
+            if not rk:
+                blank_rk += 1
+                continue  # 行键为空：无法唯一定位明细（行键列配置错误，防 unique_together 冲突）
+            existing_detail = existing_details.get((existing.id, rk))
+            if existing_detail:
+                matched_detail_ids.add(existing_detail.id)
+                # 源删自动停用的明细行源端重现 → 自动复活
+                if existing_detail.status == ArchiveRecordDetail.Status.DELETED:
+                    existing_detail.status = ArchiveRecordDetail.Status.ACTIVE
+                # 整层替换：明细行全部数据来自本表（无他表合并），源侧删字段即消失
+                existing_detail.source_data = detail_data
+                merged, lineage = _merge_record_data(existing_detail, schema)
+                old_data = existing_detail.data or {}
+                if old_data != merged:
+                    existing_detail.data = merged
+                    existing_detail.lineage = lineage
+                    existing_detail.save()
+                    stats['details_updated'] += 1
+                else:
+                    existing_detail.lineage = lineage
+                    detail_no_change.append(existing_detail)
+            else:
+                detail = ArchiveRecordDetail(
+                    record=existing, mapping=detail_fm, row_key=rk,
+                    source_data=detail_data, manual_data={},
+                )
+                merged, lineage = _merge_record_data(detail, schema)
+                detail.data = merged
+                detail.lineage = lineage
+                detail.save()
+                existing_details[(existing.id, rk)] = detail
+                matched_detail_ids.add(detail.id)
+                stats['details_created'] += 1
+
+        if blank_rk:
+            stats['warnings'].append(
+                f'明细子表 {source_table_name}：{blank_rk} 行行键为空已跳过（请检查行键列配置）')
+
+        # 收尾：无数据差异的明细统一批量落库（含复活状态/血缘）
+        if detail_no_change:
+            ArchiveRecordDetail.objects.bulk_update(
+                detail_no_change,
+                ['source_data', 'manual_data', 'lineage', 'status'],
+                batch_size=2000,
+            )
+
+        # —— 代表行写主表（排序后首行 = 生效日期最新 + 同日期行键最大；空值垫底后必为非空代表行）——
+        # 复用 _write_dimension_row 公共写入逻辑：本表非空映射字段 → source_data 合并 → 版本+1 + 变更明细
+        if sorted_rows and display_phys is not None:
+            rep_row = sorted_rows[0]
+            rep_key = _record_key_for_row(rep_row)
+            rep_existing = existing_records.get(rep_key)
+            if rep_existing:
+                self._write_dimension_row(
+                    rep_existing, rep_row, physical_to_schema, schema, field_name_map,
+                    source_table_name, rep_key, operated_by, stats, matched_ids,
+                    change_entries, created_in_this_batch, record_no_change,
+                )
+
+        # 收尾：代表行变更的无差异记录批量落库
+        if record_no_change:
+            ArchiveRecord.objects.bulk_update(
+                record_no_change,
+                ['source_data', 'manual_data', 'lineage', 'sync_status', 'status'],
+                batch_size=2000,
+            )
+
+        # —— 明细停用清扫：源侧消失的明细行标 DELETED（安全闸门：无错误时执行）——
+        if not stats['errors']:
+            candidate_ids = set(ArchiveRecordDetail.objects.filter(
+                mapping=detail_fm, status=ArchiveRecordDetail.Status.ACTIVE,
+            ).values_list('id', flat=True))
+            stale_ids = sorted(candidate_ids - matched_detail_ids)
+            for i in range(0, len(stale_ids), 500):
+                ArchiveRecordDetail.objects.filter(id__in=stale_ids[i:i + 500]).update(
+                    status=ArchiveRecordDetail.Status.DELETED)
+            stats['details_deactivated'] += len(stale_ids)
+
+        # 批2：明细聚合变更日志（统计级，不逐行；防假明细 BUG-2026-0805-01）
+        created = stats.get('details_created', 0)
+        updated = stats.get('details_updated', 0)
+        deactivated = stats.get('details_deactivated', 0)
+        if created > 0 or updated > 0 or deactivated > 0:
+            change_entries.append({
+                'record_id': None,
+                'record_key': f'{source_table_name} 明细',
+                'change_type': ArchiveChangeDetail.ChangeType.DETAIL_SYNC,
+                'field_changes': [{'detail_stats': {
+                    'created': created, 'updated': updated, 'deactivated': deactivated,
+                }}],
+                'version_before': None,
+                'version_after': None,
+                'detail_group': None,
+                'detail_row_key': '',
+            })
+
+    def _detect_unique_column(self, table, rows):
+        """全量行逐列统计唯一性：无空值且 COUNT(DISTINCT)==总行数 = 候选唯一列。
+        优先已标主键（is_primary_key）列，其次按物理列稳定序取第一个。
+        覆盖反例：FID 标主键但仅 14,883/239,504 唯一（标主键≠行唯一，须实测）。"""
+        from apps.modeling.models import Field as MField
+        if not rows:
+            return None
+        total = len(rows)
+        cols = list(rows[0].keys())
+        counts = {c: set() for c in cols}
+        for r in rows:
+            for c in cols:
+                s = counts[c]
+                if s is None:
+                    continue
+                v = r.get(c)
+                if v is None or v == '':
+                    counts[c] = None  # 空值 → 不可用作行键
+                else:
+                    s.add(str(v))
+        candidates = [c for c in cols if counts[c] is not None and len(counts[c]) == total]
+        if not candidates:
+            return None
+        pk_names = set()
+        for f in MField.objects.filter(table=table, is_primary_key=True, status=MField.Status.ACTIVE):
+            pk_names.add(f.physical_name or f.code)
+        for c in candidates:
+            if c in pk_names:
+                return c
+        return candidates[0]
+
+    def _upsert_records_from_rows(self, archive, table, rows, code_to_physical, schema_type_map, pk_fields, operated_by, stats, matched_ids=None, change_entries=None, created_in_this_batch=None, sync_exclude_codes=None, match_channels=None, is_primary_table=False):
         """将查询结果行写入档案（双层存储，换底重合并）：
 
         - 该表映射到的字段值直接写入 source_data 底层（零比对，无保护/覆盖分支）；
@@ -1040,13 +2154,24 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         - 合并结果与旧 data 有差异才 version+1 并留版本快照（change_summary.source_refreshed）；
         - 停用记录也参与匹配：源删自动停用（sync_status='stale'）的记录源端重现时自动复活；
           手工停用的记录只更新数据保持停用，不再重建重复记录；
-        - 每条变更（新增/修改/复活）追加到 change_entries，供收尾落变更日志批次。
+        - 每条变更（新增/修改/复活）追加到 change_entries，供收尾落变更日志批次；
+        - 匹配通道（match_channels）：组合字段非主成员列（外键）仅用于构建记录 key，不写入档案；
+        - 确定性折叠：同 key 多行保留排序后的最后一行（1:n 取首条），并计入 cardinality_fold_count；
+        - 非主表匹配不到已有记录时跳过不创建（外键引用不是独立实体，防数据爆炸）。
         """
         schema = archive.schema or []
         if matched_ids is None:
             matched_ids = set()
         if change_entries is None:
             change_entries = []
+        if created_in_this_batch is None:
+            created_in_this_batch = set()
+        if sync_exclude_codes is None:
+            sync_exclude_codes = set()
+        if match_channels is None:
+            match_channels = {}
+        # 无数据差异的记录收集批量落库（防全量模式下每轮 20 万次逐条 UPDATE）
+        no_change_updates = []
         # 字段 code → 中文名（变更明细展示用）
         field_name_map = {i.get('code'): i.get('name') or i.get('code') for i in schema}
 
@@ -1056,6 +2181,13 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             for tbl_id, phys_col in mappings:
                 if tbl_id == table.id:
                     physical_to_schema[phys_col] = schema_code
+
+        # 匹配通道：本表中映射到主键 schema code 的物理列（不写入，仅构建 key 用）
+        pk_physical_to_schema = {}
+        for pk_code, entries in match_channels.items():
+            for tbl_id, phys in entries:
+                if tbl_id == table.id:
+                    pk_physical_to_schema[phys] = pk_code
 
         # 预加载该档案全部记录（含停用），用主键值建索引；同主键时 active 优先
         existing_records = {}
@@ -1072,29 +2204,61 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         source_table_name = table.name or table.code
         now_iso = timezone.now().isoformat()
 
+        # 预解析 + 按主键折叠：同 key 多行保留排序后的最后一行（确定性取首条）
+        parsed_rows = []
+        fold_keys = set()  # 出现 >1 行的 key（1:n 发散检查）
+        seen_keys = {}
         for row in rows:
             record_data = {}
+            pk_match_values = {}
             for col_name, value in row.items():
+                # 先解析 schema code
                 schema_code = physical_to_schema.get(col_name)
                 if not schema_code:
-                    if col_name in schema_type_map:
+                    # 匹配通道：组合字段非主成员列（外键）仅用于构建记录 key，不写入
+                    pk_code = pk_physical_to_schema.get(col_name)
+                    if pk_code:
+                        pk_match_values[pk_code] = value
+                        continue
+                    # 同名兜底仅限主键列（记录匹配必需）：未映射给本表的其他同名列
+                    # 不得写入，否则他表同名空列会偷渡清空已有值造成假变更（BUG-2026-0805-01）
+                    if col_name in pk_fields and col_name in schema_type_map:
                         schema_code = col_name
-                if schema_code:
-                    record_data[schema_code] = value
+                if not schema_code:
+                    continue
+                # 组合字段的非主字段成员不写入档案（只用于一致性检查）
+                # 但主键字段必须保留用于记录匹配，即使它在排除集合中
+                if (table.id, col_name) in sync_exclude_codes and schema_code not in pk_fields:
+                    continue
+                record_data[schema_code] = value
 
-            if not record_data:
+            if not record_data and not pk_match_values:
                 continue
 
             # 用主键值匹配已有记录；无主键值的源行不进档案（无法匹配，避免每轮刷新重建）
-            key = tuple(str(record_data.get(pk, '')) for pk in pk_fields)
+            key = tuple(str(record_data.get(pk, pk_match_values.get(pk, ''))) for pk in pk_fields)
             if not any(k for k in key):
                 continue
+            if key in seen_keys:
+                fold_keys.add(key)
+            seen_keys[key] = (record_data, pk_match_values)
+
+        if fold_keys and stats is not None:
+            stats['cardinality_fold_count'] = stats.get('cardinality_fold_count', 0) + len(fold_keys)
+            table_label = table.name or table.code
+            stats['cardinality_warnings'] = stats.get('cardinality_warnings', [])
+            stats['cardinality_warnings'].append(
+                f'表 {table_label}: {len(fold_keys)} 个主键对应多条源行，已按确定性排序取首条折叠'
+            )
+
+        for key, (record_data, pk_match_values) in seen_keys.items():
             existing = existing_records.get(key)
 
             if existing:
                 matched_ids.add(existing.id)
                 # 源删自动停用的记录源端重现 → 自动复活；手工停用（非 stale）保持停用
                 reactivated = False
+                ver_before = existing.version  # v18 版本映射：变更前版本号
                 if existing.status == ArchiveRecord.Status.DELETED and existing.sync_status == 'stale':
                     existing.status = ArchiveRecord.Status.ACTIVE
                     stats['records_reactivated'] += 1
@@ -1120,11 +2284,17 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     existing.updated_by = operated_by
                     existing.version += 1
                     existing.save()
+                    ss, _ = ArchiveSchemaSnapshot.objects.get_or_create(
+                        archive=archive,
+                        schema_version=archive.schema_version,
+                        defaults={'schema': archive.schema},
+                    )
                     ArchiveRecordVersion.objects.create(
                         record=existing,
                         version=existing.version,
                         data=existing.data,
-                        schema=archive.schema,
+                        schema_version_ref=ss,
+                        schema=None,
                         operated_by=operated_by,
                         operation_type=ArchiveRecordVersion.OperationType.UPDATE,
                         change_summary={
@@ -1135,12 +2305,16 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                             ],
                         },
                     )
-                    stats['records_updated'] += 1
+                    # 只有当记录不是本轮刚创建时才计入「修改」（后续表合并数据到刚创建的记录不算修改）
+                    if existing.id not in created_in_this_batch:
+                        stats['records_updated'] += 1
                 else:
-                    # 合并结果无变化：仅落底层/血缘（含可能的复活状态），不动版本号
-                    existing.save(update_fields=['source_data', 'manual_data', 'lineage', 'sync_status', 'status'])
+                    # 合并结果无变化：仅落底层/血缘（含可能的复活状态），不动版本号；批量收集收尾统一更新
+                    no_change_updates.append(existing)
                 # 变更日志：复活优先于修改；字段级旧值→新值
-                if reactivated or changed_codes:
+                # 本轮刚创建的记录被后续表合并时不重复记 UPDATED（创建时已记 CREATED，
+                # 与 records_updated 统计口径一致，防首次全量 20 万条重复明细爆炸）
+                if reactivated or (changed_codes and existing.id not in created_in_this_batch):
                     change_entries.append({
                         'record_id': existing.id,
                         'record_key': '/'.join(k for k in key),
@@ -1151,9 +2325,13 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                              'old': old_data.get(c), 'new': merged.get(c)}
                             for c in changed_codes
                         ],
+                        # v18 版本映射：无数据差异（仅复活）时版本号不变，两者相等
+                        'version_before': ver_before,
+                        'version_after': existing.version,
                     })
-            else:
+            elif is_primary_table:
                 # 创建新记录：底层=源数据，覆盖层空，data=合并结果
+                # 仅主表可创建新实体；非主表匹配不到即跳过（外键引用不是独立实体，防数据爆炸）
                 record = ArchiveRecord(
                     archive=archive,
                     source_data=record_data,
@@ -1170,11 +2348,17 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 record.data = merged
                 record.lineage = lineage
                 record.save()
+                ss, _ = ArchiveSchemaSnapshot.objects.get_or_create(
+                    archive=archive,
+                    schema_version=archive.schema_version,
+                    defaults={'schema': archive.schema},
+                )
                 ArchiveRecordVersion.objects.create(
                     record=record,
                     version=1,
                     data=record.data,
-                    schema=archive.schema,
+                    schema_version_ref=ss,
+                    schema=None,
                     operated_by=operated_by,
                     operation_type=ArchiveRecordVersion.OperationType.CREATE,
                     change_summary={
@@ -1189,6 +2373,7 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 # 加入索引以便后续表能匹配到这条记录
                 existing_records[key] = record
                 matched_ids.add(record.id)
+                created_in_this_batch.add(record.id)  # 标记为本轮刚创建的记录
                 stats['records_created'] += 1
                 # 变更日志：新增只记记录级，不展开全部字段值
                 change_entries.append({
@@ -1196,7 +2381,376 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     'record_key': '/'.join(k for k in key),
                     'change_type': ArchiveChangeDetail.ChangeType.CREATED,
                     'field_changes': [],
+                    # v18 版本映射：新建无变更前版本
+                    'version_before': None,
+                    'version_after': 1,
                 })
+
+        # 收尾：无数据差异的记录统一批量落库（含复活状态）
+        if no_change_updates:
+            ArchiveRecord.objects.bulk_update(
+                no_change_updates,
+                ['source_data', 'manual_data', 'lineage', 'sync_status', 'status'],
+                batch_size=2000,
+            )
+
+    def _upsert_dimension_via_mapping(self, archive, table, rows, code_to_physical, schema_type_map,
+                                      pk_fields, match_channels, operated_by, stats, matched_ids=None,
+                                      change_entries=None, created_in_this_batch=None):
+        """维度表经 FieldMapping 中转匹配主记录（如价目表 NAME 经明细 FID 关联物料）。
+
+        - FieldMapping(source_table=本表)：本表 source_field 值 → target 表 target_field 值（引用关系）；
+        - target 行中映射到主键的物理列（code_to_physical + match_channels）→ 构建记录 key → 匹配主记录；
+        - 本表映射字段（如 NAME）折叠写入匹配到的记录（确定性排序取首条）；
+        - 仅处理一级中转；目标行无法匹配主记录时跳过（外键引用非独立实体）。
+        """
+        from apps.modeling.models import FieldMapping, Field as MField
+
+        schema = archive.schema or []
+        if matched_ids is None:
+            matched_ids = set()
+        if change_entries is None:
+            change_entries = []
+        if created_in_this_batch is None:
+            created_in_this_batch = set()
+        # 无数据差异的记录收集批量落库（与 _upsert_records_from_rows 同口径）
+        no_change_updates = []
+        field_name_map = {i.get('code'): i.get('name') or i.get('code') for i in schema}
+        source_table_name = table.name or table.code
+
+        # 本表 物理列 → schema code（本表映射字段写入用）
+        physical_to_schema = {}
+        for schema_code, mappings in code_to_physical.items():
+            for tbl_id, phys_col in mappings:
+                if tbl_id == table.id:
+                    physical_to_schema[phys_col] = schema_code
+
+        fms = FieldMapping.objects.filter(
+            source_table=table, source_field__status='active'
+        ).select_related('source_field', 'target_table', 'target_field')
+
+        # 预加载该档案全部记录（含停用），用主键值建索引；同主键时 active 优先（一级/多级共用）
+        existing_records = {}
+        for rec in ArchiveRecord.objects.filter(archive=archive).order_by('id'):
+            key = tuple(str(rec.data.get(pk, '')) for pk in pk_fields)
+            if not any(k for k in key):
+                continue
+            prev = existing_records.get(key)
+            if prev is not None and prev.status == ArchiveRecord.Status.ACTIVE:
+                continue
+            if prev is None or rec.status == ArchiveRecord.Status.ACTIVE:
+                existing_records[key] = rec
+
+        # —— 多级中转（2026-08-10）：本表无 source 映射时，沿 FieldMapping 无向等值图 BFS
+        # 找「可映射档案主键的表」路径逐级透传匹配（如分组多语言 26.FID→25.FID→22.MATERIAL_GROUP→
+        # 22.MATERIAL_ID→MTL_ID 两级链；原引擎仅支持一级，整表静默跳过）——
+        if not fms:
+            chain, target_pk_phys = self._build_mapping_chain(
+                table, pk_fields, code_to_physical, match_channels)
+            if chain is not None:
+                self._apply_mapping_chain(
+                    archive, table, rows, chain, target_pk_phys, pk_fields, code_to_physical,
+                    schema_type_map, existing_records, operated_by, stats, matched_ids,
+                    change_entries, created_in_this_batch,
+                )
+            return
+
+        # 各中转目标表：查询行，构建 {目标字段值: [目标行...]} 索引（2026-08-10 改：收集全部匹配行供展开传播）
+        for fm in fms:
+            target = fm.target_table
+            if not target.data_source:
+                continue
+            target_phys = fm.target_field.physical_name or fm.target_field.code
+            t_pk_field = MField.objects.filter(
+                table=target, is_primary_key=True, status=MField.Status.ACTIVE
+            ).first()
+            t_order_by = t_pk_field.physical_name or t_pk_field.code if t_pk_field else None
+            trows = self._query_external_table(target, order_by=t_order_by)
+            if trows is None:
+                continue
+            tindex = {}
+            for trow in trows:
+                val = trow.get(target_phys)
+                if val is None:
+                    continue
+                # 同值多行全部收集：展开传播（组→组内全部物料）；目标键唯一时等价折叠
+                tindex.setdefault(str(val), []).append(trow)
+
+            # target 行中映射到主键的物理列 → schema code
+            t_pk_physical_to_schema = {}
+            for pk in pk_fields:
+                for tbl_id, phys in list(code_to_physical.get(pk, [])) + list(match_channels.get(pk, [])):
+                    if tbl_id == target.id:
+                        t_pk_physical_to_schema[phys] = pk
+            if not t_pk_physical_to_schema:
+                continue
+
+            # 本表行处理
+            src_phys = fm.source_field.physical_name or fm.source_field.code
+            for row in rows:
+                src_val = row.get(src_phys)
+                if src_val is None:
+                    continue
+                trows_match = tindex.get(str(src_val))
+                if not trows_match:
+                    continue
+                # 展开：对每个匹配目标行写（每组属性传播到组内全部物料）；
+                # 目标键唯一时仅一行，等价原折叠取首条语义
+                for trow in trows_match:
+                    # 从目标行提取主键值
+                    key_parts = []
+                    for pk in pk_fields:
+                        pk_val = None
+                        for phys, code in t_pk_physical_to_schema.items():
+                            if code == pk and phys in trow:
+                                pk_val = trow[phys]
+                                break
+                        key_parts.append('' if pk_val is None else str(pk_val))
+                    key = tuple(key_parts)
+                    if not any(key):
+                        continue
+                    existing = existing_records.get(key)
+                    if not existing:
+                        continue  # 目标行无法匹配主记录：跳过（外键引用非独立实体）
+                    # 折叠写入公共逻辑（与多级中转共用）
+                    self._write_dimension_row(
+                        existing, row, physical_to_schema, schema, field_name_map,
+                        source_table_name, key, operated_by, stats, matched_ids,
+                        change_entries, created_in_this_batch, no_change_updates,
+                    )
+
+        # 收尾：无数据差异的记录统一批量落库
+        if no_change_updates:
+            ArchiveRecord.objects.bulk_update(
+                no_change_updates,
+                ['source_data', 'manual_data', 'lineage', 'sync_status', 'status'],
+                batch_size=2000,
+            )
+
+    def _build_mapping_chain(self, table, pk_fields, code_to_physical, match_channels):
+        """BFS 沿 FieldMapping 无向等值图找「可映射档案主键的表」路径（多级中转）。
+
+        FieldMapping 语义为等值关联（source_field 值 ↔ target_field 值），双向可用；
+        从本表出发逐级透传，直到某表的物理列能映射到档案主键（code_to_physical/match_channels）。
+
+        返回 (chain, target_pk_phys) 或 (None, None)：
+        - chain = [(查值列, 下一表id, 下一表列), ...]：首条查值列是本表列，其余是上一级表的列；
+        - target_pk_phys = {终表物理列: pk schema code}。
+        """
+        from apps.modeling.models import FieldMapping as FM
+        from collections import deque
+
+        # 无向等值边：本表列 ↔ 邻表列
+        edges = []
+        for fm in FM.objects.filter(source_field__status='active', target_field__status='active'):
+            ca = fm.source_field.physical_name or fm.source_field.code or fm.source_field.name
+            cb = fm.target_field.physical_name or fm.target_field.code or fm.target_field.name
+            edges.append((fm.source_table_id, ca, fm.target_table_id, cb))
+        adj = {}
+        for a, ca, b, cb in edges:
+            adj.setdefault(a, []).append((b, ca, cb))
+            adj.setdefault(b, []).append((a, cb, ca))
+
+        # 可映射档案主键的表及其主键物理列
+        pk_mapped = {}
+        for pk in pk_fields:
+            for tbl_id, phys in list(code_to_physical.get(pk, [])) + list(match_channels.get(pk, [])):
+                pk_mapped.setdefault(tbl_id, {})[phys] = pk
+        if not pk_mapped:
+            return None, None
+
+        start = table.id
+        if start in pk_mapped:
+            return [], pk_mapped[start]
+        queue = deque([(start, [])])
+        visited = {start}
+        while queue:
+            cur, path = queue.popleft()
+            if len(path) >= 5:
+                continue  # 深度上限，防异常长链
+            for nxt, cur_col, nxt_col in adj.get(cur, []):
+                if nxt in visited:
+                    continue
+                visited.add(nxt)
+                new_path = path + [(cur_col, nxt, nxt_col)]
+                if nxt in pk_mapped:
+                    return new_path, pk_mapped[nxt]
+                queue.append((nxt, new_path))
+        return None, None
+
+    def _apply_mapping_chain(self, archive, table, rows, chain, target_pk_phys, pk_fields,
+                             code_to_physical, schema_type_map, existing_records, operated_by,
+                             stats, matched_ids, change_entries, created_in_this_batch):
+        """多级 FieldMapping 中转：沿等值链逐级行透传匹配主记录，折叠写入本表字段。
+
+        链上每级构建 {下一表列值: 行} 索引（同值多行取排序后最后一条，与一级同口径）；
+        本表行取值 → 逐级命中中间表行并提取下一跳列值 → 终表行提取主键 → 匹配档案记录。
+        """
+        from apps.modeling.models import Table as MTable, Field as MField
+
+        schema = archive.schema or []
+        field_name_map = {i.get('code'): i.get('name') or i.get('code') for i in schema}
+        source_table_name = table.name or table.code
+
+        # 本表 物理列 → schema code（本表映射字段写入用，与一级同口径）
+        physical_to_schema = {}
+        for schema_code, mappings in code_to_physical.items():
+            for tbl_id, phys_col in mappings:
+                if tbl_id == table.id:
+                    physical_to_schema[phys_col] = schema_code
+
+        # 逐级构建索引：中间表单行（透传用），终表收集全部匹配行（展开传播）
+        indexes = []
+        for from_col, to_tid, to_col in chain:
+            to_table = MTable.objects.get(id=to_tid)
+            if not to_table.data_source:
+                return
+            t_pk = MField.objects.filter(
+                table=to_table, is_primary_key=True, status=MField.Status.ACTIVE).first()
+            t_order_by = (t_pk.physical_name or t_pk.code) if t_pk else None
+            trows = self._query_external_table(to_table, order_by=t_order_by)
+            if trows is None:
+                return
+            is_last = (to_tid == chain[-1][1])
+            tindex = {}
+            for trow in trows:
+                val = trow.get(to_col)
+                if val is None:
+                    continue
+                if is_last:
+                    # 终表：同值多行全部收集（组→组内全部物料展开传播）
+                    tindex.setdefault(str(val), []).append(trow)
+                else:
+                    tindex[str(val)] = trow  # 中间表透传取排序后最后一条
+            indexes.append((from_col, tindex, is_last))
+
+        no_change_updates = []
+        for row in rows:
+            v = row.get(chain[0][0])
+            if v is None:
+                continue
+            # 逐级透传：中间表单行命中 → 取下一跳列值（等值链值域可能不同列）
+            ok = True
+            for i in range(len(indexes) - 1):
+                trow = indexes[i][1].get(str(v))
+                if not trow:
+                    ok = False
+                    break
+                v = trow.get(chain[i + 1][0])
+                if v is None:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            # 终表：展开写全部匹配行（目标键唯一时仅一行，等价折叠）
+            final_index = indexes[-1][1]
+            for trow in final_index.get(str(v), []):
+                # 终表行提取主键值
+                key_parts = []
+                for pk in pk_fields:
+                    pk_val = None
+                    for phys, code in target_pk_phys.items():
+                        if code == pk and phys in trow:
+                            pk_val = trow[phys]
+                            break
+                    key_parts.append('' if pk_val is None else str(pk_val))
+                key = tuple(key_parts)
+                if not any(key):
+                    continue
+                existing = existing_records.get(key)
+                if not existing:
+                    continue  # 终表行无法匹配主记录：跳过（外键引用非独立实体）
+                self._write_dimension_row(
+                    existing, row, physical_to_schema, schema, field_name_map,
+                    source_table_name, key, operated_by, stats, matched_ids,
+                    change_entries, created_in_this_batch, no_change_updates,
+                )
+
+        if no_change_updates:
+            ArchiveRecord.objects.bulk_update(
+                no_change_updates,
+                ['source_data', 'manual_data', 'lineage', 'sync_status', 'status'],
+                batch_size=2000,
+            )
+
+    def _write_dimension_row(self, existing, row, physical_to_schema, schema, field_name_map,
+                             source_table_name, key, operated_by, stats, matched_ids,
+                             change_entries, created_in_this_batch, no_change_updates):
+        """维度行折叠写入公共逻辑（一级/多级中转共用，防复制分叉）：
+
+        本表行非空映射字段 → source_data 合并 → 计算变更 → 版本+1 + 变更明细（或批量无变化落库）。
+        """
+        # 本表映射字段折叠写入
+        record_data = {}
+        for col_name, value in row.items():
+            schema_code = physical_to_schema.get(col_name)
+            if not schema_code:
+                continue
+            if value is None:
+                continue  # 维度字段空值不写（避免清空已有值）
+            record_data[schema_code] = value
+        if not record_data:
+            return
+        matched_ids.add(existing.id)
+        existing.source_data = {**(existing.source_data or {}), **record_data}
+        merged, lineage = _merge_record_data(existing, schema)
+        for code in record_data:
+            entry = lineage.get(code)
+            if entry and entry.get('source') == 'sync' and entry.get('source_table') != source_table_name:
+                lineage[code] = {**entry, 'source_table': source_table_name}
+        old_data = existing.data or {}
+        changed_codes = sorted(
+            c for c in set(list(merged.keys()) + list(old_data.keys()))
+            if old_data.get(c) != merged.get(c)
+        )
+        ver_before = existing.version
+        existing.lineage = lineage
+        existing.sync_status = 'synced'
+        if changed_codes:
+            existing.data = merged
+            existing.updated_by = operated_by
+            existing.version += 1
+            existing.save()
+            # 查找 archive（_write_dimension_row 通过 schema 参数传入了 archive.schema）
+            _archive_for_ss = existing.archive
+            ss, _ = ArchiveSchemaSnapshot.objects.get_or_create(
+                archive=_archive_for_ss,
+                schema_version=_archive_for_ss.schema_version,
+                defaults={'schema': schema},
+            )
+            ArchiveRecordVersion.objects.create(
+                record=existing,
+                version=existing.version,
+                data=existing.data,
+                schema_version_ref=ss,
+                schema=None,
+                operated_by=operated_by,
+                operation_type=ArchiveRecordVersion.OperationType.UPDATE,
+                change_summary={
+                    'source_refreshed': changed_codes,
+                    'changed_fields': [
+                        {'field': c, 'old': old_data.get(c), 'new': merged.get(c)}
+                        for c in changed_codes
+                    ],
+                },
+            )
+            if existing.id not in created_in_this_batch:
+                stats['records_updated'] += 1
+        else:
+            no_change_updates.append(existing)
+        if changed_codes and existing.id not in created_in_this_batch:
+            change_entries.append({
+                'record_id': existing.id,
+                'record_key': '/'.join(k for k in key),
+                'change_type': ArchiveChangeDetail.ChangeType.UPDATED,
+                'field_changes': [
+                    {'field': c, 'name': field_name_map.get(c, c),
+                     'old': old_data.get(c), 'new': merged.get(c)}
+                    for c in changed_codes
+                ],
+                'version_before': ver_before,
+                'version_after': existing.version,
+            })
 
     def _data_matches(self, existing_data, new_data):
         """简单判断两条记录是否代表同一实体（比较非空字段的交集）"""
@@ -1221,7 +2775,7 @@ def refresh_archive_data(archive, operated_by='system'):
     domain = archive.domain
     schema_type_map = {item['code']: item['type'] for item in (archive.schema or []) if item.get('code')}
     viewset = ArchiveViewSet()
-    stats = {'records_created': 0, 'records_updated': 0, 'tables_synced': 0, 'errors': []}
+    stats = {'records_created': 0, 'records_updated': 0, 'tables_synced': 0, 'errors': [], 'warnings': []}
     try:
         stats = viewset._sync_data_from_sources(archive, domain, schema_type_map, operated_by)
     except Exception as e:
@@ -1356,7 +2910,8 @@ class ArchiveRecordViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='rollback')
     def rollback(self, request, pk=None):
-        """回滚到指定版本"""
+        """回滚到指定版本（v18：统一执行器按 ownership 分层写回，
+        修复旧实现只写合并层、下次合并/刷新后回滚效果静默消失的隐性 Bug）"""
         record = self.get_object()
         serializer = RollbackSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1366,44 +2921,25 @@ class ArchiveRecordViewSet(viewsets.ModelViewSet):
 
         version_snapshot = get_object_or_404(ArchiveRecordVersion, record=record, version=target_version)
 
-        # 检查目标版本是否已定版（定版版本本身不能被回滚覆盖，但可以回滚到它）
-        with transaction.atomic():
-            old_data = record.data
-            record.data = version_snapshot.data
-            record.updated_by = operated_by
-            record.version += 1
-            record.sync_status = 'unsynced'
-            record.save()
-
-            # 创建回滚版本
-            ArchiveRecordVersion.objects.create(
-                record=record,
-                version=record.version,
-                data=record.data,
-                schema=record.archive.schema,
-                operated_by=operated_by,
-                operation_type=ArchiveRecordVersion.OperationType.ROLLBACK,
-                change_summary={
-                    'action': f'回滚至 v{target_version}（同步状态置为未同步）',
-                    'rolled_back_to': target_version,
-                    'changed_fields': [{'field': k, 'old': old_data.get(k), 'new': v}
-                                       for k, v in version_snapshot.data.items()
-                                       if old_data.get(k) != v]
-                },
-            )
-            # 记录操作日志
-            ArchiveOperationLog.objects.create(
-                archive=record.archive,
-                record=record,
-                operator=operated_by,
-                operation_type=ArchiveOperationLog.OperationType.ROLLBACK,
-                change_summary={'action': f'回滚至 v{target_version}', 'rolled_back_to': target_version},
-            )
+        # 快照全字段作目标值，经统一执行器分层写回（source→source_data，archive→manual_data/回落）
+        _execute_field_rollback(
+            record, dict(version_snapshot.data or {}), operated_by,
+            action_text=f'回滚至 v{target_version}（同步状态置为未同步）',
+        )
         return Response(ArchiveRecordDetailSerializer(record).data)
+
+    @action(detail=True, methods=['get'], url_path='details')
+    def list_detail_rows(self, request, pk=None):
+        """获取记录的全部明细子表行"""
+        record = self.get_object()
+        details = record.details.select_related('mapping').all()
+        from .serializers import ArchiveRecordDetailRowSerializer
+        serializer = ArchiveRecordDetailRowSerializer(details, many=True, context={'request': request})
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'], url_path='rollback-to-change')
     def rollback_to_change(self, request, pk=None):
-        """按时间点回滚：将记录恢复到指定变更明细之后的状态（撤销此后的所有变更）。
+        """按时间点回滚（v18：直接恢复明细对应的版本快照，不再从 field_changes 反推目标值）。
 
         POST /records/{id}/rollback-to-change/  body: {target_detail_id: int, operated_by: str}
         """
@@ -1419,29 +2955,21 @@ class ArchiveRecordViewSet(viewsets.ModelViewSet):
         if target_detail.record_id != record.id:
             return Response({'error': '目标变更明细不属于该记录'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 获取目标之后的所有变更明细（按 id 升序）
-        changes_after = list(
-            ArchiveChangeDetail.objects.filter(record=record, id__gt=target_detail_id)
-            .exclude(change_type__in=['created', 'rollback'])
-            .order_by('id')
-        )
-        if not changes_after:
-            return Response({'error': '该时间点之后无可回滚的变更'}, status=status.HTTP_400_BAD_REQUEST)
+        # 存量历史明细无版本映射（v18 引入），无法定位时点快照
+        if target_detail.version_after is None:
+            return Response({'error': '该历史变更缺少版本映射，无法按时间点回滚，请使用版本回滚'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if record.version == target_detail.version_after:
+            return Response({'error': '该时点即当前状态，无需回滚'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 对每个字段，取「目标之后第一次变动」的 old 值（即目标时点的状态）
-        target_fields = {}
-        for change in changes_after:
-            for fc in (change.field_changes or []):
-                code = fc.get('field')
-                if code and code != '状态' and code not in target_fields:
-                    target_fields[code] = fc['old']
-
-        if not target_fields:
-            return Response({'error': '后续变更中无可回滚的字段'}, status=status.HTTP_400_BAD_REQUEST)
+        snapshot = ArchiveRecordVersion.objects.filter(
+            record=record, version=target_detail.version_after).first()
+        if not snapshot:
+            return Response({'error': '未找到该时点的版本快照'}, status=status.HTTP_400_BAD_REQUEST)
 
         result = _execute_field_rollback(
-            record, target_fields, operated_by,
-            action_text=f'回滚到变更明细 #{target_detail_id} 时点（撤销此后 {len(changes_after)} 条变更）',
+            record, dict(snapshot.data or {}), operated_by,
+            action_text=f'回滚到变更明细 #{target_detail_id} 时点（恢复 v{target_detail.version_after} 快照）',
         )
         return Response(result)
 
@@ -1564,7 +3092,7 @@ class RecordVersionViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class ChangeBatchViewSet(viewsets.ReadOnlyModelViewSet):
-    """数据变更批次 API（只读）"""
+    """数据变更批次 API（只读 + 整批回滚）"""
     queryset = ArchiveChangeBatch.objects.select_related('archive').all()
     serializer_class = ChangeBatchSerializer
     ordering = ['-created_at']
@@ -1577,6 +3105,93 @@ class ChangeBatchViewSet(viewsets.ReadOnlyModelViewSet):
         if params.get('change_source'):
             qs = qs.filter(change_source=params['change_source'])
         return qs
+
+    @action(detail=False, methods=['post'], url_path='start-manual')
+    def start_manual(self, request):
+        """开启人工批次（v18 攒批保存）：前端保存时先开批次，随后逐条
+        PUT /records/{id}/（带 change_batch_id）将明细全部攒入本批；保存即批次封口。
+        POST /change-batches/start-manual/  body: {archive: int, operated_by: str}
+        """
+        archive_id = request.data.get('archive')
+        operated_by = request.data.get('operated_by', 'system')
+        if not archive_id:
+            return Response({'error': '必须提供 archive 参数'}, status=status.HTTP_400_BAD_REQUEST)
+        archive = get_object_or_404(Archive, pk=archive_id)
+        batch = ArchiveChangeBatch.objects.create(
+            archive=archive,
+            change_source=ArchiveChangeBatch.ChangeSource.MANUAL,
+            operator=operated_by,
+            stats={},
+        )
+        return Response(ChangeBatchSerializer(batch).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='rollback')
+    def rollback_batch(self, request, pk=None):
+        """整批撤销（v18，应对源侧批量刷错事故）：将本批影响的记录逐条恢复到本批之前的状态。
+
+        该批之后又被编辑过的记录跳过并列出（防静默覆盖后续人工修改）；
+        记录已删除/存量明细无版本映射的跳过计数。
+        POST /change-batches/{id}/rollback/  body: {operated_by: str}
+        """
+        batch = self.get_object()
+        operated_by = request.data.get('operated_by', 'system')
+
+        details = list(batch.details.select_related('record'))
+        if not details:
+            return Response({'error': '该批次无变更明细'}, status=status.HTTP_400_BAD_REQUEST)
+
+        rollback_batch_obj = ArchiveChangeBatch.objects.create(
+            archive=batch.archive,
+            change_source=ArchiveChangeBatch.ChangeSource.MANUAL,
+            operator=operated_by,
+            stats={},
+        )
+        rolled_back_records = 0
+        skipped_edited = []
+        skipped_deleted = 0
+        skipped_legacy = 0
+        for d in details:
+            if d.record_id is None:
+                skipped_deleted += 1
+                continue
+            if d.version_before is None:
+                skipped_legacy += 1
+                continue
+            record = d.record
+            # 该批之后又被改过（审核标记不算数据变更，不算）→ 跳过并列出
+            later_edited = ArchiveChangeDetail.objects.filter(record=record, id__gt=d.id)\
+                .exclude(change_type__in=['created', 'reviewed', 'ignored']).exists()
+            if later_edited:
+                skipped_edited.append({'record_key': d.record_key, 'record_label': d.record_label})
+                continue
+            snapshot = ArchiveRecordVersion.objects.filter(
+                record=record, version=d.version_before).first()
+            if snapshot is None:
+                skipped_legacy += 1
+                continue
+            result = _execute_field_rollback(
+                record, dict(snapshot.data or {}), operated_by,
+                action_text=f'撤销批次 #{batch.id}（{batch.get_change_source_display()}）',
+                change_batch=rollback_batch_obj,
+            )
+            if result['rolled_back_fields'] > 0:
+                rolled_back_records += 1
+
+        rollback_batch_obj.stats = {
+            'records_rolled_back': rolled_back_records,
+            'skipped_edited': len(skipped_edited),
+            'skipped_deleted': skipped_deleted,
+            'skipped_legacy': skipped_legacy,
+            'source_batch_id': batch.id,
+        }
+        rollback_batch_obj.save(update_fields=['stats'])
+        return Response({
+            'rolled_back_records': rolled_back_records,
+            'skipped_edited': skipped_edited,
+            'skipped_deleted': skipped_deleted,
+            'skipped_legacy': skipped_legacy,
+            'batch_id': rollback_batch_obj.id,
+        })
 
 
 class ChangeDetailViewSet(viewsets.ReadOnlyModelViewSet):
@@ -1691,9 +3306,10 @@ class ChangeDetailViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='rollback')
     def rollback_change(self, request, pk=None):
-        """单条变更明细回滚：将 field_changes 中每个字段恢复到 old 值。
+        """单条变更明细回滚（v18 语义：恢复到本条变更之前的状态，本条之后的变更会一并撤销）。
 
         POST /change-details/{id}/rollback/  body: {operated_by: str}
+        存量历史明细（version_before 为 NULL）降级回旧字段级 old 值恢复逻辑兼容。
         """
         detail = self.get_object()
         operated_by = request.data.get('operated_by', 'system')
@@ -1704,14 +3320,27 @@ class ChangeDetailViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': f'类型为「{detail.get_change_type_display()}」的变更不支持回滚'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # 过滤可回滚的字段（排除虚拟的「状态」字段）
+        record = detail.record
+
+        # v18 新语义：恢复 version_before 快照（本条变更之前的状态）
+        if detail.version_before is not None:
+            snapshot = ArchiveRecordVersion.objects.filter(
+                record=record, version=detail.version_before).first()
+            if snapshot is not None:
+                result = _execute_field_rollback(
+                    record, dict(snapshot.data or {}), operated_by,
+                    action_text=f'回滚变更明细 #{detail.id}（恢复到本条变更前 v{detail.version_before}）',
+                )
+                return Response(result)
+            # 快照缺失（异常数据）→ 落入下方存量兼容路径
+
+        # 存量兼容路径：字段级恢复到 old 值
         rollback_fields = {fc['field']: fc['old']
                           for fc in (detail.field_changes or [])
                           if fc.get('field') and fc['field'] != '状态'}
         if not rollback_fields:
             return Response({'error': '该变更无可回滚的字段'}, status=status.HTTP_400_BAD_REQUEST)
 
-        record = detail.record
         result = _execute_field_rollback(
             record, rollback_fields, operated_by,
             action_text=f'回滚变更明细 #{detail.id}',
@@ -1719,10 +3348,11 @@ class ChangeDetailViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(result)
 
 
-def _execute_field_rollback(record, target_fields, operated_by, action_text=''):
-    """共用回滚执行器：将记录指定字段恢复到目标值。
+def _execute_field_rollback(record, target_fields, operated_by, action_text='', change_batch=None):
+    """共用回滚执行器：将记录指定字段恢复到目标值（v18：支持共享批次 + 版本映射写入）。
 
     target_fields: {field_code: target_value}
+    change_batch: 传入时变更留痕明细挂入该批次（批次级回滚共用）；否则单独建批次
     返回：{rolled_back_fields, batch_id, new_version}
     """
     from .serializers import _record_pk_key, _composite_label_codes, _build_record_label
@@ -1766,6 +3396,7 @@ def _execute_field_rollback(record, target_fields, operated_by, action_text=''):
     merged, lineage = _merge_record_data(record, schema)
     record.data = merged
     record.lineage = lineage
+    ver_before = record.version  # v18 版本映射：变更前版本号
     record.version += 1
     record.updated_by = operated_by
     record.sync_status = 'unsynced'
@@ -1775,11 +3406,17 @@ def _execute_field_rollback(record, target_fields, operated_by, action_text=''):
 
         # 版本快照
         change_summary = {'action': action_text, 'changed_fields': actual_changes}
+        ss, _ = ArchiveSchemaSnapshot.objects.get_or_create(
+            archive=archive,
+            schema_version=archive.schema_version,
+            defaults={'schema': schema},
+        )
         ArchiveRecordVersion.objects.create(
             record=record,
             version=record.version,
             data=record.data,
-            schema=schema,
+            schema_version_ref=ss,
+            schema=None,
             operated_by=operated_by,
             operation_type=ArchiveRecordVersion.OperationType.ROLLBACK,
             change_summary=change_summary,
@@ -1790,8 +3427,8 @@ def _execute_field_rollback(record, target_fields, operated_by, action_text=''):
             operation_type=ArchiveOperationLog.OperationType.ROLLBACK,
             change_summary=change_summary,
         )
-        # 变更日志留痕（change_type=rollback）
-        batch = ArchiveChangeBatch.objects.create(
+        # 变更日志留痕（change_type=rollback）；批次级回滚时挂入共享批次
+        batch = change_batch or ArchiveChangeBatch.objects.create(
             archive=archive,
             change_source=ArchiveChangeBatch.ChangeSource.MANUAL,
             operator=operated_by,
@@ -1803,6 +3440,8 @@ def _execute_field_rollback(record, target_fields, operated_by, action_text=''):
             record_label=_build_record_label(_composite_label_codes(archive.domain), record.data),
             change_type=ArchiveChangeDetail.ChangeType.ROLLBACK,
             field_changes=actual_changes,
+            version_before=ver_before,
+            version_after=record.version,
         )
 
     return {
@@ -1828,6 +3467,8 @@ class ConsistencyIssueViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(field_code=p['field_code'])
         if p.get('record_key'):
             qs = qs.filter(record_key__icontains=p['record_key'])
+        if p.get('check_type'):
+            qs = qs.filter(check_type=p['check_type'])
         return qs
 
     @action(detail=False, methods=['post'], url_path='batch-review')
@@ -1892,6 +3533,84 @@ class ConsistencyIssueViewSet(viewsets.ReadOnlyModelViewSet):
             batch_ids.append(batch.id)
         return Response({'updated': updated, 'skipped': len(issues) - updated,
                          'action': act, 'batch_ids': batch_ids})
+
+
+class ConsistencyCheckRuleViewSet(viewsets.ModelViewSet):
+    """一致性检查规则失效管理：列表/创建/更新/删除。
+
+    用户可以将特定检查规则失效，失效后该规则产生的差异不计入统计。
+    """
+    serializer_class = ConsistencyCheckRuleSerializer
+
+    def get_queryset(self):
+        qs = ConsistencyCheckRule.objects.select_related('archive').order_by('-disabled_at')
+        p = self.request.query_params
+        if p.get('archive'):
+            qs = qs.filter(archive_id=p['archive'])
+        if p.get('check_type'):
+            qs = qs.filter(check_type=p['check_type'])
+        if p.get('disabled') is not None:
+            qs = qs.filter(disabled=p['disabled'] == 'true')
+        return qs
+
+    @action(detail=True, methods=['post'], url_path='toggle')
+    def toggle(self, request, pk=None):
+        """切换规则失效/启用状态"""
+        rule = self.get_object()
+        rule.disabled = not rule.disabled
+        if rule.disabled:
+            rule.disabled_by = request.data.get('operated_by', 'system')
+            rule.disabled_reason = (request.data.get('reason') or '')[:500]
+        else:
+            rule.disabled_by = ''
+            rule.disabled_reason = ''
+        rule.save(update_fields=['disabled', 'disabled_by', 'disabled_reason'])
+        return Response(ConsistencyCheckRuleSerializer(rule).data)
+
+    @action(detail=False, methods=['post'], url_path='disable')
+    def disable_rule(self, request):
+        """将指定规则失效。参数：archive, check_type, field_code, member_source, reason, operated_by"""
+        archive_id = request.data.get('archive')
+        check_type = request.data.get('check_type')
+        field_code = request.data.get('field_code', '')
+        member_source = request.data.get('member_source', '')
+        if not archive_id or not check_type:
+            return Response({'error': '参数错误：archive 和 check_type 必填'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        rule, created = ConsistencyCheckRule.objects.get_or_create(
+            archive_id=archive_id, check_type=check_type,
+            field_code=field_code, member_source=member_source,
+            defaults={
+                'disabled': True,
+                'disabled_by': request.data.get('operated_by', 'system'),
+                'disabled_reason': (request.data.get('reason') or '')[:500],
+            }
+        )
+        if not created:
+            rule.disabled = True
+            rule.disabled_by = request.data.get('operated_by', 'system')
+            rule.disabled_reason = (request.data.get('reason') or '')[:500]
+            rule.save(update_fields=['disabled', 'disabled_by', 'disabled_reason'])
+        return Response(ConsistencyCheckRuleSerializer(rule).data)
+
+    @action(detail=False, methods=['post'], url_path='enable')
+    def enable_rule(self, request):
+        """恢复指定规则。参数：archive, check_type, field_code, member_source"""
+        archive_id = request.data.get('archive')
+        check_type = request.data.get('check_type')
+        field_code = request.data.get('field_code', '')
+        member_source = request.data.get('member_source', '')
+        try:
+            rule = ConsistencyCheckRule.objects.get(
+                archive_id=archive_id, check_type=check_type,
+                field_code=field_code, member_source=member_source)
+            rule.disabled = False
+            rule.disabled_by = ''
+            rule.disabled_reason = ''
+            rule.save(update_fields=['disabled', 'disabled_by', 'disabled_reason'])
+            return Response(ConsistencyCheckRuleSerializer(rule).data)
+        except ConsistencyCheckRule.DoesNotExist:
+            return Response({'error': '未找到该规则'}, status=status.HTTP_404_NOT_FOUND)
 
 
 def _match_condition(value, operator, target):
@@ -1980,11 +3699,153 @@ class ArchiveApiViewSet(viewsets.ModelViewSet):
             'status': api_obj.status,
         })
 
+    @action(detail=True, methods=['get'], url_path='docs')
+    def docs(self, request, pk=None):
+        """接口文档管理端预览（与对外 /api/open/{slug}/docs/ 同构，无需密钥）"""
+        from .open_api_gateway import build_docs
+        api_obj = self.get_object()
+        if not api_obj.slug:
+            return Response({'detail': '该接口尚未生成对外路径（slug）'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(build_docs(api_obj))
+
 
 # ===== 域变更统计（问题7：域概览页）=====
 from rest_framework.decorators import api_view
 from django.db.models import Max, Q
 from apps.modeling.models import Domain
+
+
+# ===== API 密钥管理（v19，REQ-005）=====
+
+
+class ApiKeyViewSet(viewsets.ModelViewSet):
+    """API 密钥管理：创建（明文仅返回一次）/编辑/轮换/吊销/调用日志"""
+    queryset = ApiKey.objects.prefetch_related('grants', 'grants__api').all()
+    serializer_class = ApiKeySerializer
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        status_val = self.request.query_params.get('status')
+        if status_val:
+            qs = qs.filter(status=status_val)
+        return qs
+
+    @staticmethod
+    def _sync_grants(api_key, grants_payload):
+        """全量重建授权关系（新建/编辑共用）；操作范围不得超出 API 自身 allowed_operations"""
+        from .open_api_auth import OPERATIONS
+        if grants_payload is None:
+            return
+        api_key.grants.all().delete()
+        for g in grants_payload:
+            api_obj = ArchiveApi.objects.filter(id=g.get('api')).first()
+            if api_obj is None:
+                continue
+            ops = [op for op in (g.get('allowed_operations') or ['read']) if op in OPERATIONS]
+            api_ops = api_obj.allowed_operations or ['read']
+            ops = [op for op in ops if op in api_ops] or ['read']
+            ApiKeyGrant.objects.create(api_key=api_key, api=api_obj, allowed_operations=ops)
+
+    def create(self, request, *args, **kwargs):
+        from . import open_api_auth as auth
+        plain = auth.generate_api_key()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            api_key = serializer.save(
+                key_prefix=auth.key_prefix(plain),
+                key_hash=auth.hash_api_key(plain),
+            )
+            self._sync_grants(api_key, request.data.get('grants'))
+        result = ApiKeySerializer(api_key).data
+        # 明文密钥仅此一次返回，不落库不回显
+        result['plain_key'] = plain
+        return Response(result, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        response = super().update(request, *args, **kwargs)
+        self._sync_grants(self.get_object(), request.data.get('grants'))
+        return Response(ApiKeySerializer(self.get_object()).data)
+
+    @action(detail=True, methods=['post'], url_path='rotate')
+    def rotate(self, request, pk=None):
+        """轮换密钥：生成新明文（旧密钥立即失效），授权关系不变"""
+        from . import open_api_auth as auth
+        api_key = self.get_object()
+        if api_key.status != ApiKey.Status.ACTIVE:
+            return Response({'detail': '已吊销的密钥不能轮换'}, status=status.HTTP_400_BAD_REQUEST)
+        plain = auth.generate_api_key()
+        api_key.key_prefix = auth.key_prefix(plain)
+        api_key.key_hash = auth.hash_api_key(plain)
+        api_key.save(update_fields=['key_prefix', 'key_hash'])
+        result = ApiKeySerializer(api_key).data
+        result['plain_key'] = plain
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='revoke')
+    def revoke(self, request, pk=None):
+        """吊销密钥：立即失效，不可恢复"""
+        api_key = self.get_object()
+        if api_key.status == ApiKey.Status.REVOKED:
+            return Response({'detail': '该密钥已吊销'}, status=status.HTTP_400_BAD_REQUEST)
+        api_key.status = ApiKey.Status.REVOKED
+        api_key.revoked_at = timezone.now()
+        api_key.save(update_fields=['status', 'revoked_at'])
+        return Response(ApiKeySerializer(api_key).data)
+
+    @action(detail=True, methods=['get'], url_path='call-logs')
+    def call_logs(self, request, pk=None):
+        """该密钥的调用日志（分页，可按 api 过滤）"""
+        api_key = self.get_object()
+        qs = ApiCallLog.objects.filter(api_key=api_key).select_related('api')
+        api_id = request.query_params.get('api')
+        if api_id:
+            qs = qs.filter(api_id=api_id)
+        try:
+            page = max(1, int(request.query_params.get('page', 1)))
+            page_size = max(1, min(int(request.query_params.get('page_size', 20)), 200))
+        except (TypeError, ValueError):
+            page, page_size = 1, 20
+        total = qs.count()
+        rows = qs[(page - 1) * page_size: page * page_size]
+        return Response({
+            'count': total, 'page': page, 'page_size': page_size,
+            'results': ApiCallLogSerializer(rows, many=True).data,
+        })
+
+
+@api_view(['GET'])
+def api_call_stats(request):
+    """近 7 天 API 调用统计：按日趋势 + 按接口汇总（含错误数）"""
+    from datetime import timedelta
+    now = timezone.now()
+    since = now - timedelta(days=7)
+    logs = ApiCallLog.objects.filter(created_at__gte=since).values_list(
+        'created_at', 'api_id', 'status_code')
+    daily = {}
+    per_api = {}
+    total = 0
+    errors = 0
+    for created_at, api_id, code in logs:
+        day = created_at.date().isoformat()
+        daily[day] = daily.get(day, 0) + 1
+        total += 1
+        if code >= 400:
+            errors += 1
+        if api_id:
+            item = per_api.setdefault(api_id, {'calls': 0, 'errors': 0})
+            item['calls'] += 1
+            if code >= 400:
+                item['errors'] += 1
+    api_names = {a.id: a.name for a in ArchiveApi.objects.filter(id__in=per_api.keys())}
+    return Response({
+        'total': total,
+        'errors': errors,
+        'daily': [{'date': d, 'calls': daily[d]} for d in sorted(daily)],
+        'per_api': [{'api': aid, 'api_name': api_names.get(aid, ''), **v}
+                    for aid, v in sorted(per_api.items(), key=lambda x: -x[1]['calls'])],
+    })
 
 
 @api_view(['GET'])

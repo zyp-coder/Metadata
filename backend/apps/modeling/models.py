@@ -319,6 +319,8 @@ class Field(models.Model):
     table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='fields', verbose_name='所属表')
     name = models.CharField('字段名称', max_length=100)
     code = models.CharField('字段编码', max_length=50)
+    physical_name = models.CharField('物理列名', max_length=50, blank=True, default='',
+                                     help_text='该字段在外部数据源中的原始列名（改名后保持不变，供同步使用）')
     comment = models.CharField('字段注释', max_length=500, blank=True, default='')
     semantic_note = models.CharField('语义标识', max_length=500, blank=True, default='',
                                      help_text='同义词/歧义等语义识别说明')
@@ -471,12 +473,88 @@ class ComputedField(models.Model):
         return f'{self.domain.name}/{self.code}'
 
 
+class ConfigTable(models.Model):
+    """域内配置表（轻量级查找表，用于 MAP_VALUE 等函数的映射配置）。
+
+    不参与同步/ER图/字段映射，仅存储键值映射数据供公式引用。
+    columns 定义列名列表，rows 以 JSON 数组存储行数据（每行是 {列名: 值} 字典）。
+    """
+    class Status(models.TextChoices):
+        ACTIVE = 'active', '启用'
+        DEPRECATED = 'deprecated', '停用'
+
+    domain = models.ForeignKey(Domain, on_delete=models.CASCADE, related_name='config_tables', verbose_name='所属域')
+    name = models.CharField('表名称', max_length=100)
+    code = models.CharField('表编码', max_length=50,
+                            help_text='公式中引用的标识，如 MAP_VALUE(值, "product_type", 默认值)')
+    category = models.CharField('类别', max_length=100, blank=True, default='',
+                                help_text='配置表分类，如"映射配置"、"参数表"等')
+    columns = models.JSONField('列定义', default=list,
+                               help_text='列名列表，如 ["原始值", "目标值"]')
+    rows = models.JSONField('行数据', default=list,
+                            help_text='行数据列表，每行为 {列名: 值} 字典')
+    status = models.CharField('状态', max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    # 数据源同步（可选）：配置后通过执行 SQL 查询从外部数据源拉取数据填充 columns/rows
+    data_source = models.ForeignKey(
+        DataSource, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='config_tables', verbose_name='同步数据源',
+        help_text='从哪个数据源同步数据')
+    sync_sql = models.TextField(
+        '同步SQL', blank=True, default='',
+        help_text='SELECT 查询语句，支持 SUBSTRING/DISTINCT 等，结果前两列作为 Key-Value')
+    last_synced_at = models.DateTimeField('最后同步时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '配置表'
+        verbose_name_plural = '配置表'
+        unique_together = [('domain', 'code')]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.domain.name}/{self.name} ({self.code})'
+
+
 class FieldMapping(models.Model):
-    """字段映射关系（表间关系通过字段映射实现）"""
+    """字段映射关系（表间关系通过字段映射实现）
+
+    2026-08-08 扩展：关系类型 relation_type——reference=普通关联（属性展开/折叠），
+    detail=子表关系（目标表作为 source_table 的明细致子表，同步保留全部行）。
+    子表关系配置：row_key_field 行键列（自动检测唯一列）、display_sort_field 代表行排序字段、
+    display_sort_desc 降序、conditions 结构化 ON/WHERE 筛选条件（AND 组合）。
+
+    2026-08-11 扩展（交互改造「先注册后挂载」）：明细子表改为先经 DetailTableConfig 独立注册，
+    再通过 detail_config 挂载到本映射；原内嵌 detail 配置字段（row_key_field/display_sort_field/
+    display_sort_desc/conditions）保留 deprecated 兼容存量，新建不再直接填写（统一走 detail_config）。
+    """
+    class RelationType(models.TextChoices):
+        REFERENCE = 'reference', '普通关联'
+        DETAIL = 'detail', '子表关系'
+
     source_table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='source_mappings', verbose_name='源表')
     source_field = models.ForeignKey(Field, on_delete=models.CASCADE, related_name='source_mappings', verbose_name='源字段')
     target_table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='target_mappings', verbose_name='目标表')
     target_field = models.ForeignKey(Field, on_delete=models.CASCADE, related_name='target_mappings', verbose_name='目标字段')
+    relation_type = models.CharField('关系类型', max_length=20, choices=RelationType.choices,
+                                     default=RelationType.REFERENCE,
+                                     help_text='普通关联=属性展开/折叠；子表关系=保留全部行作为明细致子表')
+    # 2026-08-11：子表挂载关联（先注册后挂载）——指向独立注册的子表配置；
+    # 同一 detail_config 可被多个映射挂载（一子表多主表）
+    detail_config = models.ForeignKey('DetailTableConfig', on_delete=models.SET_NULL, related_name='mappings',
+                                      verbose_name='子表注册配置', null=True, blank=True,
+                                      help_text='子表关系：挂载到已注册的子表配置（relation_type=detail 时必填）')
+    # 以下 detail 配置字段 deprecated（2026-08-11 起新建走 detail_config）
+    row_key_field = models.ForeignKey(Field, on_delete=models.SET_NULL, related_name='+',
+                                      verbose_name='明细行键列', null=True, blank=True,
+                                      help_text='子表关系：明细行的行身份列（自动检测唯一列，如 ENTRY_ID；检测失败可手动指定）')
+    display_sort_field = models.ForeignKey(Field, on_delete=models.SET_NULL, related_name='+',
+                                           verbose_name='代表行排序字段', null=True, blank=True,
+                                           help_text='子表关系：主表展示取代表行的排序字段（如 EFFECTIVE_DATE；同值自动取行键最大，保证确定性）')
+    display_sort_desc = models.BooleanField('代表行降序', default=True,
+                                            help_text='True=排序字段降序（最新在前），False=升序')
+    conditions = models.JSONField('筛选条件', default=list, blank=True,
+                                  help_text='结构化 ON/WHERE 条件（AND 组合）：[{"field": "物理列名或字段编码", "operator": "eq/ne/gt/ge/lt/le/in", "value": 值}]')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:
@@ -486,3 +564,50 @@ class FieldMapping(models.Model):
 
     def __str__(self):
         return f'{self.source_table.name}.{self.source_field.name} → {self.target_table.name}.{self.target_field.name}'
+
+
+class DetailTableConfig(models.Model):
+    """明细子表注册（2026-08-11 交互改造「先注册后挂载」）
+
+    2026-08-11 第三轮扩展（预组合=头表+明细表）：子表=预组合体——头表+明细表先组合，
+    再用组合体关联主表。table=明细表（原语义不变），新增 header_table=头表、
+    header_link_field=头表关联字段（如 ID）、detail_link_field=明细表关联字段（如 FID）。
+    同步时头表字段 JOIN 进明细行（平铺宽表，一行=一条明细+头字段重复）。
+    存量单表注册（header_table 为空）兼容保留。
+
+    子表独立注册（域内一个明细表一个注册），允许不选主表独立保存；
+    主表建关联（FieldMapping.relation_type=detail）时经 detail_config 挂载，
+    同一注册可被多个映射挂载（一子表多主表）。
+    """
+    domain = models.ForeignKey(Domain, on_delete=models.CASCADE, related_name='detail_configs', verbose_name='所属域')
+    table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='detail_configs', verbose_name='明细子表')
+    header_table = models.ForeignKey(Table, on_delete=models.SET_NULL, related_name='header_detail_configs',
+                                     verbose_name='头表', null=True, blank=True,
+                                     help_text='预组合头表（如价目表）；与 table（明细表）组合成预组合体，头字段 JOIN 进明细行')
+    header_link_field = models.ForeignKey(Field, on_delete=models.SET_NULL, related_name='+',
+                                          verbose_name='头表关联字段', null=True, blank=True,
+                                          help_text='预组合头表侧关联字段（如 ID），与 detail_link_field 配对组成头↔明细关联')
+    detail_link_field = models.ForeignKey(Field, on_delete=models.SET_NULL, related_name='+',
+                                          verbose_name='明细表关联字段', null=True, blank=True,
+                                          help_text='预组合明细表侧关联字段（如 FID），与 header_link_field 配对组成头↔明细关联')
+    row_key_field = models.ForeignKey(Field, on_delete=models.SET_NULL, related_name='+',
+                                      verbose_name='明细行键列', null=True, blank=True,
+                                      help_text='明细行的行身份列（自动检测唯一列，如 ENTRY_ID；检测失败可手动指定）')
+    display_sort_field = models.ForeignKey(Field, on_delete=models.SET_NULL, related_name='+',
+                                           verbose_name='代表行排序字段', null=True, blank=True,
+                                           help_text='主表展示取代表行的排序字段（如 EFFECTIVE_DATE；同值自动取行键最大，保证确定性）')
+    display_sort_desc = models.BooleanField('代表行降序', default=True,
+                                            help_text='True=排序字段降序（最新在前），False=升序')
+    conditions = models.JSONField('筛选条件', default=list, blank=True,
+                                  help_text='结构化 ON/WHERE 条件（AND 组合）：[{"field": "物理列名或字段编码", "operator": "eq/ne/gt/ge/lt/le/in", "value": 值}]')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '明细子表注册'
+        verbose_name_plural = '明细子表注册'
+        unique_together = [('domain', 'table')]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.domain.name}/{self.header_table.name if self.header_table_id else ""}+{self.table.name}'

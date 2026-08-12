@@ -46,3 +46,6 @@ desktop.ini
 *.log
 *.tmp
 nul
+
+# Data export (deploy artifact)
+/deploy/data_dump.json

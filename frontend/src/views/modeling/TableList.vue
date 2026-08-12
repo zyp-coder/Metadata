@@ -6,9 +6,22 @@
       <h3 style="margin: 0">表列表</h3>
       <a-space>
         <span style="color: #888; font-size: 13px">点击行可快速预览字段；点击「字段管理」可维护注释、启停字段及预览数据</span>
+        <a-button @click="goConfigTables">配置表</a-button>
         <a-button type="primary" @click="openCreate">新建表</a-button>
       </a-space>
     </div>
+
+    <!-- 引导提示：主表/主键配置引导 -->
+    <a-alert
+      v-if="setupGuideMessage"
+      type="info"
+      show-icon
+      style="margin-bottom: 12px"
+    >
+      <template #message>
+        <span v-html="setupGuideMessage"></span>
+      </template>
+    </a-alert>
 
     <a-table
       :dataSource="tables"
@@ -51,7 +64,9 @@
               </a-space>
             </a-tooltip>
           </template>
-          <span v-else style="color: #ccc">-</span>
+          <a v-else @click.stop="openFieldModal(record)" style="color: #faad14; font-size: 12px">
+            <KeyOutlined style="margin-right: 2px" />点击设置主键
+          </a>
         </template>
         <template v-if="column.key === 'status'">
           <a-switch
@@ -66,21 +81,19 @@
         <template v-if="column.key === 'action'">
           <a-space :size="16">
             <a @click.stop="openFieldModal(record)">字段管理</a>
-            <a-popconfirm title="确定删除此表？" @confirm="doDelete(record.id)">
-              <a style="color: #ff4d4f" @click.stop>删除</a>
-            </a-popconfirm>
+            <a style="color: #ff4d4f" @click.stop="confirmDeleteTable(record)">删除</a>
           </a-space>
         </template>
       </template>
     </a-table>
 
-    <!-- ========== 字段管理弹窗（近全屏，最大化展示空间） ========== -->
-    <a-modal
+    <!-- ========== 字段管理抽屉（R-059：近全屏 modal → 65vw 大抽屉，不遮表列表可边看边管） ========== -->
+    <a-drawer
       v-model:open="fieldModalVisible"
       :title="`字段管理 - ${fieldModalTable?.code || ''} (${fieldModalTable?.name || ''})`"
-      :width="'calc(100vw - 80px)'"
-      :footer="null"
-      :bodyStyle="{ maxHeight: 'calc(100vh - 100px)', overflowY: 'auto', paddingTop: '4px' }"
+      width="65vw"
+      :destroyOnClose="true"
+      :bodyStyle="{ padding: '8px 16px' }"
     >
       <a-tabs v-model:activeKey="fieldModalTab">
         <!-- 字段列表 Tab -->
@@ -128,21 +141,14 @@
                   @click="togglePrimaryKey(fr)"
                 />
               </template>
-              <template v-if="column.key === 'release_to_concept'">
-                <a-checkbox
-                  :checked="fr.release_to_concept !== false"
-                  :title="fr.release_to_concept !== false ? '已释放到概念层（可进入档案），取消则不释放' : '未释放到概念层（不进档案），勾选则释放'"
-                  @change="(e: any) => toggleReleaseToConcept(fr, e.target.checked)"
-                />
-              </template>
-              <template v-if="column.key === 'status'">
+              <template v-if="column.key === 'model_field'">
                 <a-switch
-                  :checked="fr.status === 'active'"
+                  :checked="fr.release_to_concept !== false && fr.status === 'active'"
                   :loading="fieldToggles[`${fr.id}`]"
                   checked-children="启用"
                   un-checked-children="停用"
                   size="small"
-                  @change="(v: any) => toggleField(fr, v)"
+                  @change="(v: any) => toggleModelField(fr, v)"
                 />
               </template>
               <template v-if="column.key === 'comment'">
@@ -193,9 +199,12 @@
           </template>
         </a-tab-pane>
       </a-tabs>
-    </a-modal>
-
-    <!-- ========== 新建表对话框 ========== -->
+      <template #footer>
+        <div style="text-align: right">
+          <a-button @click="fieldModalVisible = false">关闭</a-button>
+        </div>
+      </template>
+    </a-drawer>
     <a-modal
       v-model:open="modalVisible"
       title="新建表"
@@ -387,7 +396,7 @@
 
 <script setup lang="ts">
 import { ref, h, computed, onMounted, watch, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { message, Modal, Switch } from 'ant-design-vue'
 import { UploadOutlined, KeyOutlined } from '@ant-design/icons-vue'
 import { domainApi, tableApi, fieldApi, dataSourceApi } from '@/api/modeling'
@@ -397,6 +406,7 @@ import { formatDateTime } from '@/utils/date'
 import { extractApiError } from '@/utils/apiError'
 
 const route = useRoute()
+const router = useRouter()
 const domainId = Number(route.params.id)
 const domainName = ref('')
 const tables = ref<Table[]>([])
@@ -504,8 +514,7 @@ const fieldColumns = [
   { title: '字段名称（中文）', dataIndex: 'comment', key: 'comment' },
   { title: '类型', key: 'field_type', width: 90 },
   { title: '主键', key: 'is_primary_key', width: 60, align: 'center' as const },
-  { title: '释放到概念层', key: 'release_to_concept', width: 100, align: 'center' as const },
-  { title: '状态', key: 'status', width: 90 },
+  { title: '模型字段', key: 'model_field', width: 120, align: 'center' as const },
 ]
 
 // 字段表格动态滚动高度：近全屏弹窗下，减去标题栏+Tab+边距 ≈ 300px
@@ -516,6 +525,25 @@ const pkFieldsList = computed(() => {
   return fieldModalFields.value
     .filter((f: any) => f.is_primary_key)
     .sort((a: any, b: any) => (a.sort_order || 0) - (b.sort_order || 0))
+})
+
+// ===== 主表/主键配置引导 =====
+const hasPrimaryTable = computed(() => tables.value.some((t) => t.is_primary))
+const tablesWithoutPk = computed(() =>
+  tables.value.filter((t) => !t.primary_keys || t.primary_keys.length === 0)
+)
+const setupGuideMessage = computed(() => {
+  if (tables.value.length === 0) return ''
+  const parts: string[] = []
+  if (!hasPrimaryTable.value) {
+    parts.push('⚠️ <strong>尚未设置主表</strong>：请在「主表」列点击「设为主表」，主表是档案数据合并的基准')
+  }
+  if (tablesWithoutPk.value.length > 0) {
+    const names = tablesWithoutPk.value.slice(0, 3).map((t) => t.name).join('、')
+    const suffix = tablesWithoutPk.value.length > 3 ? `等 ${tablesWithoutPk.value.length} 个表` : `${tablesWithoutPk.value.length} 个表`
+    parts.push(`🔑 <strong>${suffix}未设置主键</strong>（${names}）：点击主键列的「设置主键」按钮，主键是档案记录匹配的唯一标识`)
+  }
+  return parts.length > 0 ? parts.join('<br/>') : ''
 })
 
 // 字段注释点击编辑
@@ -676,7 +704,7 @@ async function saveFieldComment(field: any) {
   try {
     await fieldApi.batchUpdateAttributes([{ id: field.id, comment: field.comment }])
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '保存失败')
+    message.error(extractApiError(e) || '保存失败')
   } finally {
     commentSaving.value[key] = false
   }
@@ -692,8 +720,8 @@ async function togglePrimaryKey(field: any) {
       const pkNames = existingPks.map((f: any) => f.code).join(', ')
       Modal.confirm({
         title: '联合主键确认',
-        content: `当前已有主键字段：${pkNames}。\n继续设置将创建联合主键（${pkNames} + ${field.code}），确定继续？`,
-        okText: '确定',
+        content: `当前已有主键字段：${pkNames}。\n继续设置将创建联合主键（${pkNames} + ${field.code}），确认继续？`,
+        okText: '确认',
         cancelText: '取消',
         onOk: () => doTogglePrimaryKey(field, newVal),
       })
@@ -711,7 +739,7 @@ async function doTogglePrimaryKey(field: any, newVal: boolean) {
     syncPrimaryKeysToTableList()
   } catch (e: any) {
     field.is_primary_key = !newVal // 回滚
-    message.error(extractApiError(e) || e.message || '设置失败')
+    message.error(extractApiError(e) || '设置失败')
   }
 }
 
@@ -735,8 +763,38 @@ async function toggleReleaseToConcept(field: any, newVal: boolean) {
     message.success(newVal ? '已释放到概念层' : '已取消释放（不进档案）')
   } catch (e: any) {
     field.release_to_concept = !newVal // 回滚
-    message.error(extractApiError(e) || e.message || '设置失败')
+    message.error(extractApiError(e) || '设置失败')
   }
+}
+
+async function toggleModelField(field: any, enable: any) {
+  const key = `${field.id}`
+  fieldToggles.value[key] = true
+  const releaseToConcept = !!enable
+  const status = enable ? 'active' : 'deprecated'
+  const oldRelease = field.release_to_concept
+  const oldStatus = field.status
+  // 乐观更新
+  field.release_to_concept = releaseToConcept
+  field.status = status
+  try {
+    await fieldApi.batchUpdateAttributes([
+      { id: field.id, release_to_concept: releaseToConcept, status },
+    ])
+    message.success(enable ? '字段已启用并释放' : '字段已停用并取消释放')
+  } catch (e: any) {
+    // 回滚
+    field.release_to_concept = oldRelease
+    field.status = oldStatus
+    message.error(extractApiError(e) || '操作失败')
+  } finally {
+    fieldToggles.value[key] = false
+  }
+}
+
+// ===== 配置表跳转 =====
+function goConfigTables() {
+  router.push(`/modeling/domains/${domainId}/config-tables`)
 }
 
 // ===== 新建表 =====
@@ -815,7 +873,7 @@ async function previewExcelFile(idx: number) {
       cfg.name_cn = file.name.replace(/\.\w+$/, '')
     }
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '预览失败')
+    message.error(extractApiError(e) || '预览失败')
   } finally {
     cfg._previewing = false
   }
@@ -944,7 +1002,7 @@ async function handleSubmitLocal() {
     modalVisible.value = false
     await loadData()
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '导入失败')
+    message.error(extractApiError(e) || '导入失败')
   } finally {
     saving.value = false
   }
@@ -980,7 +1038,7 @@ async function handleSubmitSource() {
         successCount++
       } catch (e: any) {
         failCount++
-        errors.push(`${tableName}: ${extractApiError(e) || e.message || '失败'}`)
+        errors.push(`${tableName}: ${extractApiError(e) || '失败'}`)
       }
     }
     if (failCount === 0) {
@@ -997,10 +1055,21 @@ async function handleSubmitSource() {
     modalVisible.value = false
     await loadData()
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '操作失败')
+    message.error(extractApiError(e) || '操作失败')
   } finally {
     saving.value = false
   }
+}
+
+function confirmDeleteTable(record: Table) {
+  Modal.confirm({
+    title: '确认删除此表？',
+    content: `表「${record.name}」及其关联的字段映射、标准字段将全部删除，关联档案 schema 也会受影响，此操作不可恢复。`,
+    okType: 'danger',
+    okText: '删除',
+    cancelText: '取消',
+    onOk: () => doDelete(record.id),
+  })
 }
 
 async function doDelete(id: number) {
@@ -1009,15 +1078,15 @@ async function doDelete(id: number) {
     message.success('删除成功')
     await loadData()
   } catch (e: any) {
-    message.error(e.message || '删除失败')
+    message.error(extractApiError(e) || '删除失败')
   }
 }
 
 async function setPrimary(record: Table) {
   Modal.confirm({
     title: '设为主表',
-    content: `确定将「${record.name}」设为该域的主表吗？主表将作为档案数据合并的基准。`,
-    okText: '确定',
+    content: `确认将「${record.name}」设为该域的主表吗？主表将作为档案数据合并的基准。`,
+    okText: '确认',
     cancelText: '取消',
     onOk: async () => {
       try {
@@ -1025,7 +1094,7 @@ async function setPrimary(record: Table) {
         message.success('已设为主表')
         await loadData()
       } catch (e: any) {
-        message.error(extractApiError(e) || e.message || '设置失败')
+        message.error(extractApiError(e) || '设置失败')
       }
     },
   })
@@ -1050,7 +1119,7 @@ async function toggleTableStatus(record: Table, checked: any) {
         ]),
       })
     } else {
-      message.error(data?.error || e.message || '操作失败')
+      message.error(data?.error || '操作失败')
     }
   } finally {
     tableToggles.value[record.id] = false
@@ -1067,7 +1136,7 @@ async function toggleField(field: any, enable: any) {
     field.status = enable ? 'active' : 'deprecated'
     message.success(enable ? '字段已启用' : '字段已停用')
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '操作失败')
+    message.error(extractApiError(e) || '操作失败')
   } finally {
     fieldToggles.value[key] = false
   }

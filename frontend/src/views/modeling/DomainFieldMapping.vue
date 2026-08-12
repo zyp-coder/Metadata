@@ -18,7 +18,17 @@
           </span>
         </div>
         <a-tag v-if="pkStatusData?.all_configured" color="success" style="margin: 0">✓ 全部完成</a-tag>
+        <a-badge :count="detailCheckData?.unregistered?.length || 0" :dot="(detailCheckData?.unregistered?.length || 0) > 0" offset="[0, 2]">
+          <a-button @click="showDetailCheck = true" size="small" style="margin-right: 4px">
+            明细检查
+          </a-button>
+        </a-badge>
+        <a-button @click="openDetailConfigList()">子表注册</a-button>
         <a-button type="primary" @click="openCreate()">+ 新建映射</a-button>
+        <a-button @click="aiAutoMapping" :loading="aiMappingLoading">
+          <template #icon><span style="font-size: 14px">🤖</span></template>
+          AI建立关系
+        </a-button>
         <a-button :type="erFullScreen ? 'primary' : 'default'" @click="toggleErFullScreen">
           {{ erFullScreen ? '返回列表' : 'ER图全屏' }}
         </a-button>
@@ -33,10 +43,15 @@
         :pagination="false"
         rowKey="id"
         size="middle"
+        :row-class-name="mappingRowClassName"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'source_table'">
-            <span style="font-weight: 500">{{ record.source_table_name }}</span>
+            <template v-if="record.relation_type === 'detail' && record.detail_config_combo">
+              <div style="font-weight: 500; line-height: 1.4">{{ record.detail_config_combo }}</div>
+              <div style="font-size: 12px; color: #1677ff">明细子表（预组合）</div>
+            </template>
+            <span v-else style="font-weight: 500">{{ record.source_table_name }}</span>
           </template>
           <template v-if="column.key === 'source_field'">
             <span :style="record.is_source_pk ? 'color: #faad14; font-weight: 500' : ''">
@@ -45,18 +60,21 @@
           </template>
           <template v-if="column.key === 'target_table'">
             <span style="font-weight: 500">{{ record.target_table_name }}</span>
+            <a-tag v-if="primaryTableId && primaryTableId === record.target_table" color="gold" style="margin-left: 4px">主表</a-tag>
           </template>
           <template v-if="column.key === 'target_field'">
             <span :style="record.is_target_pk ? 'color: #faad14; font-weight: 500' : ''">
               <span v-if="record.is_target_pk" style="margin-right: 2px">⚿</span>{{ record.target_field_name }}
             </span>
           </template>
+          <template v-if="column.key === 'relation_type'">
+            <a-tag v-if="record.relation_type === 'detail'" color="blue">明细子表</a-tag>
+            <a-tag v-else color="default">普通关联</a-tag>
+          </template>
           <template v-if="column.key === 'action'">
-            <a-space>
+            <a-space :size="4" style="white-space: nowrap">
               <a @click="openEdit(record)" style="color: #1677ff">编辑</a>
-              <a-popconfirm title="确定删除此映射？" @confirm="doDelete(record)">
-                <a style="color: #ff4d4f">删除</a>
-              </a-popconfirm>
+              <a @click="confirmDeleteMapping(record)" style="color: #ff4d4f">删除</a>
             </a-space>
           </template>
         </template>
@@ -75,54 +93,336 @@
       <a-empty v-if="mappings.length === 0" description="暂无关系可展示" />
     </a-card>
 
-    <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="640px">
+    <!-- detail-check 结果抽屉 -->
+    <a-drawer v-model:open="showDetailCheck" title="明细子表配置检查" width="640px" placement="right">
+      <template v-if="detailCheckLoading">
+        <a-spin /><span style="margin-left: 8px; color: #999">检查中...</span>
+      </template>
+      <template v-else-if="detailCheckData">
+        <div v-if="detailCheckData.registered?.length" style="margin-bottom: 16px">
+          <h4>已注册配置 ({{ detailCheckData.registered.length }})</h4>
+          <a-list size="small" :dataSource="detailCheckData.registered">
+            <template #renderItem="{ item }">
+              <a-list-item><a-list-item-meta :description="`${item.source_table} → ${item.target_table}`" /></a-list-item>
+            </template>
+          </a-list>
+        </div>
+        <div v-if="detailCheckData.unregistered?.length" style="margin-bottom: 16px">
+          <h4 style="color: #faad14">未注册的明细映射 ({{ detailCheckData.unregistered.length }})</h4>
+          <p style="color: #999; font-size: 12px">以下 detail 映射未关联子表配置，需要使用「子表注册」更新</p>
+          <a-list size="small" :dataSource="detailCheckData.unregistered">
+            <template #renderItem="{ item }">
+              <a-list-item><a-list-item-meta :description="`${item.source_table} → ${item.target_table}：${item.reason}`" /></a-list-item>
+            </template>
+          </a-list>
+        </div>
+        <div v-if="detailCheckData.suspect?.length" style="margin-bottom: 16px">
+          <h4 style="color: #ff4d4f">方向可疑的映射 ({{ detailCheckData.suspect.length }})</h4>
+          <a-list size="small" :dataSource="detailCheckData.suspect">
+            <template #renderItem="{ item }">
+              <a-list-item><a-list-item-meta :description="`#${item.id} ${item.source_table} → ${item.target_table}：${item.reason}`" /></a-list-item>
+            </template>
+          </a-list>
+        </div>
+        <div v-if="!detailCheckData.registered?.length && !detailCheckData.unregistered?.length && !detailCheckData.suspect?.length">
+          <a-empty description="检查完成，无异常" />
+        </div>
+      </template>
+      <template v-else>
+        <a-empty description="暂无检查数据" />
+      </template>
+    </a-drawer>
+
+    <!-- 子表注册管理弹窗（预组合=头表+明细表） -->
+    <a-modal v-model:open="dcModalVisible" :title="dcEditingId ? '编辑子表配置' : '新建子表注册（预组合）'" @ok="handleDcSubmit" :confirmLoading="dcSaving" width="640px" :destroyOnClose="true">
+      <a-alert v-if="!dcEditingId" type="info" show-icon style="margin-bottom: 16px"
+        message="预组合 = 头表 + 明细表"
+        description="先选头表和明细表（如 价目表 + 价目表明细），再配头↔明细关联字段；后续挂载时用整个预组合体关联主表" />
       <a-form layout="vertical">
-        <a-form-item label="源表" required>
-          <a-select v-model:value="form.source_table" style="width: 100%" show-search @change="loadSourceFields" :disabled="!!editingMappingId">
+        <a-form-item label="头表" required help="组合体的主表（如 销售价目表）">
+          <a-select v-model:value="dcForm.header_table" style="width: 100%" show-search :disabled="!!dcEditingId" @change="onDcHeaderChange">
             <a-select-option v-for="t in domainTables" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item label="源字段" required>
-          <a-select v-model:value="form.source_field" style="width: 100%" show-search allowClear placeholder="请选择源字段">
-            <a-select-option v-if="hasCompositeSourceKey" :value="'composite'" :title="compositeKeyLabel">
-              <span style="color: #faad14; margin-right: 4px">⚿</span>
-              <span style="font-weight: 600">{{ compositeKeyLabel }}</span>
-              <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
-            </a-select-option>
-            <a-select-option v-for="f in sourceFields" :key="f.id" :value="f.id">
-              <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 4px">⚿</span>{{ f.name }} ({{ f.code }})
+        <a-form-item label="明细表" required help="组合体的明细表（如 销售价目表明细）；同一明细表只能注册一次，已注册的不可重复选择（可到「管理注册」编辑）">
+          <a-select v-model:value="dcForm.table" style="width: 100%" show-search :disabled="!!dcEditingId" @change="onDcTableChange">
+            <a-select-option v-for="t in domainTables" :key="t.id" :value="t.id" :disabled="!!dcRegisteredMap[t.id]">
+              {{ t.name }} ({{ t.code }})
+              <span v-if="dcRegisteredMap[t.id]" style="color: #faad14; margin-left: 4px">· 已注册（{{ dcRegisteredMap[t.id] }}）</span>
             </a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item label="目标表" required>
-          <a-select v-model:value="form.target_table" style="width: 100%" show-search @change="loadTargetFields">
-            <a-select-option v-for="t in targetTableOptions" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
+        <a-form-item label="头↔明细关联字段" required help="头表字段与明细表字段的关联（如 头表 ID ↔ 明细表 FID），自动检测可改">
+          <a-space style="width: 100%">
+            <a-select v-model:value="dcForm.header_link_field" style="width: 200px" show-search placeholder="头表字段" :disabled="!!dcEditingId">
+              <a-select-option v-for="f in dcHeaderFields" :key="f.id" :value="f.id">
+                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>{{ f.code }}
+              </a-select-option>
+            </a-select>
+            <span style="color: #999">↔</span>
+            <a-select v-model:value="dcForm.detail_link_field" style="flex: 1" show-search placeholder="明细表字段" :disabled="!!dcEditingId">
+              <a-select-option v-for="f in dcSourceFields" :key="f.id" :value="f.id">{{ f.code }}</a-select-option>
+            </a-select>
+            <a-button size="small" :loading="dcDetectingLink" @click="detectDcLink" :disabled="!!dcEditingId">检测</a-button>
+          </a-space>
+        </a-form-item>
+        <a-form-item label="行键字段" help="明细行唯一标识列（如 ENTRY_ID），未配置时同步自动检测并回填">
+          <a-space style="width: 100%">
+            <a-select v-model:value="dcForm.row_key_field" style="flex: 1" show-search allowClear placeholder="自动检测">
+              <a-select-option v-for="f in dcSourceFields" :key="f.id" :value="f.id">
+                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>{{ f.name }} ({{ f.code }})
+              </a-select-option>
+            </a-select>
+            <a-button :loading="dcDetectingRowKey" @click="detectDcRowKey" :disabled="!dcEditingId">检测</a-button>
+          </a-space>
+        </a-form-item>
+        <a-form-item label="代表行排序字段" help="决定主表展示哪条明细行作为代表（如生效日期，最新=代表行）">
+          <a-select v-model:value="dcForm.display_sort_field" style="width: 100%" show-search allowClear placeholder="不排序（主表展示字段不更新）">
+            <a-select-option v-for="f in dcSourceFields" :key="f.id" :value="f.id">{{ f.name }} ({{ f.code }})</a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item label="目标字段" required>
-          <a-select v-model:value="form.target_field" style="width: 100%" show-search allowClear placeholder="请选择目标字段">
-            <a-select-option v-if="hasCompositeTargetKey" :value="'composite'" :title="targetCompositeKeyLabel">
-              <span style="color: #faad14; margin-right: 4px">⚿</span>
-              <span style="font-weight: 600">{{ targetCompositeKeyLabel }}</span>
-              <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
-            </a-select-option>
-            <a-select-option v-for="f in targetFields" :key="f.id" :value="f.id">
-              <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 4px">⚿</span>{{ f.name }} ({{ f.code }})
-            </a-select-option>
-          </a-select>
+        <a-form-item label="排序方向">
+          <a-switch v-model:checked="dcForm.display_sort_desc" checked-children="降序（最新优先）" un-checked-children="升序（最早优先）" />
+        </a-form-item>
+        <a-form-item label="筛选条件（可选）" help="仅同步满足条件的明细行，JSON 格式 [{field, operator, value}]">
+          <a-input v-model:value="dcForm.conditionsText" placeholder='[{"field": "PRICE", "operator": "gt", "value": 0}]' />
         </a-form-item>
       </a-form>
+    </a-modal>
+
+    <!-- 子表注册管理列表（2026-08-11 修复：注册管理入口升级为列表，支持查看/编辑/删除已有注册） -->
+    <a-modal v-model:open="dcListModalVisible" title="子表注册管理（预组合）" width="860px" :footer="null">
+      <a-alert type="info" show-icon style="margin-bottom: 12px" message="预组合 = 头表 + 明细表"
+        description="注册（头表+明细表先组合）与挂载（用组合体关联主表）是两步；同一明细表只能注册一次，新建时已注册的明细表不可重复选择" />
+      <div style="text-align: right; margin-bottom: 12px">
+        <a-button type="primary" size="small" @click="openDetailConfigCreate">新建注册</a-button>
+      </div>
+      <a-table :dataSource="domainDetailConfigs" :columns="dcColumns" rowKey="id" size="small" :pagination="false" :scroll="{ y: 380 }">
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'combo'">
+            <span style="font-weight: 500">{{ record.header_table_name ? record.header_table_name + ' + ' : '' }}{{ record.table_name }}</span>
+            <div style="font-size: 12px; color: #888">{{ record.header_table_code ? record.header_table_code + '+' : '' }}{{ record.table_code }}</div>
+          </template>
+          <template v-else-if="column.key === 'link'">
+            {{ record.header_link_field_name || '?' }} ↔ {{ record.detail_link_field_name || '?' }}
+          </template>
+          <template v-else-if="column.key === 'row_key'">{{ record.row_key_field_name || '自动检测' }}</template>
+          <template v-else-if="column.key === 'sort'">{{ record.display_sort_field_name || '未配置' }}{{ record.display_sort_field_name ? (record.display_sort_desc ? ' ↓' : ' ↑') : '' }}</template>
+          <template v-else-if="column.key === 'mappings'">{{ record.mapping_count }} 个</template>
+          <template v-else-if="column.key === 'action'">
+            <a @click="openDetailConfigEdit(record)">编辑</a>
+            <a-divider type="vertical" />
+            <a-popconfirm :title="record.mapping_count > 0 ? `该组合已被 ${record.mapping_count} 个映射挂载，删除后这些映射将变为未挂载状态，确认删除？` : '确认删除该注册？'" @confirm="removeDetailConfig(record)">
+              <a style="color: #ff4d4f">删除</a>
+            </a-popconfirm>
+          </template>
+        </template>
+      </a-table>
+    </a-modal>
+
+    <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="640px">
+      <a-form layout="vertical">
+        <a-form-item label="关系类型">
+          <a-select v-model:value="form.relation_type" style="width: 100%" @change="onRelationTypeChange">
+            <a-select-option value="reference">引用（字段级映射，默认）</a-select-option>
+            <a-select-option value="detail">明细子表（整表作为子表挂载到主表）</a-select-option>
+          </a-select>
+        </a-form-item>
+
+        <!-- 明细子表（形态1）：主表 → 子表 → 关联字段；注册与挂载分离，方向由系统处理 -->
+        <template v-if="form.relation_type === 'detail'">
+          <a-alert
+            v-if="editingMappingId && !form.detail_config"
+            type="warning"
+            show-icon
+            message="该映射未关联子表注册配置（存量数据）"
+            description="选择下方子表配置完成挂载；未注册的子表请先点击「管理注册」创建"
+            style="margin-bottom: 16px"
+          />
+          <a-form-item label="主表" required help="被挂载明细子表的主记录表">
+            <a-select v-model:value="form.target_table" style="width: 100%" show-search @change="loadTargetFields">
+              <a-select-option v-for="t in targetTableOptions" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="预组合（子表）" required help="选择已注册的预组合体——注册（头表+明细表先组合）与挂载（本弹窗建立与主表的关系）是两步">
+            <a-space style="width: 100%">
+              <a-select v-model:value="form.detail_config" style="flex: 1" show-search allowClear placeholder="请选择已注册的预组合" @change="onDetailConfigChange">
+                <a-select-option v-for="cfg in domainDetailConfigs" :key="cfg.id" :value="cfg.id">
+                  {{ cfg.header_table_name ? cfg.header_table_name + ' + ' : '' }}{{ cfg.table_name }}
+                  ({{ cfg.header_table_code ? cfg.header_table_code + '+' : '' }}{{ cfg.table_code }})
+                  {{ cfg.row_key_field_name ? ' · 行键:' + cfg.row_key_field_name : '' }}
+                </a-select-option>
+              </a-select>
+              <a-button size="small" @click="openDetailConfigList()">管理注册</a-button>
+            </a-space>
+          </a-form-item>
+          <a-form-item v-if="selectedDetailConfig" label="配置摘要" help="组合配置由注册统一管理，编辑映射时不可修改">
+            <div style="background: #f5f5f5; padding: 8px 12px; border-radius: 4px; font-size: 13px; line-height: 1.8">
+              <div v-if="selectedDetailConfig.header_table_name">
+                <strong>预组合：</strong>{{ selectedDetailConfig.header_table_name }} + {{ selectedDetailConfig.table_name }}
+                <span style="color: #888">（{{ selectedDetailConfig.header_link_field_name || '?' }} ↔ {{ selectedDetailConfig.detail_link_field_name || '?' }}）</span>
+              </div>
+              <div><strong>行键：</strong>{{ selectedDetailConfig.row_key_field_name || '自动检测' }}</div>
+              <div><strong>排序：</strong>{{ selectedDetailConfig.display_sort_field_name || '未配置' }}
+                {{ selectedDetailConfig.display_sort_desc ? '（降序）' : '（升序）' }}</div>
+              <div v-if="selectedDetailConfig.conditions?.length">
+                <strong>条件：</strong>{{ JSON.stringify(selectedDetailConfig.conditions) }}</div>
+              <div v-if="selectedDetailConfig.mapping_count > 0">
+                <strong>挂载数：</strong>{{ selectedDetailConfig.mapping_count }} 个映射</div>
+            </div>
+          </a-form-item>
+          <a-form-item label="关联字段" required help="子表中与主表关联的字段（自动推荐可改，系统自动按 子表→主表 方向挂载）">
+            <a-select v-model:value="form.source_field" style="width: 100%" show-search allowClear placeholder="请选择关联字段" @change="onDetailSourceFieldChange">
+              <a-select-option v-for="f in sourceFields" :key="f.id" :value="f.id">
+                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 4px">⚿</span>{{ f.name }} ({{ f.code }})
+                <a-tag v-if="f.id === detailRecommendedFieldId" color="green" style="margin-left: 6px">推荐</a-tag>
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-alert
+            v-if="detailTargetNoPk"
+            type="warning"
+            show-icon
+            message="主表需要配置单一主键字段"
+            description="明细子表通过关联字段挂载到主表主键，请先在表配置中设置主表的主键字段"
+            style="margin-bottom: 16px"
+          />
+        </template>
+
+        <!-- 引用关系：字段级映射（保持原表单） -->
+        <template v-else>
+          <a-form-item label="源表" required>
+            <a-select v-model:value="form.source_table" style="width: 100%" show-search @change="loadSourceFields" :disabled="!!editingMappingId">
+              <a-select-option v-for="t in domainTables" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="源字段" required>
+            <a-select v-model:value="form.source_field" style="width: 100%" show-search allowClear placeholder="请选择源字段">
+              <a-select-option v-if="hasCompositeSourceKey" :value="'composite'" :title="compositeKeyLabel">
+                <span style="color: #faad14; margin-right: 4px">⚿</span>
+                <span style="font-weight: 600">{{ compositeKeyLabel }}</span>
+                <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
+              </a-select-option>
+              <a-select-option v-for="f in sourceFields" :key="f.id" :value="f.id">
+                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 4px">⚿</span>{{ f.name }} ({{ f.code }})
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="目标表" required>
+            <a-select v-model:value="form.target_table" style="width: 100%" show-search @change="loadTargetFields">
+              <a-select-option v-for="t in targetTableOptions" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="目标字段" required>
+            <a-select v-model:value="form.target_field" style="width: 100%" show-search allowClear placeholder="请选择目标字段">
+              <a-select-option v-if="hasCompositeTargetKey" :value="'composite'" :title="targetCompositeKeyLabel">
+                <span style="color: #faad14; margin-right: 4px">⚿</span>
+                <span style="font-weight: 600">{{ targetCompositeKeyLabel }}</span>
+                <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
+              </a-select-option>
+              <a-select-option v-for="f in targetFields" :key="f.id" :value="f.id">
+                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 4px">⚿</span>{{ f.name }} ({{ f.code }})
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+        </template>
+      </a-form>
+    </a-modal>
+
+    <!-- AI 推断映射结果弹窗 -->
+    <a-modal
+      v-model:open="aiModalVisible"
+      title="AI 建议的字段映射关系"
+      :width="900"
+      :footer="null"
+      :bodyStyle="{ maxHeight: '70vh', overflowY: 'auto' }"
+    >
+      <template v-if="aiSuggestions.length > 0">
+        <div style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center">
+          <span style="color: #666; font-size: 13px">
+            共发现 {{ aiSuggestions.length }} 条可能的映射关系，请勾选要创建的映射
+          </span>
+          <a-space>
+            <a-button size="small" @click="selectAllAiSuggestions">全选</a-button>
+            <a-button size="small" @click="selectedAiSuggestions = []">清空</a-button>
+          </a-space>
+        </div>
+        <a-table
+          :dataSource="aiSuggestions"
+          :columns="aiSuggestionColumns"
+          :pagination="false"
+          rowKey="rowKey"
+          size="small"
+          :row-selection="{
+            selectedRowKeys: selectedAiSuggestions,
+            onChange: (keys: any[]) => selectedAiSuggestions = keys
+          }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'source'">
+              <div>
+                <div style="font-weight: 500">{{ record.source_table_name }}</div>
+                <div style="color: #666; font-size: 12px">
+                  <span v-if="record.source_is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                  {{ record.source_field_name }} ({{ record.source_field_code }})
+                </div>
+              </div>
+            </template>
+            <template v-if="column.key === 'target'">
+              <div>
+                <div style="font-weight: 500">{{ record.target_table_name }}</div>
+                <div style="color: #666; font-size: 12px">
+                  <span v-if="record.target_is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                  {{ record.target_field_name }} ({{ record.target_field_code }})
+                </div>
+              </div>
+            </template>
+            <template v-if="column.key === 'confidence'">
+              <a-tag :color="record.confidence >= 0.8 ? 'green' : record.confidence >= 0.6 ? 'orange' : 'default'">
+                {{ Math.round(record.confidence * 100) }}%
+              </a-tag>
+            </template>
+            <template v-if="column.key === 'reason'">
+              <span style="color: #666; font-size: 12px">{{ record.reason }}</span>
+            </template>
+          </template>
+        </a-table>
+        <div style="margin-top: 16px; text-align: right">
+          <a-button @click="aiModalVisible = false" style="margin-right: 8px">取消</a-button>
+          <a-button
+            type="primary"
+            :loading="aiCreating"
+            :disabled="selectedAiSuggestions.length === 0"
+            @click="createSelectedMappings"
+          >
+            创建选中映射 ({{ selectedAiSuggestions.length }})
+          </a-button>
+        </div>
+      </template>
+      <template v-else-if="aiMappingLoading">
+        <div style="text-align: center; padding: 40px; color: #999">
+          <a-spin /> <span style="margin-left: 8px">AI 正在分析表结构和字段关系...</span>
+        </div>
+      </template>
+      <template v-else>
+        <a-empty description="未发现新的映射关系建议">
+          <template #image>
+            <span style="font-size: 48px">🤖</span>
+          </template>
+          <p style="color: #999">所有可能的字段映射关系已建立，或表结构暂无可识别的关联</p>
+        </a-empty>
+      </template>
     </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, h } from 'vue'
 import { useRoute } from 'vue-router'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { extractApiError } from '@/utils/apiError'
 import { Graph, Shape } from '@antv/x6'
-import { domainApi, tableApi, fieldApi, fieldMappingApi } from '@/api/modeling'
+import { domainApi, tableApi, fieldApi, fieldMappingApi, detailConfigApi } from '@/api/modeling'
 import type { Table } from '@/types'
 import DomainStageNav from './components/DomainStageNav.vue'
 
@@ -134,9 +434,17 @@ const sourceFields = ref<any[]>([])
 const targetFields = ref<any[]>([])
 const mappings = ref<any[]>([])
 const loading = ref(false)
+const aiMappingLoading = ref(false)
 const modalVisible = ref(false)
 const saving = ref(false)
-const form = ref<any>({ source_table: null, source_field: null, target_table: null, target_field: null })
+const form = ref<any>({
+  source_table: null, source_field: null, target_table: null, target_field: null,
+  relation_type: 'reference',
+  row_key_field: null,
+  display_sort_field: null,
+  display_sort_desc: true,
+  conditionsText: '',
+})
 
 const editingMappingId = ref<number | null>(null)
 // 编辑模式下存储的映射 IDs（联合主键时可能有多个）
@@ -145,13 +453,110 @@ const editingMappingIds = ref<number[]>([])
 // 主键配置状态
 const pkStatusData = ref<any>(null)
 
+// AI 推断映射状态
+const aiModalVisible = ref(false)
+const aiSuggestions = ref<any[]>([])
+const selectedAiSuggestions = ref<string[]>([])
+const aiCreating = ref(false)
+const detectingRowKey = ref(false)
+
+// 子表注册管理状态
+const dcModalVisible = ref(false)
+const dcSaving = ref(false)
+const dcEditingId = ref<number | null>(null)
+const dcForm = ref<any>({
+  header_table: null, table: null,
+  header_link_field: null, detail_link_field: null,
+  row_key_field: null, display_sort_field: null,
+  display_sort_desc: true, conditionsText: '',
+})
+const dcSourceFields = ref<any[]>([])
+const dcHeaderFields = ref<any[]>([])
+const dcDetectingRowKey = ref(false)
+const dcDetectingLink = ref(false)
+const domainDetailConfigs = ref<any[]>([])
+const dcListModalVisible = ref(false)
+
+// detail-check 状态
+const showDetailCheck = ref(false)
+const detailCheckLoading = ref(false)
+const detailCheckData = ref<any>(null)
+
+// 关联字段手动修改标记（自动推荐不覆盖用户选择）
+const sourceFieldTouched = ref(false)
+
+// 选中的 detail_config 详情（供展示摘要）
+const selectedDetailConfig = computed(() => {
+  if (!form.value.detail_config) return null
+  return domainDetailConfigs.value.find((c: any) => c.id === form.value.detail_config) || null
+})
+
+// 已注册明细表映射 { tableId: '头表名 + 明细表名' }（2026-08-11 修复：新建弹窗明细表下拉禁选+标记）
+const dcRegisteredMap = computed<Record<number, string>>(() => {
+  const map: Record<number, string> = {}
+  for (const c of domainDetailConfigs.value) {
+    map[c.table] = c.header_table_name ? `${c.header_table_name} + ${c.table_name}` : c.table_name
+  }
+  return map
+})
+
+// 关联字段自动推荐：子表字段与主表主键 code 匹配（完全同名 > FID↔ID 后缀模式）
+const detailRecommendedFieldId = computed<number | null>(() => {
+  if (form.value.relation_type !== 'detail' || !form.value.target_table || sourceFields.value.length === 0) return null
+  const pkFields = targetFields.value.filter((f: any) => f.is_primary_key)
+  if (pkFields.length !== 1) return null
+  const pkCode = String(pkFields[0].code || '')
+  if (!pkCode) return null
+  const exact = sourceFields.value.find((f: any) => String(f.code) === pkCode)
+  if (exact) return exact.id
+  const suffix = sourceFields.value.find((f: any) => String(f.code).endsWith(pkCode) && String(f.code).length > pkCode.length)
+  if (suffix) return suffix.id
+  return null
+})
+
+// 主表主键检查：明细子表挂载需要主表单一主键
+const detailTargetNoPk = computed(() => {
+  if (form.value.relation_type !== 'detail' || !form.value.target_table) return false
+  return targetFields.value.filter((f: any) => f.is_primary_key).length !== 1
+})
+
+// AI 建议表格列定义
+const aiSuggestionColumns = [
+  { title: '源表.字段', key: 'source', width: 220 },
+  { title: '', key: 'arrow', width: 40, customRender: () => '→' },
+  { title: '目标表.字段', key: 'target', width: 220 },
+  { title: '置信度', key: 'confidence', width: 80, align: 'center' as const },
+  { title: '说明', key: 'reason' },
+]
+
 // 映射列表列定义
 const mappingColumns = [
-  { title: '源表', key: 'source_table', width: 180 },
-  { title: '源字段', key: 'source_field', width: 200 },
-  { title: '目标表', key: 'target_table', width: 180 },
-  { title: '目标字段', key: 'target_field', width: 200 },
+  { title: '源表', key: 'source_table', width: 260 },
+  { title: '源字段', key: 'source_field', width: 170 },
+  { title: '目标表', key: 'target_table', width: 170 },
+  { title: '目标字段', key: 'target_field', width: 170 },
+  { title: '关系类型', key: 'relation_type', width: 110 },
   { title: '操作', key: 'action', width: 120 },
+]
+
+// detail 行浅蓝底（第一百四十四轮直观性改进）
+function mappingRowClassName(record: any) {
+  return record.relation_type === 'detail' ? 'mapping-row-detail' : ''
+}
+
+// 域主表 id（目标表为主表时显示金色「主表」tag）
+const primaryTableId = computed(() => {
+  return domainTables.value.find((t: any) => t.is_primary)?.id ?? null
+})
+
+// 子表注册管理列表列定义（2026-08-11 修复）
+const dcColumns = [
+  { title: '预组合（头表 + 明细表）', key: 'combo', width: 280 },
+  { title: '头↔明细关联', key: 'link', width: 140 },
+  { title: '行键', key: 'row_key', width: 120 },
+  { title: '代表行排序', key: 'sort', width: 160 },
+  { title: '挂载', key: 'mappings', width: 80 },
+  { title: '操作', key: 'action', width: 110 },
 ]
 
 // 映射列表数据：同一对表的映射合并为一行（联合字段=一行，独立关系=一行）
@@ -176,6 +581,17 @@ const mappingRows = computed(() => {
         source_table_name: m.source_table_name,
         target_table: m.target_table,
         target_table_name: m.target_table_name,
+        relation_type: m.relation_type || 'reference',
+        relation_type_label: m.relation_type_label || '',
+        row_key_field: m.row_key_field,
+        row_key_field_name: m.row_key_field_name || '',
+        display_sort_field: m.display_sort_field,
+        display_sort_field_name: m.display_sort_field_name || '',
+        display_sort_desc: m.display_sort_desc,
+        conditions: m.conditions,
+        detail_config_id: m.detail_config_id || null,
+        detail_config_name: m.detail_config_name || '',
+        detail_config_combo: m.detail_config_combo || '',
         mapping_ids: [] as number[],
         _srcNames: [] as string[],
         _tgtNames: [] as string[],
@@ -218,6 +634,17 @@ const mappingRows = computed(() => {
         mapping_ids: g.mapping_ids,
         is_source_pk: g._srcFields.some((f: number) => srcPkSet?.has(f)),
         is_target_pk: g._tgtFields.some((f: number) => tgtPkSet?.has(f)),
+        relation_type: g.relation_type,
+        relation_type_label: g.relation_type_label,
+        row_key_field: g.row_key_field,
+        row_key_field_name: g.row_key_field_name,
+        display_sort_field: g.display_sort_field,
+        display_sort_field_name: g.display_sort_field_name,
+        display_sort_desc: g.display_sort_desc,
+        conditions: g.conditions,
+        detail_config_id: g.detail_config_id,
+        detail_config_name: g.detail_config_name,
+        detail_config_combo: g.detail_config_combo,
       }
     } else {
       // 单条映射（普通映射 或 多对一/一对多但不跨多字段）
@@ -304,6 +731,9 @@ async function loadData() {
     // 加载主键配置状态
     const pkRes = await domainApi.pkStatus(domainId)
     pkStatusData.value = pkRes.data
+
+    // 加载子表注册配置
+    await loadDetailConfigs()
   } finally {
     loading.value = false
   }
@@ -576,16 +1006,29 @@ function escapeHtml(s: string) {
 
 async function loadSourceFields() {
   if (form.value.source_table) {
+    let results: any[] = []
     const res = await fieldApi.list({ table: form.value.source_table })
-    sourceFields.value = res.data.results.sort((a: any, b: any) => (b.is_primary_key ? 1 : 0) - (a.is_primary_key ? 1 : 0))
-    // 自动选中：联合主键选 'composite'，单主键选该字段
-    const pkFields = sourceFields.value.filter((f: any) => f.is_primary_key)
-    if (pkFields.length >= 2) {
-      form.value.source_field = 'composite'
-    } else if (pkFields.length === 1) {
-      form.value.source_field = pkFields[0].id
+    results = res.data.results
+    // 预组合（2026-08-11 第三轮）：头表字段并入字段池（平铺），支持头表字段作挂载关联键
+    const cfg = form.value.detail_config ? domainDetailConfigs.value.find((c: any) => c.id === form.value.detail_config) : null
+    if (form.value.relation_type === 'detail' && cfg?.header_table) {
+      const hres = await fieldApi.list({ table: cfg.header_table })
+      results = results.concat(hres.data.results)
+    }
+    sourceFields.value = results.sort((a: any, b: any) => (b.is_primary_key ? 1 : 0) - (a.is_primary_key ? 1 : 0))
+    if (form.value.relation_type === 'detail') {
+      // 明细子表：关联字段自动推荐（用户可改，touched 后不覆盖）
+      applyDetailRecommendation()
     } else {
-      form.value.source_field = null
+      // 自动选中：联合主键选 'composite'，单主键选该字段
+      const pkFields = sourceFields.value.filter((f: any) => f.is_primary_key)
+      if (pkFields.length >= 2) {
+        form.value.source_field = 'composite'
+      } else if (pkFields.length === 1) {
+        form.value.source_field = pkFields[0].id
+      } else {
+        form.value.source_field = null
+      }
     }
   }
 }
@@ -595,7 +1038,12 @@ async function loadTargetFields() {
     const res = await fieldApi.list({ table: form.value.target_table })
     targetFields.value = res.data.results.sort((a: any, b: any) => (b.is_primary_key ? 1 : 0) - (a.is_primary_key ? 1 : 0))
     const pkFields = targetFields.value.filter((f: any) => f.is_primary_key)
-    if (pkFields.length >= 2) {
+    if (form.value.relation_type === 'detail') {
+      // 明细子表挂载：目标字段=主表单一主键（联合主键不支持挂载）
+      form.value.target_field = pkFields.length === 1 ? pkFields[0].id : null
+      // 主表变化后重新推荐关联字段
+      applyDetailRecommendation()
+    } else if (pkFields.length >= 2) {
       form.value.target_field = 'composite'
     } else if (pkFields.length === 1) {
       form.value.target_field = pkFields[0].id
@@ -605,10 +1053,92 @@ async function loadTargetFields() {
   }
 }
 
+async function aiAutoMapping() {
+  aiMappingLoading.value = true
+  aiSuggestions.value = []
+  selectedAiSuggestions.value = []
+  aiModalVisible.value = true
+  try {
+    const res = await fieldMappingApi.inferMappings(domainId)
+    const suggestions = res.data.suggestions || []
+    // 为每条建议生成唯一行键
+    aiSuggestions.value = suggestions.map((s, idx) => ({
+      ...s,
+      rowKey: `${s.source_table_id}-${s.source_field_id}-${s.target_table_id}-${s.target_field_id}-${idx}`,
+    }))
+    // 默认选中置信度 >= 0.7 的建议
+    selectedAiSuggestions.value = aiSuggestions.value
+      .filter((s) => s.confidence >= 0.7)
+      .map((s) => s.rowKey)
+  } catch (e: any) {
+    message.error(extractApiError(e) || 'AI 分析失败')
+    aiModalVisible.value = false
+  } finally {
+    aiMappingLoading.value = false
+  }
+}
+
+function selectAllAiSuggestions() {
+  selectedAiSuggestions.value = aiSuggestions.value.map((s) => s.rowKey)
+}
+
+async function createSelectedMappings() {
+  if (selectedAiSuggestions.value.length === 0) return
+  aiCreating.value = true
+  const selected = aiSuggestions.value.filter((s) => selectedAiSuggestions.value.includes(s.rowKey))
+  let successCount = 0
+  let failCount = 0
+  const errors: string[] = []
+  try {
+    for (const s of selected) {
+      try {
+        await fieldMappingApi.create({
+          source_table: s.source_table_id,
+          source_field: s.source_field_id,
+          target_table: s.target_table_id,
+          target_field: s.target_field_id,
+        })
+        successCount++
+      } catch (e: any) {
+        failCount++
+        const srcLabel = `${s.source_table_name}.${s.source_field_code}`
+        const tgtLabel = `${s.target_table_name}.${s.target_field_code}`
+        errors.push(`${srcLabel} → ${tgtLabel}: ${extractApiError(e) || '创建失败'}`)
+      }
+    }
+    if (failCount === 0) {
+      message.success(`成功创建 ${successCount} 条映射关系`)
+    } else {
+      message.warning(`成功 ${successCount} 条，失败 ${failCount} 条`)
+      if (errors.length > 0) {
+        Modal.warning({
+          title: '部分映射创建失败',
+          content: h('div', { style: 'max-height: 200px; overflow-y: auto' },
+            errors.map((e, i) => h('div', { key: i }, e))
+          ),
+        })
+      }
+    }
+    aiModalVisible.value = false
+    await loadData()
+  } finally {
+    aiCreating.value = false
+  }
+}
+
 function openCreate() {
   editingMappingId.value = null
   editingMappingIds.value = []
-  form.value = { source_table: null, source_field: null, target_table: null, target_field: null }
+  sourceFieldTouched.value = false
+  form.value = {
+    source_table: null, source_field: null, target_table: null, target_field: null,
+    relation_type: 'reference',
+    row_key_field: null,
+    display_sort_field: null,
+    display_sort_desc: true,
+    conditionsText: '',
+    detail_config: null,
+  }
   sourceFields.value = []
   targetFields.value = []
   modalVisible.value = true
@@ -617,12 +1147,27 @@ function openCreate() {
 async function openEdit(row: any) {
   editingMappingIds.value = row.mapping_ids || [row.id]
   editingMappingId.value = editingMappingIds.value[0] || null
-  
+  // 编辑模式恢复原关联字段，禁止自动推荐覆盖
+  sourceFieldTouched.value = true
+
   form.value = {
     source_table: row.source_table,
     source_field: null,
     target_table: row.target_table,
     target_field: null,
+    relation_type: row.relation_type || 'reference',
+    row_key_field: row.row_key_field || null,
+    display_sort_field: row.display_sort_field || null,
+    display_sort_desc: row.display_sort_desc !== false,
+    conditionsText: '',
+    detail_config: row.detail_config_id || row.detail_config || null,
+  }
+  
+  // 解析 conditions JSON 为文本
+  if (row.conditions) {
+    try {
+      form.value.conditionsText = JSON.stringify(row.conditions)
+    } catch { /* 保持空 */ }
   }
   
   // 加载源字段和目标字段
@@ -641,61 +1186,195 @@ async function openEdit(row: any) {
   modalVisible.value = true
 }
 
-async function handleSubmit() {
-  if (!form.value.source_field || !form.value.target_field) {
-    message.warning('请选择源字段和目标字段')
-    return
+// 唯一性预检：四元组与已存在映射重复时拦截并提示（2026-08-11 第一百四十三轮，方案A前端预检）
+// 排除编辑中的自身；composite 联合主键展开为逐对检查
+function checkMappingDuplicates(): boolean {
+  const pairs: { st: number; sf: number | string; tt: number; tf: number | string }[] = []
+  const preSourceIsComposite = form.value.source_field === 'composite'
+  const preTargetIsComposite = form.value.target_field === 'composite'
+  if (preSourceIsComposite && preTargetIsComposite) {
+    const sourcePks = sourceFields.value.filter((f: any) => f.is_primary_key)
+    const targetPks = targetFields.value.filter((f: any) => f.is_primary_key)
+    const count = Math.min(sourcePks.length, targetPks.length)
+    for (let i = 0; i < count; i++) pairs.push({ st: form.value.source_table, sf: sourcePks[i].id, tt: form.value.target_table, tf: targetPks[i].id })
+  } else if (preSourceIsComposite) {
+    for (const pk of sourceFields.value.filter((f: any) => f.is_primary_key)) pairs.push({ st: form.value.source_table, sf: pk.id, tt: form.value.target_table, tf: form.value.target_field })
+  } else if (preTargetIsComposite) {
+    for (const pk of targetFields.value.filter((f: any) => f.is_primary_key)) pairs.push({ st: form.value.source_table, sf: form.value.source_field, tt: form.value.target_table, tf: pk.id })
+  } else {
+    pairs.push({ st: form.value.source_table, sf: form.value.source_field, tt: form.value.target_table, tf: form.value.target_field })
   }
+  for (const p of pairs) {
+    for (const m of mappings.value) {
+      if (editingMappingIds.value.includes(m.id)) continue
+      if (m.source_table === p.st && String(m.source_field) === String(p.sf) &&
+          m.target_table === p.tt && String(m.target_field) === String(p.tf)) {
+        message.warning(`该关系已存在：${m.source_table_name}.${m.source_field_name} → ${m.target_table_name}.${m.target_field_name}（ID=${m.id}）；如需修改请在列表中找到该关系并编辑，不要重复创建`)
+        return true
+      }
+    }
+  }
+  return false
+}
+
+async function handleSubmit() {
+  if (form.value.relation_type === 'detail') {
+    if (!form.value.target_table) {
+      message.warning('请选择主表')
+      return
+    }
+    if (!form.value.detail_config) {
+      message.warning('请选择已注册的子表（未注册的请先通过「子表注册」创建）')
+      return
+    }
+    if (!form.value.source_field) {
+      message.warning('请选择关联字段')
+      return
+    }
+    if (!form.value.target_field) {
+      message.warning('主表需要配置单一主键字段，请先在表配置中设置主表主键')
+      return
+    }
+  } else {
+    if (!form.value.source_table || !form.value.target_table) {
+      message.warning('请选择源表和目标表')
+      return
+    }
+    if (!form.value.source_field || !form.value.target_field) {
+      message.warning('请选择源字段和目标字段')
+      return
+    }
+  }
+  // 唯一性预检：重复关系直接拦截，不等后端报错
+  if (checkMappingDuplicates()) return
   saving.value = true
   try {
     // R-021: 先建后删——创建新映射成功后再删除旧映射，避免创建失败时数据丢失
+    // 补充：编辑模式且四元组未变化时，跳过建删，直接更新现有记录（防 unique_together 冲突）
     const sourceIsComposite = form.value.source_field === 'composite'
     const targetIsComposite = form.value.target_field === 'composite'
+
+    // 辅助函数：查找编辑中与该四元组匹配的现有映射 ID
+    function findEditingMappingId(sourceTable: number, sourceField: number | string, targetTable: number, targetField: number | string): number | null {
+      if (editingMappingIds.value.length === 0) return null
+      for (const m of mappings.value) {
+        if (editingMappingIds.value.includes(m.id) &&
+            m.source_table === sourceTable &&
+            String(m.source_field) === String(sourceField) &&
+            m.target_table === targetTable &&
+            String(m.target_field) === String(targetField)) {
+          return m.id
+        }
+      }
+      return null
+    }
+    
+    const createdIds: number[] = []
     
     if (sourceIsComposite && targetIsComposite) {
       const sourcePks = sourceFields.value.filter((f: any) => f.is_primary_key)
       const targetPks = targetFields.value.filter((f: any) => f.is_primary_key)
       const count = Math.min(sourcePks.length, targetPks.length)
       for (let i = 0; i < count; i++) {
-        await fieldMappingApi.create({
-          source_table: form.value.source_table,
-          source_field: sourcePks[i].id,
-          target_table: form.value.target_table,
-          target_field: targetPks[i].id,
-        })
+        const existingId = findEditingMappingId(form.value.source_table, sourcePks[i].id, form.value.target_table, targetPks[i].id)
+        if (existingId) {
+          createdIds.push(existingId)
+        } else {
+          const res = await fieldMappingApi.create({
+            source_table: form.value.source_table,
+            source_field: sourcePks[i].id,
+            target_table: form.value.target_table,
+            target_field: targetPks[i].id,
+          })
+          createdIds.push(res.data.id)
+        }
       }
     } else if (sourceIsComposite) {
       const sourcePks = sourceFields.value.filter((f: any) => f.is_primary_key)
       for (const pk of sourcePks) {
-        await fieldMappingApi.create({
-          source_table: form.value.source_table,
-          source_field: pk.id,
-          target_table: form.value.target_table,
-          target_field: form.value.target_field,
-        })
+        const existingId = findEditingMappingId(form.value.source_table, pk.id, form.value.target_table, form.value.target_field)
+        if (existingId) {
+          createdIds.push(existingId)
+        } else {
+          const res = await fieldMappingApi.create({
+            source_table: form.value.source_table,
+            source_field: pk.id,
+            target_table: form.value.target_table,
+            target_field: form.value.target_field,
+          })
+          createdIds.push(res.data.id)
+        }
       }
     } else if (targetIsComposite) {
       const targetPks = targetFields.value.filter((f: any) => f.is_primary_key)
       for (const pk of targetPks) {
-        await fieldMappingApi.create({
+        const existingId = findEditingMappingId(form.value.source_table, form.value.source_field, form.value.target_table, pk.id)
+        if (existingId) {
+          createdIds.push(existingId)
+        } else {
+          const res = await fieldMappingApi.create({
+            source_table: form.value.source_table,
+            source_field: form.value.source_field,
+            target_table: form.value.target_table,
+            target_field: pk.id,
+          })
+          createdIds.push(res.data.id)
+        }
+      }
+    } else {
+      const existingId = findEditingMappingId(form.value.source_table, form.value.source_field, form.value.target_table, form.value.target_field)
+      if (existingId) {
+        createdIds.push(existingId)
+      } else {
+        const res = await fieldMappingApi.create({
           source_table: form.value.source_table,
           source_field: form.value.source_field,
           target_table: form.value.target_table,
-          target_field: pk.id,
+          target_field: form.value.target_field,
         })
+        createdIds.push(res.data.id)
       }
-    } else {
-      await fieldMappingApi.create({
-        source_table: form.value.source_table,
-        source_field: form.value.source_field,
-        target_table: form.value.target_table,
-        target_field: form.value.target_field,
-      })
     }
 
-    // 新映射创建成功后，再删除旧映射
-    for (const id of editingMappingIds.value) {
+    // 仅删除未被复用的旧映射（四元组未变化的映射跳过删除）
+    const idsToDelete = editingMappingIds.value.filter(id => !createdIds.includes(id))
+    for (const id of idsToDelete) {
       await fieldMappingApi.delete(id)
+    }
+
+    // 批3a：更新 detail 配置（新范式优先 detail_config，旧 inline 字段 deprecated 兼容）
+    if (createdIds.length > 0) {
+      if (form.value.relation_type === 'detail') {
+        const detailData: Record<string, any> = { relation_type: 'detail' }
+        // 新范式：挂载 detail_config（优先）
+        if (form.value.detail_config) {
+          detailData.detail_config = form.value.detail_config
+        }
+        // 兼容旧范式：inline 字段（已 deprecated，存量兼容）
+        if (form.value.row_key_field) detailData.row_key_field = form.value.row_key_field
+        if (form.value.display_sort_field) detailData.display_sort_field = form.value.display_sort_field
+        detailData.display_sort_desc = form.value.display_sort_desc
+        if (form.value.conditionsText) {
+          try {
+            detailData.conditions = JSON.parse(form.value.conditionsText)
+          } catch { /* 格式错误，保持 null */ }
+        }
+        for (const id of createdIds) {
+          await fieldMappingApi.update(id, detailData)
+        }
+      } else {
+        // 引用类型，清除可能遗留的 detail 配置
+        for (const id of createdIds) {
+          await fieldMappingApi.update(id, {
+            relation_type: 'reference',
+            detail_config: null,
+            row_key_field: null,
+            display_sort_field: null,
+            display_sort_desc: false,
+            conditions: null,
+          })
+        }
+      }
     }
     
     message.success(editingMappingIds.value.length > 0 ? '映射更新成功' : '映射创建成功')
@@ -704,10 +1383,278 @@ async function handleSubmit() {
     editingMappingIds.value = []
     await loadData()
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '操作失败')
+    message.error(extractApiError(e) || '操作失败')
   } finally {
     saving.value = false
   }
+}
+
+async function detectRowKey() {
+  if (!editingMappingId.value) return
+  detectingRowKey.value = true
+  try {
+    const res = await fieldMappingApi.detectRowKey(editingMappingId.value)
+    const { candidate, total_rows, column_count, note } = res.data
+    if (candidate) {
+      // 在 sourceFields 中匹配候选字段
+      const matched = sourceFields.value.find((f: any) => f.code === candidate)
+      if (matched) {
+        form.value.row_key_field = matched.id
+      }
+      message.success(`检测完成：推荐行键「${candidate}」（共 ${total_rows} 行，${column_count} 列）${note ? '，' + note : ''}`)
+    } else {
+      message.warning('未检测到合适的行键字段，请手动选择')
+    }
+  } catch (e: any) {
+    message.error(extractApiError(e) || '行键检测失败')
+  } finally {
+    detectingRowKey.value = false
+  }
+}
+
+// ===== 子表注册管理函数 =====
+
+async function loadDetailConfigs() {
+  try {
+    const res = await detailConfigApi.list({ domain: domainId })
+    domainDetailConfigs.value = res.data.results || []
+  } catch { /* 静默 */ }
+}
+
+function openDetailConfigList() {
+  dcListModalVisible.value = true
+  loadDetailConfigs()
+}
+
+function openDetailConfigCreate() {
+  dcEditingId.value = null
+  dcForm.value = {
+    header_table: null, table: null,
+    header_link_field: null, detail_link_field: null,
+    row_key_field: null, display_sort_field: null,
+    display_sort_desc: true, conditionsText: '',
+  }
+  dcSourceFields.value = []
+  dcHeaderFields.value = []
+  dcModalVisible.value = true
+}
+
+async function openDetailConfigEdit(cfg: any) {
+  dcEditingId.value = cfg.id
+  dcForm.value = {
+    header_table: cfg.header_table,
+    table: cfg.table,
+    header_link_field: cfg.header_link_field,
+    detail_link_field: cfg.detail_link_field,
+    row_key_field: cfg.row_key_field || null,
+    display_sort_field: cfg.display_sort_field || null,
+    display_sort_desc: cfg.display_sort_desc !== false,
+    conditionsText: cfg.conditions?.length ? JSON.stringify(cfg.conditions) : '',
+  }
+  dcSourceFields.value = []
+  dcHeaderFields.value = []
+  if (cfg.header_table) {
+    try {
+      const [hres, sres] = await Promise.all([
+        fieldApi.list({ table: cfg.header_table }),
+        fieldApi.list({ table: cfg.table }),
+      ])
+      dcHeaderFields.value = hres.data.results
+      dcSourceFields.value = sres.data.results
+    } catch { /* 静默 */ }
+  }
+  dcModalVisible.value = true
+}
+
+async function removeDetailConfig(cfg: any) {
+  try {
+    await detailConfigApi.delete(cfg.id)
+    message.success('注册已删除')
+    await loadDetailConfigs()
+  } catch (e: any) {
+    message.error(extractApiError(e) || '删除失败')
+  }
+}
+
+async function onDcHeaderChange() {
+  if (dcForm.value.header_table) {
+    const res = await fieldApi.list({ table: dcForm.value.header_table })
+    dcHeaderFields.value = res.data.results
+  } else {
+    dcHeaderFields.value = []
+  }
+}
+
+async function onDcTableChange() {
+  if (dcForm.value.table) {
+    const res = await fieldApi.list({ table: dcForm.value.table })
+    dcSourceFields.value = res.data.results
+    // 头表+明细表都选好时自动检测关联字段（预组合语义，2026-08-11 第三轮）
+    if (dcForm.value.header_table && !dcForm.value.detail_link_field) {
+      detectDcLink()
+    }
+  } else {
+    dcSourceFields.value = []
+  }
+}
+
+async function detectDcLink() {
+  if (!dcForm.value.header_table || !dcForm.value.table) {
+    message.warning('请先选择头表和明细表')
+    return
+  }
+  dcDetectingLink.value = true
+  try {
+    const res = await detailConfigApi.detectHeaderLink({
+      header_table: dcForm.value.header_table,
+      detail_table: dcForm.value.table,
+    })
+    const { header_link_field, detail_link_field, matched_by, note } = res.data
+    if (header_link_field && detail_link_field) {
+      dcForm.value.header_link_field = header_link_field
+      dcForm.value.detail_link_field = detail_link_field
+      message.success(`自动检测关联字段成功（${matched_by === '同名' ? '同名' : matched_by === '后缀' ? 'ID↔FID 后缀' : '手动'}匹配）${note ? '，' + note : ''}`)
+    } else {
+      message.warning(note || '自动检测未命中，请手动选择关联字段')
+    }
+  } catch (e: any) {
+    message.error(extractApiError(e) || '关联字段检测失败')
+  } finally {
+    dcDetectingLink.value = false
+  }
+}
+
+async function handleDcSubmit() {
+  if (!dcForm.value.header_table || !dcForm.value.table) {
+    message.warning('请选择头表和明细表')
+    return
+  }
+  if (!dcForm.value.header_link_field || !dcForm.value.detail_link_field) {
+    message.warning('请配置头↔明细关联字段')
+    return
+  }
+  dcSaving.value = true
+  try {
+    const payload: Record<string, any> = {
+      header_table: dcForm.value.header_table,
+      table: dcForm.value.table,
+      header_link_field: dcForm.value.header_link_field,
+      detail_link_field: dcForm.value.detail_link_field,
+      row_key_field: dcForm.value.row_key_field || null,
+      display_sort_field: dcForm.value.display_sort_field || null,
+      display_sort_desc: dcForm.value.display_sort_desc,
+    }
+    if (dcForm.value.conditionsText) {
+      try { payload.conditions = JSON.parse(dcForm.value.conditionsText) } catch { /* 保持 null */ }
+    }
+    payload.domain = domainId
+
+    if (dcEditingId.value) {
+      await detailConfigApi.update(dcEditingId.value, payload)
+    } else {
+      await detailConfigApi.create(payload)
+    }
+    message.success(dcEditingId.value ? '子表配置更新成功' : '预组合注册成功')
+    dcModalVisible.value = false
+    await loadDetailConfigs()
+  } catch (e: any) {
+    message.error(extractApiError(e) || '保存失败')
+  } finally {
+    dcSaving.value = false
+  }
+}
+
+async function detectDcRowKey() {
+  if (!dcEditingId.value) return
+  dcDetectingRowKey.value = true
+  try {
+    const res = await detailConfigApi.detectRowKey(dcEditingId.value)
+    const { candidate, total_rows, note } = res.data
+    if (candidate) {
+      const matched = dcSourceFields.value.find((f: any) => f.code === candidate)
+      if (matched) { dcForm.value.row_key_field = matched.id }
+      message.success(`检测完成：推荐行键「${candidate}」（共 ${total_rows} 行）${note ? '，' + note : ''}`)
+    } else {
+      message.warning('未检测到合适的行键字段')
+    }
+  } catch (e: any) {
+    message.error(extractApiError(e) || '行键检测失败')
+  } finally {
+    dcDetectingRowKey.value = false
+  }
+}
+
+function onDetailConfigChange(configId: number | undefined) {
+  form.value.detail_config = configId || null
+  const cfg = configId ? domainDetailConfigs.value.find((c: any) => c.id === configId) : null
+  if (cfg?.table) {
+    // 挂载语义：源表=子表注册的表，方向由系统处理（用户只关心主表）
+    if (form.value.target_table === cfg.table) {
+      form.value.target_table = null // 主表不能是子表自身
+    }
+    form.value.source_table = cfg.table
+    form.value.source_field = null
+    sourceFields.value = []
+    sourceFieldTouched.value = false // 换子表后重新推荐
+    loadSourceFields()
+  } else {
+    form.value.source_table = null
+    form.value.source_field = null
+    sourceFields.value = []
+    sourceFieldTouched.value = false
+  }
+}
+
+function onDetailSourceFieldChange() {
+  sourceFieldTouched.value = true
+}
+
+function applyDetailRecommendation() {
+  if (sourceFieldTouched.value) return
+  form.value.source_field = detailRecommendedFieldId.value
+}
+
+async function loadDetailCheck() {
+  detailCheckLoading.value = true
+  try {
+    const res = await fieldMappingApi.detailCheck(domainId)
+    detailCheckData.value = res.data
+  } catch (e: any) {
+    message.error(extractApiError(e) || '检查失败')
+  } finally {
+    detailCheckLoading.value = false
+  }
+}
+
+function onRelationTypeChange(value: string) {
+  if (value === 'reference') {
+    form.value.row_key_field = null
+    form.value.display_sort_field = null
+    form.value.display_sort_desc = true
+    form.value.conditionsText = ''
+    form.value.detail_config = null
+  } else {
+    // 明细子表：源表/源字段由子表决定，清空待选
+    form.value.source_table = null
+    form.value.source_field = null
+    form.value.row_key_field = null
+    form.value.display_sort_field = null
+    form.value.display_sort_desc = true
+    form.value.conditionsText = ''
+    form.value.detail_config = null
+    sourceFields.value = []
+    sourceFieldTouched.value = false
+    if (form.value.target_table) loadTargetFields() // 重置目标字段为主表主键
+  }
+}
+
+function confirmDeleteMapping(row: any) {
+  Modal.confirm({
+    title: '确认删除此映射？',
+    content: '删除后源表与目标表的字段映射关系将被清除，需要重新创建。',
+    okText: '确认删除', okType: 'danger', cancelText: '取消',
+    onOk: () => doDelete(row),
+  })
 }
 
 async function doDelete(row: any) {
@@ -719,7 +1666,7 @@ async function doDelete(row: any) {
     message.success('删除成功')
     await loadData()
   } catch (e: any) {
-    message.error(e.message || '删除失败')
+    message.error(extractApiError(e) || '删除失败')
   }
 }
 
@@ -741,13 +1688,36 @@ async function resetErLayout() {
     await nextTick()
     renderER()
   } catch (e: any) {
-    message.error(e.message || '重置失败')
+    message.error(extractApiError(e) || '重置失败')
   } finally {
     resettingEr.value = false
   }
 }
 
 onMounted(loadData)
+
+// 监听 detail-check 打开时自动加载
+watch(showDetailCheck, (val) => {
+  if (val) loadDetailCheck()
+})
+
+// 监听子表注册弹窗的表切换
+watch(() => dcForm.value.table, (val) => {
+  if (val) {
+    onDcTableChange()
+  } else {
+    dcSourceFields.value = []
+  }
+})
+
+// 监听子表注册弹窗的头表切换
+watch(() => dcForm.value.header_table, (val) => {
+  if (val) {
+    onDcHeaderChange()
+  } else {
+    dcHeaderFields.value = []
+  }
+})
 
 onBeforeUnmount(() => {
   for (const tid of Object.keys(erNodeMap)) {
@@ -760,6 +1730,10 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* detail 子表关系行浅蓝底（第一百四十四轮直观性改进） */
+:deep(.mapping-row-detail) > td {
+  background: #f0f7ff !important;
+}
 .page-header {
   display: flex;
   justify-content: space-between;

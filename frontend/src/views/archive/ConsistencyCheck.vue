@@ -2,209 +2,260 @@
   <div>
     <a-page-header
       :title="`一致性检查：${archiveName || '...'}`"
-      sub-title="组合字段非主字段成员值与主字段值比对（纯内部管理，不回写任何源表）"
+      sub-title="多种检查类型打包展示（纯内部管理，不回写任何源表）"
       @back="router.push('/archive')"
     >
       <template #extra>
-        <a-button type="primary" :loading="checking" @click="runCheck">重新检查</a-button>
+        <a-space>
+          <a-button @click="showRulesDrawer = true">失效规则</a-button>
+          <a-button type="primary" :loading="checking" @click="runCheck">重新检查</a-button>
+        </a-space>
       </template>
     </a-page-header>
 
-    <!-- 统计卡 -->
-    <a-row :gutter="12" style="margin-bottom: 12px">
-      <a-col :span="4"><a-card size="small"><a-statistic title="待审核" :value="statusCount.open" :value-style="{ color: '#fa8c16' }" /></a-card></a-col>
-      <a-col :span="4"><a-card size="small"><a-statistic title="已审核" :value="statusCount.reviewed" :value-style="{ color: '#13c2c2' }" /></a-card></a-col>
-      <a-col :span="4"><a-card size="small"><a-statistic title="已忽略" :value="statusCount.ignored" /></a-card></a-col>
-      <a-col :span="4"><a-card size="small"><a-statistic title="已消失" :value="statusCount.resolved" :value-style="{ color: '#52c41a' }" /></a-card></a-col>
-      <a-col :span="8">
-        <a-card size="small" v-if="lastCheck">
-          <div style="font-size: 12px; color: #888; line-height: 1.9">
-            <div>上次检查：{{ formatDateTime(lastCheck.checked_at) }}，检查 {{ lastCheck.checked_fields }} 个组合字段、{{ lastCheck.tables_checked }} 张表</div>
-            <div>
-              发现差异 {{ lastCheck.mismatch_count }} 处（新增 {{ lastCheck.new_issues }}、重现 {{ lastCheck.reopened_issues }}、自动消失 {{ lastCheck.resolved_issues }}）
-              <span v-if="lastCheck.errors?.length" style="color: #ff4d4f">，{{ lastCheck.errors.length }} 个错误</span>
-            </div>
+    <!-- 上次检查摘要 -->
+    <a-card v-if="lastCheck" size="small" style="margin-bottom: 12px">
+      <div style="font-size: 12px; color: #666; line-height: 1.8">
+        上次检查：{{ formatDateTime(lastCheck.checked_at) }}，
+        差异 {{ lastCheck.mismatch_count }} 处
+        （新增 {{ lastCheck.new_issues }}、重现 {{ lastCheck.reopened_issues }}、消失 {{ lastCheck.resolved_issues }}）
+        <span v-if="lastCheck.errors?.length" style="color: #ff4d4f">，{{ lastCheck.errors.length }} 个错误</span>
+      </div>
+    </a-card>
+
+    <!-- 检查类型分组卡片 -->
+    <a-row :gutter="12" style="margin-bottom: 16px">
+      <a-col :span="6" v-for="ct in checkTypes" :key="ct.key">
+        <a-card
+          size="small"
+          :style="expandedType === ct.key ? 'border-color:#1890ff;cursor:pointer' : 'cursor:pointer'"
+          @click="toggleType(ct.key)"
+        >
+          <a-statistic :title="ct.label" :value="typeCounts[ct.key] || 0" :value-style="{ color: typeCounts[ct.key] ? ct.color : '#bfbfbf' }" />
+          <div style="font-size: 11px; color: #999; margin-top: 4px">
+            待审 {{ typeStatusCounts[ct.key]?.open || 0 }} /
+            已审 {{ typeStatusCounts[ct.key]?.reviewed || 0 }} /
+            忽略 {{ typeStatusCounts[ct.key]?.ignored || 0 }}
           </div>
         </a-card>
       </a-col>
     </a-row>
 
-    <!-- 筛选 + 批量操作 -->
-    <a-space style="margin-bottom: 12px" wrap>
-      <a-select v-model:value="filterStatus" style="width: 130px" allow-clear placeholder="状态" @change="onFilterChange">
-        <a-select-option value="open">待审核</a-select-option>
-        <a-select-option value="reviewed">已审核</a-select-option>
-        <a-select-option value="ignored">已忽略</a-select-option>
-        <a-select-option value="resolved">已消失</a-select-option>
-      </a-select>
-      <a-select v-model:value="filterField" style="width: 200px" allow-clear placeholder="字段" @change="onFilterChange">
-        <a-select-option v-for="f in fieldOptions" :key="f.code" :value="f.code">{{ f.name || f.code }}</a-select-option>
-      </a-select>
-      <a-input-search v-model:value="filterKey" style="width: 200px" allow-clear placeholder="记录标识" @search="onFilterChange" />
-      <a-divider type="vertical" />
-      <span v-if="selectedIds.length" style="color: #1890ff">已选 {{ selectedIds.length }} 条</span>
-      <a-button :disabled="!selectedIds.length" @click="openReviewModal('reviewed')">标记已审核</a-button>
-      <a-button :disabled="!selectedIds.length" @click="openReviewModal('ignored')">标记忽略</a-button>
-      <a-button :disabled="!selectedIds.length" @click="openReviewModal('reopen')">重新打开</a-button>
-    </a-space>
+    <!-- 展开的检查类型详情 -->
+    <template v-if="expandedType">
+      <a-card size="small" :title="expandedTypeLabel" style="margin-bottom: 12px">
+        <template #extra>
+          <a-space>
+            <a-select v-model:value="filterStatus" style="width: 120px" allow-clear placeholder="状态" size="small" @change="loadGroupedIssues">
+              <a-select-option value="open">待审核</a-select-option>
+              <a-select-option value="reviewed">已审核</a-select-option>
+              <a-select-option value="ignored">已忽略</a-select-option>
+              <a-select-option value="resolved">已消失</a-select-option>
+            </a-select>
+            <a-input-search v-model:value="filterKey" style="width: 180px" allow-clear placeholder="搜索记录标识" size="small" @search="loadGroupedIssues" />
+          </a-space>
+        </template>
 
-    <a-table
-      :columns="columns"
-      :data-source="issues"
-      :loading="loading"
-      rowKey="id"
-      size="small"
-      :row-selection="{ selectedRowKeys: selectedIds, onChange: (keys: any) => { selectedIds = keys } }"
-      :pagination="{ current: page, pageSize: 20, total, onChange: (p: number) => { page = p; loadIssues() }, showTotal: (t: number) => `共 ${t} 条` }"
-      :scroll="{ x: 1100 }"
-      :expandedRowKeys="expandedKeys"
-      @expand="onExpand"
-    >
-      <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'time'">
-          <div style="font-size: 12px; font-weight: 500">{{ formatDateTime(record.first_found_at) }}</div>
-          <div v-if="record.last_checked_at" style="font-size: 11px; color: #999">复检：{{ formatDateTime(record.last_checked_at) }}</div>
-        </template>
-        <template v-if="column.key === 'source_field'">
-          <div>
-            <a-tag color="blue" style="margin-right: 4px">{{ record.member_source }}</a-tag>
-            <span style="font-weight: 500">{{ record.field_name || record.field_code }}</span>
+        <a-spin :spinning="loading">
+          <!-- 按日期分组 -->
+          <a-empty v-if="!groupedIssues.length" description="暂无差异记录" />
+          <div v-for="group in groupedIssues" :key="group.date" style="margin-bottom: 12px">
+            <div
+              style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f0f0f0;cursor:pointer"
+              @click="toggleDateGroup(group.date)"
+            >
+              <span style="font-size:12px;color:#999">{{ expandedDates.has(group.date) ? '▾' : '▸' }}</span>
+              <span style="font-weight:500">{{ group.date }}</span>
+              <a-tag>{{ group.issues.length }} 条</a-tag>
+              <span style="font-size:11px;color:#999">
+                首次发现 {{ group.issues.filter(i => !i.last_checked_at || i.last_checked_at.startsWith(group.date)).length }} 条
+              </span>
+            </div>
+            <a-table
+              v-if="expandedDates.has(group.date)"
+              :columns="issueColumns"
+              :data-source="group.issues"
+              rowKey="id"
+              size="small"
+              :pagination="false"
+              style="margin-top: 4px"
+              :row-selection="{ selectedRowKeys: selectedIds, onChange: (keys: any) => { selectedIds = keys } }"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'field'">
+                  <span>{{ record.field_name || record.field_code || '—' }}</span>
+                  <div v-if="record.field_code" style="font-size:11px;color:#999">{{ record.field_code }}</div>
+                </template>
+                <template v-if="column.key === 'diff'">
+                  <template v-if="record.check_type === 'composite_member'">
+                    <span style="color:#1890ff">{{ record.primary_value ?? '空' }}</span>
+                    <span style="color:#999;margin:0 4px">→</span>
+                    <span style="color:#fa541c">{{ record.member_value ?? '空' }}</span>
+                    <div style="font-size:11px;color:#bbb">{{ record.primary_source }} vs {{ record.member_source }}</div>
+                  </template>
+                  <template v-else-if="record.check_type === 'archive_source_diff'">
+                    <span style="color:#722ed1">档案:{{ record.primary_value ?? '空' }}</span>
+                    <span style="color:#999;margin:0 4px">vs</span>
+                    <span style="color:#fa541c">源:{{ record.member_value ?? '空' }}</span>
+                  </template>
+                  <template v-else-if="record.check_type === 'orphan_source_record'">
+                    <a-tag color="red">{{ record.member_source }}</a-tag>
+                    <span style="font-size:11px">主键: {{ record.record_key }}</span>
+                  </template>
+                  <template v-else-if="record.check_type === 'schema_drift'">
+                    <span style="color:#1890ff">{{ record.primary_value }}</span>
+                    <span style="color:#999;margin:0 4px">→</span>
+                    <span style="color:#fa541c">{{ record.member_value }}</span>
+                    <div v-if="record.detail?.issue" style="font-size:11px;color:#999">
+                      {{ record.detail.issue === 'field_removed' ? '字段已移除' : '类型已变更' }}
+                    </div>
+                  </template>
+                </template>
+                <template v-if="column.key === 'record_key'">
+                  <span style="font-size:12px">{{ record.record_key || '—' }}</span>
+                </template>
+                <template v-if="column.key === 'status'">
+                  <a-tag :color="statusColor(record.status)" style="font-size:11px">{{ record.status_display }}</a-tag>
+                </template>
+                <template v-if="column.key === 'action'">
+                  <a-button type="link" size="small" danger @click="disableRuleForIssue(record)">失效</a-button>
+                </template>
+              </template>
+            </a-table>
           </div>
-          <div style="font-size: 11px; color: #999">code: {{ record.field_code }}</div>
-        </template>
-        <template v-if="column.key === 'diff'">
-          <div style="line-height: 2">
-            <div><span style="color: #999; font-size: 11px">主({{ record.primary_source }})：</span><span style="color: #1890ff; font-weight: 500">{{ record.primary_value ?? '空' }}</span></div>
-            <div><span style="color: #999; font-size: 11px">成员值：</span><span style="color: #fa541c; font-weight: 500">{{ record.member_value ?? '空' }}</span></div>
-          </div>
-        </template>
-        <template v-if="column.key === 'record_key'">
-          <span>{{ record.record_key }}</span>
-        </template>
-        <template v-if="column.key === 'status'">
-          <a-tag :color="statusColor(record.status)">{{ record.status_display }}</a-tag>
-        </template>
-        <template v-if="column.key === 'review'">
-          <template v-if="record.reviewed_at">
-            <div style="font-size: 12px">{{ record.reviewed_by }} · {{ formatDateTime(record.reviewed_at) }}</div>
-            <div v-if="record.review_note" style="font-size: 12px; color: #999">{{ record.review_note }}</div>
-          </template>
-          <span v-else style="color: #ccc">-</span>
-        </template>
-      </template>
-      <!-- 展开行：历史差异值时间线 -->
-      <template #expandedRowRender="{ record }">
-        <div style="padding: 8px 0 8px 48px">
-          <div style="font-weight: 600; margin-bottom: 6px; color: #555">差异值变化历史（{{ record.value_history?.length || 0 }} 条）</div>
-          <a-table
-            v-if="record.value_history?.length"
-            :dataSource="record.value_history"
-            :columns="historyColumns"
-            :pagination="false"
-            rowKey="id"
-            size="small"
-            :scroll="{ y: 200 }"
-          >
-            <template #bodyCell="{ column, record: h }">
-              <template v-if="column.key === 'h_time'">{{ formatDateTime(h.checked_at) }}</template>
-              <template v-if="column.key === 'h_primary'"><span style="color: #1890ff">{{ h.primary_value ?? '空' }}</span></template>
-              <template v-if="column.key === 'h_member'"><span style="color: #fa541c">{{ h.member_value ?? '空' }}</span></template>
-            </template>
-          </a-table>
-          <a-empty v-else description="暂无历史记录（首次发现）" :image="null" style="margin: 0; font-size: 12px; color: #999" />
+        </a-spin>
+
+        <!-- 批量操作 -->
+        <div v-if="selectedIds.length" style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          <span style="color:#1890ff">已选 {{ selectedIds.length }} 条</span>
+          <a-button size="small" @click="openReviewModal('reviewed')">标记已审</a-button>
+          <a-button size="small" @click="openReviewModal('ignored')">标记忽略</a-button>
+          <a-button size="small" @click="openReviewModal('reopen')">重新打开</a-button>
         </div>
-      </template>
-    </a-table>
+      </a-card>
+    </template>
 
     <!-- 批量标记弹窗 -->
-    <a-modal
-      v-model:open="reviewModal"
-      :title="`${actionLabel[reviewAction]}（${selectedIds.length} 条）`"
-      :confirmLoading="reviewing"
-      @ok="doBatchReview"
-    >
-      <a-alert
-        v-if="reviewAction !== 'reopen'"
-        type="info"
-        show-icon
-        style="margin-bottom: 12px"
-        message="仅标记状态并写入变更日志批次，不修改档案数据，也不回写任何源表。"
-      />
+    <a-modal v-model:open="reviewModal" :title="`${actionLabel[reviewAction]}（${selectedIds.length} 条）`" :confirmLoading="reviewing" @ok="doBatchReview">
       <a-form layout="vertical">
-        <a-form-item label="备注">
-          <a-textarea v-model:value="reviewNote" :rows="3" :maxlength="500" placeholder="审核说明（可选）" />
-        </a-form-item>
-        <a-form-item label="操作人">
-          <a-input v-model:value="reviewOperator" placeholder="操作人" />
-        </a-form-item>
+        <a-form-item label="备注"><a-textarea v-model:value="reviewNote" :rows="2" :maxlength="500" /></a-form-item>
+        <a-form-item label="操作人"><a-input v-model:value="reviewOperator" /></a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 失效规则弹窗 -->
+    <a-modal v-model:open="disableRuleModal" title="失效检查规则" :confirmLoading="disablingRule" @ok="submitDisableRule">
+      <a-alert type="warning" show-icon style="margin-bottom:12px">
+        <template #message>失效后该规则不再产生新差异</template>
+      </a-alert>
+      <a-form layout="vertical">
+        <a-form-item label="类型"><span>{{ disableRuleTypeLabel }}</span></a-form-item>
+        <a-form-item label="字段"><span>{{ disableRuleField || '（全部）' }}</span></a-form-item>
+        <a-form-item label="原因"><a-textarea v-model:value="disableRuleReason" :rows="2" /></a-form-item>
+        <a-form-item label="操作人"><a-input v-model:value="disableRuleOperator" /></a-form-item>
+      </a-form>
+    </a-modal>
+
+    <!-- 失效规则管理抽屉 -->
+    <a-drawer v-model:open="showRulesDrawer" title="失效规则管理" width="50vw">
+      <a-table :columns="ruleColumns" :data-source="disabledRules" :loading="rulesLoading" rowKey="id" size="small" :pagination="false">
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'r_type'"><a-tag :color="checkTypeColor[record.check_type]">{{ record.check_type_display }}</a-tag></template>
+          <template v-if="column.key === 'r_field'">{{ record.field_code || '（全部）' }}</template>
+          <template v-if="column.key === 'r_reason'">{{ record.disabled_reason || '—' }}</template>
+          <template v-if="column.key === 'r_action'">
+            <a-popconfirm title="确认恢复？" @confirm="enableRule(record)"><a-button type="link" size="small">恢复</a-button></a-popconfirm>
+            <a @click="confirmDeleteRule(record)" style="color: #ff4d4f; font-size: 12px; margin-left: 8px">删除</a>
+          </template>
+        </template>
+      </a-table>
+    </a-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
-import { archiveApi, consistencyApi } from '@/api/archive'
+import { message, Modal } from 'ant-design-vue'
+import { archiveApi, consistencyApi, consistencyRuleApi } from '@/api/archive'
 import { formatDateTime } from '@/utils/date'
 import { extractApiError } from '@/utils/apiError'
-import type { ConsistencyIssue } from '@/types'
+import type { ConsistencyIssue, ConsistencyCheckRule, CheckType } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
 const archiveId = Number(route.params.id)
 
 const archiveName = ref('')
-const issues = ref<ConsistencyIssue[]>([])
 const loading = ref(false)
 const checking = ref(false)
-const page = ref(1)
-const total = ref(0)
-const selectedIds = ref<number[]>([])
-const expandedKeys = ref<number[]>([])
-const statusCount = ref<Record<string, number>>({ open: 0, reviewed: 0, ignored: 0, resolved: 0 })
-const fieldOptions = ref<{ code: string; name: string }[]>([])
 const lastCheck = ref<any>(null)
+const selectedIds = ref<number[]>([])
 
-const filterStatus = ref<string | undefined>('open')
-const filterField = ref<string | undefined>(undefined)
+// 检查类型配置
+const checkTypes = [
+  { key: 'composite_member', label: '组合字段成员', color: '#1890ff' },
+  { key: 'archive_source_diff', label: '档案vs源差异', color: '#722ed1' },
+  { key: 'orphan_source_record', label: '源侧孤立记录', color: '#ff4d4f' },
+  { key: 'schema_drift', label: 'Schema漂移', color: '#fa8c16' },
+]
+const checkTypeColor: Record<string, string> = { composite_member: 'blue', archive_source_diff: 'purple', orphan_source_record: 'red', schema_drift: 'orange' }
+
+// 类型计数
+const typeCounts = ref<Record<string, number>>({})
+const typeStatusCounts = ref<Record<string, Record<string, number>>>({})
+
+// 展开的类型和日期
+const expandedType = ref<string | null>(null)
+const expandedDates = ref(new Set<string>())
+
+// 分组后的差异
+const groupedIssues = ref<{ date: string; issues: ConsistencyIssue[] }[]>([])
+
+// 筛选
+const filterStatus = ref<string | undefined>(undefined)
 const filterKey = ref('')
 
+// 批量标记
 const reviewModal = ref(false)
 const reviewAction = ref<'reviewed' | 'ignored' | 'reopen'>('reviewed')
 const reviewNote = ref('')
-const reviewOperator = ref('admin')
+const reviewOperator = ref('')
 const reviewing = ref(false)
 const actionLabel: Record<string, string> = { reviewed: '标记已审核', ignored: '标记忽略', reopen: '重新打开' }
 
-// 主表列：强调 发现时间→成员表.字段→差异对比→记录标识→状态→审核
-const columns = [
-  { title: '发现时间', key: 'time', width: 150 },
-  { title: '成员表 · 字段', key: 'source_field', width: 200 },
-  { title: '差异对比', key: 'diff', width: 240 },
+// 失效规则
+const disableRuleModal = ref(false)
+const disablingRule = ref(false)
+const disableRuleType = ref('')
+const disableRuleField = ref('')
+const disableRuleMemberSource = ref('')
+const disableRuleReason = ref('')
+const disableRuleOperator = ref('')
+const showRulesDrawer = ref(false)
+const disabledRules = ref<ConsistencyCheckRule[]>([])
+const rulesLoading = ref(false)
+
+const expandedTypeLabel = computed(() => checkTypes.find(t => t.key === expandedType.value)?.label || '')
+const disableRuleTypeLabel = computed(() => checkTypes.find(t => t.key === disableRuleType.value)?.label || '')
+
+const issueColumns = [
+  { title: '字段', key: 'field', width: 160 },
+  { title: '差异', key: 'diff', width: 280 },
   { title: '记录标识', key: 'record_key', width: 140, ellipsis: true },
-  { title: '状态', key: 'status', width: 90 },
-  { title: '审核信息', key: 'review', width: 200 },
+  { title: '状态', key: 'status', width: 80 },
+  { title: '操作', key: 'action', width: 70 },
 ]
 
-// 展开行内嵌历史表列
-const historyColumns = [
-  { title: '检查时间', key: 'h_time', width: 160 },
-  { title: '主字段值', key: 'h_primary', width: 200 },
-  { title: '成员值', key: 'h_member', width: 200 },
+const ruleColumns = [
+  { title: '类型', key: 'r_type', width: 130 },
+  { title: '字段', key: 'r_field', width: 140 },
+  { title: '原因', key: 'r_reason' },
+  { title: '操作', key: 'r_action', width: 120 },
 ]
 
 function statusColor(s: string) {
   return ({ open: 'orange', reviewed: 'cyan', ignored: 'default', resolved: 'green' } as Record<string, string>)[s] || 'default'
-}
-
-function onExpand(expanded: boolean, record: ConsistencyIssue) {
-  if (expanded) {
-    expandedKeys.value = [...expandedKeys.value, record.id]
-  } else {
-    expandedKeys.value = expandedKeys.value.filter(k => k !== record.id)
-  }
 }
 
 async function loadArchive() {
@@ -214,83 +265,92 @@ async function loadArchive() {
   } catch { /* 非关键 */ }
 }
 
-async function loadIssues() {
+// 加载各类型的计数
+async function loadTypeCounts() {
+  for (const ct of checkTypes) {
+    try {
+      const [allRes, openRes, reviewedRes, ignoredRes] = await Promise.all([
+        consistencyApi.list({ archive: archiveId, check_type: ct.key, page_size: 1 }),
+        consistencyApi.list({ archive: archiveId, check_type: ct.key, status: 'open', page_size: 1 }),
+        consistencyApi.list({ archive: archiveId, check_type: ct.key, status: 'reviewed', page_size: 1 }),
+        consistencyApi.list({ archive: archiveId, check_type: ct.key, status: 'ignored', page_size: 1 }),
+      ])
+      typeCounts.value[ct.key] = allRes.data.count
+      typeStatusCounts.value[ct.key] = {
+        open: openRes.data.count,
+        reviewed: reviewedRes.data.count,
+        ignored: ignoredRes.data.count,
+      }
+    } catch { /* 非关键 */ }
+  }
+}
+
+// 切换类型展开
+function toggleType(ctKey: string) {
+  if (expandedType.value === ctKey) {
+    expandedType.value = null
+    groupedIssues.value = []
+  } else {
+    expandedType.value = ctKey
+    expandedDates.value = new Set()
+    loadGroupedIssues()
+  }
+}
+
+// 加载展开类型的分组数据
+async function loadGroupedIssues() {
+  if (!expandedType.value) return
   loading.value = true
   try {
-    const params: any = { archive: archiveId, page: page.value }
+    const params: any = { archive: archiveId, check_type: expandedType.value, page_size: 500 }
     if (filterStatus.value) params.status = filterStatus.value
-    if (filterField.value) params.field_code = filterField.value
     if (filterKey.value) params.record_key = filterKey.value
     const res = await consistencyApi.list(params)
-    issues.value = res.data.results
-    total.value = res.data.count
+    const issues = res.data.results
+
+    // 按日期分组
+    const dateMap = new Map<string, ConsistencyIssue[]>()
+    for (const issue of issues) {
+      const date = (issue.first_found_at || '').slice(0, 10) || '未知日期'
+      if (!dateMap.has(date)) dateMap.set(date, [])
+      dateMap.get(date)!.push(issue)
+    }
+    groupedIssues.value = [...dateMap.entries()]
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([date, items]) => ({ date, issues: items }))
   } catch (e: any) {
-    message.error(extractApiError(e) || '加载差异清单失败')
+    message.error(extractApiError(e) || '加载失败')
   } finally {
     loading.value = false
   }
 }
 
-// 各状态计数 + 字段筛选项
-async function loadStats() {
-  try {
-    const reqs = ['open', 'reviewed', 'ignored', 'resolved'].map(s =>
-      consistencyApi.list({ archive: archiveId, status: s, page_size: 1 }))
-    const results = await Promise.all(reqs)
-    statusCount.value = {
-      open: results[0].data.count,
-      reviewed: results[1].data.count,
-      ignored: results[2].data.count,
-      resolved: results[3].data.count,
-    }
-  } catch { /* 非关键 */ }
-  try {
-    const res = await consistencyApi.list({ archive: archiveId, page_size: 200 })
-    const seen = new Map<string, string>()
-    res.data.results.forEach(i => { if (!seen.has(i.field_code)) seen.set(i.field_code, i.field_name) })
-    fieldOptions.value = [...seen.entries()].map(([code, name]) => ({ code, name }))
-  } catch { /* 非关键 */ }
+function toggleDateGroup(date: string) {
+  const s = new Set(expandedDates.value)
+  if (s.has(date)) s.delete(date)
+  else s.add(date)
+  expandedDates.value = s
 }
 
 async function runCheck() {
   checking.value = true
   try {
     const res = await archiveApi.consistencyCheck(archiveId)
-    const stats = res.data
-    lastCheck.value = stats
-    if (stats.message) {
-      message.info(stats.message)
-    } else {
-      const parts = [`发现差异 ${stats.mismatch_count} 处`]
-      if (stats.new_issues) parts.push(`新增 ${stats.new_issues}`)
-      if (stats.reopened_issues) parts.push(`重现 ${stats.reopened_issues}`)
-      if (stats.resolved_issues) parts.push(`自动消失 ${stats.resolved_issues}`)
-      if (stats.errors?.length) parts.push(`${stats.errors.length} 个错误`)
-      message.success(`检查完成：${parts.join('，')}`)
-    }
-    page.value = 1
+    lastCheck.value = res.data
+    const parts = [`差异 ${res.data.mismatch_count} 处`]
+    if (res.data.new_issues) parts.push(`新增 ${res.data.new_issues}`)
+    if (res.data.resolved_issues) parts.push(`消失 ${res.data.resolved_issues}`)
+    message.success(`检查完成：${parts.join('，')}`)
     selectedIds.value = []
-    expandedKeys.value = []
-    await Promise.all([loadIssues(), loadStats()])
+    await Promise.all([loadTypeCounts(), loadGroupedIssues()])
   } catch (e: any) {
-    message.error(extractApiError(e) || '一致性检查失败')
+    message.error(extractApiError(e) || '检查失败')
   } finally {
     checking.value = false
   }
 }
 
-function onFilterChange() {
-  page.value = 1
-  selectedIds.value = []
-  expandedKeys.value = []
-  loadIssues()
-}
-
-// R-030: allow-clear 清空后自动重查
-watch(filterKey, (val) => {
-  if (!val) onFilterChange()
-})
-
+// 批量标记
 function openReviewModal(action: 'reviewed' | 'ignored' | 'reopen') {
   reviewAction.value = action
   reviewNote.value = ''
@@ -301,26 +361,88 @@ async function doBatchReview() {
   reviewing.value = true
   try {
     const res = await consistencyApi.batchReview({
-      ids: selectedIds.value,
-      action: reviewAction.value,
-      note: reviewNote.value,
-      operated_by: reviewOperator.value || 'admin',
+      ids: selectedIds.value, action: reviewAction.value,
+      note: reviewNote.value, operated_by: reviewOperator.value,
     })
-    const d = res.data
-    message.success(`${actionLabel[reviewAction.value]}完成：更新 ${d.updated} 条，跳过 ${d.skipped} 条（已写入变更日志批次）`)
+    message.success(`${actionLabel[reviewAction.value]}完成：更新 ${res.data.updated} 条`)
     reviewModal.value = false
     selectedIds.value = []
-    await Promise.all([loadIssues(), loadStats()])
+    await Promise.all([loadTypeCounts(), loadGroupedIssues()])
   } catch (e: any) {
-    message.error(extractApiError(e) || '批量标记失败')
+    message.error(extractApiError(e) || '标记失败')
   } finally {
     reviewing.value = false
   }
 }
 
+// 失效规则
+function disableRuleForIssue(issue: ConsistencyIssue) {
+  disableRuleType.value = issue.check_type
+  disableRuleField.value = issue.field_code || ''
+  disableRuleMemberSource.value = issue.member_source || ''
+  disableRuleReason.value = ''
+  disableRuleOperator.value = ''
+  disableRuleModal.value = true
+}
+
+async function submitDisableRule() {
+  disablingRule.value = true
+  try {
+    await consistencyRuleApi.disable({
+      archive: archiveId, check_type: disableRuleType.value,
+      field_code: disableRuleField.value || undefined,
+      member_source: disableRuleMemberSource.value || undefined,
+      reason: disableRuleReason.value, operated_by: disableRuleOperator.value || 'system',
+    })
+    message.success('规则已失效')
+    disableRuleModal.value = false
+  } catch (e: any) {
+    message.error(extractApiError(e) || '失效失败')
+  } finally {
+    disablingRule.value = false
+  }
+}
+
+async function loadDisabledRules() {
+  rulesLoading.value = true
+  try {
+    const res = await consistencyRuleApi.list({ archive: archiveId, disabled: 'true' })
+    disabledRules.value = res.data.results
+  } catch { /* 非关键 */ } finally { rulesLoading.value = false }
+}
+
+async function enableRule(rule: ConsistencyCheckRule) {
+  try {
+    await consistencyRuleApi.enable({ archive: archiveId, check_type: rule.check_type, field_code: rule.field_code || undefined, member_source: rule.member_source || undefined })
+    message.success('规则已恢复')
+    await loadDisabledRules()
+  } catch (e: any) { message.error(extractApiError(e) || '恢复失败') }
+}
+
+async function deleteRule(rule: ConsistencyCheckRule) {
+  try {
+    await consistencyRuleApi.delete(rule.id)
+    message.success('已删除')
+    await loadDisabledRules()
+  } catch (e: any) { message.error(extractApiError(e) || '删除失败') }
+}
+
+function confirmDeleteRule(rule: ConsistencyCheckRule) {
+  Modal.confirm({
+    title: '确认删除此失效规则？',
+    content: `删除后该规则将永久移除，不可恢复。`,
+    okType: 'danger',
+    okText: '删除',
+    cancelText: '取消',
+    onOk: () => deleteRule(rule),
+  })
+}
+
+watch(showRulesDrawer, (val) => { if (val) loadDisabledRules() })
+watch(filterKey, (val) => { if (!val) loadGroupedIssues() })
+
 onMounted(() => {
   loadArchive()
-  loadIssues()
-  loadStats()
+  loadTypeCounts()
 })
 </script>

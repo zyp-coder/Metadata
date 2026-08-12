@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: frontend
+title: 元数据前端应用（Vue3 + Vite + Ant Design Vue）
+scope:
+    - frontend/
+source_files: []
+depends_on: []
+related_to:
+    - path: backend

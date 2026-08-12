@@ -10,23 +10,27 @@
       :columns="columns"
       :loading="loading"
       rowKey="id"
-      :scroll="{ x: 1180 }"
+      :scroll="{ x: 1220 }"
       :pagination="{ current: page, pageSize: 20, total, onChange: (p: number) => { page = p; loadData() } }"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'name'">
-          {{ record.name }}
+          <span style="font-weight: 500">{{ record.name }}</span>
         </template>
         <template v-if="column.key === 'status'">
           <a-tag :color="statusColor(record.status)">{{ statusLabel(record.status) }}</a-tag>
         </template>
         <template v-if="column.key === 'action'">
           <a-space :size="4" style="white-space: nowrap">
-            <a @click="goDetail(record)">管理记录</a>
+            <a @click="goDetail(record)">编辑</a>
             <a-divider type="vertical" />
-            <a @click="goConsistency(record)">一致性检查</a>
+            <a @click="goConsistency(record)">检查</a>
             <a-divider type="vertical" />
-            <a @click="doRefreshPreview(record)">从数据源同步</a>
+            <a @click="doRefreshPreview(record)">同步</a>
+            <template v-if="isAdmin">
+              <a-divider type="vertical" />
+              <a @click="openPermissionOverview(record)">权限</a>
+            </template>
             <a-divider type="vertical" />
             <a style="color: #ff4d4f" @click="confirmDelete(record)">删除</a>
           </a-space>
@@ -34,77 +38,13 @@
       </template>
     </a-table>
 
-    <!-- 刷新预检弹窗 -->
-    <a-modal
+    <!-- 刷新预检弹窗（schema 变化+数据试算+波及告警+warnings） | R-062：收敛为 RefreshPreviewModal 单组件，确认意图上抛父组件执行 -->
+    <RefreshPreviewModal
       v-model:open="previewModal"
-      :title="previewArchive ? `刷新预检 — ${previewArchive.name}` : '刷新预检：检测到以下变化'"
-      width="760px"
-      okText="确认更新"
-      cancelText="取消"
-      :bodyStyle="{ maxHeight: '65vh', overflowY: 'auto' }"
-      @ok="confirmRefresh"
-    >
-      <template v-if="previewData">
-        <template v-if="previewData.schema_changes?.has_changes">
-          <a-alert type="warning" show-icon style="margin-bottom: 12px">
-            <template #message>模型结构有变化，确认后将先同步结构再刷新数据（schema 版本 +1）</template>
-          </a-alert>
-          <div v-if="previewData.schema_changes.added?.length" style="margin-bottom: 8px">
-            <b>新增字段：</b>
-            <a-tag v-for="f in previewData.schema_changes.added" :key="f.code" color="green">{{ f.name }}</a-tag>
-          </div>
-          <div v-if="previewData.schema_changes.removed?.length" style="margin-bottom: 8px">
-            <b>移除字段：</b>
-            <a-tag v-for="f in previewData.schema_changes.removed" :key="f.code" color="red">{{ f.name }}</a-tag>
-          </div>
-          <div v-if="previewData.schema_changes.changed?.length" style="margin-bottom: 8px">
-            <b>字段变更：</b>
-            <div v-for="f in previewData.schema_changes.changed" :key="f.code" style="margin: 4px 0 0 12px">
-              <span style="color: #1890ff">{{ f.name }}</span>
-              <span v-for="(c, i) in f.changes" :key="i" style="margin-left: 8px; color: #666">
-                {{ c.attr }}：<span style="color: #ff4d4f">{{ c.old ?? '-' }}</span> → <span style="color: #52c41a">{{ c.new ?? '-' }}</span>
-              </span>
-            </div>
-          </div>
-          <a-divider style="margin: 12px 0" />
-        </template>
-        <template v-if="previewData.data_changes?.has_changes">
-          <div style="margin-bottom: 8px">
-            <b>数据变化：</b>
-            <a-tag v-if="previewData.data_changes.would_create" color="green">新增 {{ previewData.data_changes.would_create }} 条</a-tag>
-            <a-tag v-if="previewData.data_changes.would_update" color="blue">更新 {{ previewData.data_changes.would_update }} 条</a-tag>
-            <a-tag v-if="previewData.data_changes.would_deactivate" color="orange">源侧已删将停用 {{ previewData.data_changes.would_deactivate }} 条</a-tag>
-          </div>
-          <a-table
-            v-if="previewData.data_changes.changes_sample?.length"
-            :dataSource="previewData.data_changes.changes_sample"
-            :columns="[{ title: '记录标识', dataIndex: 'record_key', key: 'record_key', width: 140 }, { title: '字段变化', key: 'fields' }]"
-            :pagination="false"
-            rowKey="record_key"
-            size="small"
-            :scroll="{ y: 240 }"
-          >
-            <template #bodyCell="{ column, record: s }">
-              <template v-if="column.key === 'fields'">
-                <div v-for="(cf, i) in s.changed_fields" :key="i" style="line-height: 1.8">
-                  <span style="color: #1890ff">{{ cf.name }}</span>
-                  <span style="color: #999">：</span>
-                  <span style="color: #ff4d4f">{{ cf.old ?? '-' }}</span>
-                  <span style="color: #999"> → </span>
-                  <span style="color: #52c41a">{{ cf.new ?? '-' }}</span>
-                </div>
-              </template>
-            </template>
-          </a-table>
-          <div v-if="(previewData.data_changes.would_update || 0) > (previewData.data_changes.changes_sample?.length || 0)" style="color: #999; margin-top: 4px">
-            仅展示前 {{ previewData.data_changes.changes_sample?.length }} 条变化样本
-          </div>
-        </template>
-        <a-alert v-if="previewData.data_changes?.errors?.length" type="error" show-icon style="margin-top: 8px">
-          <template #message>试算遇到错误：{{ previewData.data_changes.errors.slice(0, 5).join('；') }}</template>
-        </a-alert>
-      </template>
-    </a-modal>
+      :previewData="previewData"
+      :archiveName="previewArchive?.name ?? ''"
+      @confirm="confirmRefresh"
+    />
 
     <a-modal
       v-model:open="createModal"
@@ -130,17 +70,28 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 权限全景抽屉（仅管理员，只读审计视图） -->
+    <PermissionOverview
+      v-model:open="permOverviewVisible"
+      :archive-id="permOverviewArchive?.id ?? null"
+      :archive-name="permOverviewArchive?.name ?? ''"
+    />
+
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { message, Modal } from 'ant-design-vue'
+import { message, Modal, notification } from 'ant-design-vue'
 import { domainApi } from '@/api/modeling'
 import { archiveApi } from '@/api/archive'
+import { getMeApi } from '@/api/auth'
 import { formatDateTime } from '@/utils/date'
 import { extractApiError } from '@/utils/apiError'
+import PermissionOverview from './components/PermissionOverview.vue'
+import RefreshPreviewModal from './components/RefreshPreviewModal.vue'
 import type { Domain, Archive } from '@/types'
 
 const router = useRouter()
@@ -158,8 +109,18 @@ const previewModal = ref(false)
 const previewData = ref<any>(null)
 const previewArchive = ref<Archive | null>(null)
 
+// 权限全景（仅管理员可见入口，后端另有 IsMdmAdmin 403 拦截）
+const isAdmin = ref(false)
+const permOverviewVisible = ref(false)
+const permOverviewArchive = ref<Archive | null>(null)
+
+function openPermissionOverview(record: Archive) {
+  permOverviewArchive.value = record
+  permOverviewVisible.value = true
+}
+
 const columns = [
-  { title: '档案名称', key: 'name', width: 220, ellipsis: true },
+  { title: '档案名称', key: 'name', width: 200, ellipsis: true },
   { title: '所属域', dataIndex: 'domain_name', key: 'domain_name', width: 120, ellipsis: true },
   { title: '状态', key: 'status', width: 80 },
   { title: 'Schema版本', dataIndex: 'schema_version', key: 'schema_version', width: 100 },
@@ -167,7 +128,7 @@ const columns = [
   { title: '创建人', dataIndex: 'created_by', key: 'created_by', width: 90, ellipsis: true },
   { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 160,
     customRender: ({ text }: any) => formatDateTime(text) },
-  { title: '操作', key: 'action', width: 340, fixed: 'right' },
+  { title: '操作', key: 'action', width: 320, fixed: 'right' },
 ]
 
 function statusColor(s: string) {
@@ -237,7 +198,7 @@ async function handleCreate() {
     if (err?.domain && (err.domain[0]?.code === 'unique' || err.domain[0]?.code === 'unique_together')) {
       message.error('该域已有档案，一个域只能创建一个档案')
     } else {
-      message.error(e.message || '创建失败')
+      message.error(extractApiError(e) || '创建失败')
     }
   } finally {
     creating.value = false
@@ -263,7 +224,7 @@ async function doRefreshPreview(archive: Archive) {
     }
     previewModal.value = true
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '预检失败')
+    message.error(extractApiError(e) || '预检失败')
   }
 }
 
@@ -272,30 +233,42 @@ async function confirmRefresh() {
   previewModal.value = false
   const archiveId = previewArchive.value.id
   try {
-    if (previewData.value?.schema_changes?.has_changes) {
-      const res = await archiveApi.syncSchema(archiveId)
-      const stats = res.data.sync_stats
+    const res = previewData.value?.schema_changes?.has_changes
+      ? await archiveApi.syncSchema(archiveId)
+      : await archiveApi.refreshData(archiveId)
+    const stats = res.data.sync_stats
+    if (stats) {
       const parts: string[] = []
-      if (stats) {
-        if ((stats.tables_synced ?? 0) > 0) parts.push(`同步了 ${stats.tables_synced} 张表`)
-        if (stats.records_created > 0) parts.push(`新增 ${stats.records_created} 条记录`)
-        if (stats.records_updated > 0) parts.push(`更新 ${stats.records_updated} 条记录`)
+      if ((stats.tables_synced ?? 0) > 0) parts.push(`${previewData.value?.schema_changes?.has_changes ? '同步' : '刷新'}了 ${stats.tables_synced} 张表`)
+      if (stats.records_created > 0) parts.push(`新增 ${stats.records_created} 条`)
+      if (stats.records_updated > 0) parts.push(`更新 ${stats.records_updated} 条`)
+      if ((stats.records_deactivated ?? 0) > 0) parts.push(`停用 ${stats.records_deactivated} 条`)
+      if ((stats.records_reactivated ?? 0) > 0) parts.push(`源侧恢复，复活 ${stats.records_reactivated} 条`)
+      if (parts.length === 0) parts.push('数据已是最新')
+      if (stats.errors?.length > 0) {
+        Modal.warning({ title: `完成，但有 ${stats.errors.length} 个错误`, content: stats.errors.slice(0, 10).join('\n') })
+      } else if (stats.warnings && stats.warnings.length > 0) {
+        message.success(parts.join('，'))
+        Modal.warning({ title: `${stats.warnings.length} 条提醒`, content: stats.warnings.slice(0, 10).join('\n') })
+      } else {
+        message.success(parts.join('，'))
       }
-      message.success(`同步完成：${parts.length ? parts.join('，') : 'Schema 已更新'}`)
+      // 一致性检查告警（不阻断）
+      const cc = stats?.consistency_check
+      if (cc && cc.mismatch_count > 0) {
+        notification.warning({
+          message: `一致性提醒：${cc.mismatch_records} 条记录、${cc.mismatch_count} 处不一致`,
+          description: '数据已以主字段为准写入，不一致项仅为提醒，可稍后到一致性检查页处理。',
+          duration: 8,
+          style: { width: 360 },
+        })
+      }
     } else {
-      const res = await archiveApi.refreshData(archiveId)
-      const stats = res.data.sync_stats
-      const parts: string[] = []
-      if (stats) {
-        if (stats.records_created > 0) parts.push(`新增 ${stats.records_created} 条`)
-        if (stats.records_updated > 0) parts.push(`更新 ${stats.records_updated} 条`)
-        if ((stats.records_deactivated ?? 0) > 0) parts.push(`停用 ${stats.records_deactivated} 条`)
-      }
-      message.success(`刷新完成：${parts.length ? parts.join('，') : '数据已是最新'}`)
+      message.success('操作完成')
     }
     await loadData()
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '同步失败')
+    message.error(extractApiError(e) || '同步失败')
   }
 }
 
@@ -309,7 +282,7 @@ function goConsistency(archive: Archive) {
 
 function confirmDelete(record: Archive) {
   Modal.confirm({
-    title: '确定删除此档案？',
+    title: '确认删除此档案？',
     content: `档案「${record.name}」将被删除，此操作不可恢复。`,
     okType: 'danger',
     okText: '删除',
@@ -324,13 +297,18 @@ async function doDelete(id: number) {
     message.success('删除成功')
     await loadData()
   } catch (e: any) {
-    message.error(e.message || '删除失败')
+    message.error(extractApiError(e) || '删除失败')
   }
 }
 
 onMounted(async () => {
   await loadDomains()
   await loadData()
+  // 当前用户是否管理员（决定「权限」入口可见性）
+  try {
+    const { data } = await getMeApi()
+    isAdmin.value = !!data.user?.is_admin
+  } catch { /* 判定失败按非管理员处理，不阻断页面 */ }
 })
 </script>
 

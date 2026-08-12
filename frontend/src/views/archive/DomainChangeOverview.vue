@@ -11,6 +11,7 @@
       rowKey="domain_id"
       :pagination="false"
       size="small"
+      :scroll="{ x: 750 }"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'change_count_7d'">
@@ -36,6 +37,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { domainChangeApi } from '@/api/archive'
+import { extractApiError } from '@/utils/apiError'
 import type { DomainChangeStat } from '@/api/archive'
 import { formatDateTime } from '@/utils/date'
 
@@ -57,7 +59,7 @@ async function loadStats() {
     const res = await domainChangeApi.stats()
     domainStats.value = res.data
   } catch (e: any) {
-    message.error(e.message || '加载域变更统计失败')
+    message.error(extractApiError(e) || '加载域变更统计失败')
   } finally {
     loading.value = false
   }

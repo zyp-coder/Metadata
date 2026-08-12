@@ -7,12 +7,17 @@
         <a-tag v-if="archive" :color="statusColor(archive.status)">{{ statusLabel(archive.status) }}</a-tag>
       </a-space>
       <a-space>
+        <!-- v18 攒批保存：有待存修改时点亮，保存=一个人工批次 -->
+        <a-tooltip :title="pendingEdits.length ? '提交待存修改，合并为一个批次' : '先在记录详情里修改并暂存'">
+          <a-button :disabled="!pendingEdits.length" :loading="batchSaving" @click="savePendingEdits">
+            {{ pendingEdits.length ? `保存（${pendingEdits.length} 条待存）` : '保存' }}
+          </a-button>
+        </a-tooltip>
         <a-button type="primary" :loading="previewLoading" @click="refreshData">立即刷新</a-button>
       </a-space>
     </div>
 
-    <!-- 档案记录列表 -->
-    <div>
+    <div style="min-height: calc(100vh - 180px)">
         <a-alert v-if="archive" type="info" show-icon style="margin-bottom: 12px">
           <template #message>
             所属域：{{ archive.domain_name }} | Schema 版本：v{{ archive.schema_version }} | 字段数：{{ archive.schema?.length || 0 }} | 记录数：{{ recordTotal }}
@@ -44,8 +49,8 @@
         </a-space>
 
         <!-- 左侧字段导航 + 记录表格（第八十七轮问题7） -->
-        <div style="display: flex; gap: 12px; align-items: flex-start">
-          <div class="field-nav">
+        <div style="display: flex; gap: 12px; align-items: stretch; min-height: calc(100vh - 280px)">
+          <div class="field-nav" style="height: calc(100vh - 260px); overflow-y: auto">
             <div class="field-nav-title">字段导航</div>
             <template v-for="block in groupedSchemaBlocks" :key="block.key">
               <div v-if="block.name" class="field-nav-group" :style="{ paddingLeft: (block.level - 1) * 8 + 'px' }">{{ block.name }}</div>
@@ -57,7 +62,13 @@
                 :style="{ paddingLeft: block.name ? (block.level * 8 + 6) + 'px' : '6px' }"
                 :title="f.name"
                 @click="scrollToFieldColumn(f.code)"
-              >{{ f.name }}</div>
+              >
+                {{ f.name }}
+                <span class="field-nav-dv" @click.stop="openFieldDistinctValues(f)">
+                  <template v-if="dvCache[f.code]">{{ dvCache[f.code].distinct_count }}</template>
+                  <template v-else>值</template>
+                </span>
+              </div>
             </template>
           </div>
           <div ref="recordTableWrap" style="flex: 1; min-width: 0">
@@ -67,7 +78,7 @@
           :loading="loading"
           rowKey="id"
           size="small"
-          :scroll="{ x: dynamicColumnsTotalWidth }"
+          :scroll="{ x: dynamicColumnsTotalWidth, y: 'calc(100vh - 300px)' }"
           :pagination="{ current: recordPage, pageSize: 20, total: recordTotal, onChange: (p: number) => { recordPage = p; loadRecords() }, showTotal: (t: number) => `共 ${t} 条` }"
         >
           <template #bodyCell="{ column, record: rec, index }">
@@ -93,6 +104,8 @@
                 <a-divider type="vertical" />
                 <a @click="openDetailDrawer(rec)">详情</a>
                 <a-divider type="vertical" />
+                <a @click="openDetailRowsDrawer(rec)">明细</a>
+                <a-divider type="vertical" />
                 <a @click="openHistoryModal(rec)">变更历史</a>
               </a-space>
             </template>
@@ -103,14 +116,13 @@
       </div>
 
 
-    <!-- 记录详情弹窗（详情即编辑：档案维护字段直接可改，无变更不可保存） -->
-    <a-modal
+    <!-- 记录详情抽屉（详情即编辑：档案维护字段直接可改，无变更不可保存） | R-056：1400 modal → 1100 大抽屉，不遮记录列表可边看边改 -->
+    <a-drawer
       v-model:open="detailModal"
       :title="detailModalTitle"
-      width="1400px"
-      :footer="null"
+      width="1100px"
       :destroyOnClose="true"
-      :bodyStyle="{ maxHeight: '70vh', overflowY: 'auto' }"
+      :bodyStyle="{ padding: '16px 24px' }"
     >
       <template v-if="detailRecord && archive">
         <a-descriptions bordered :column="1" size="small">
@@ -156,7 +168,7 @@
                           :is="getFieldComponent(field.type)"
                           v-model:value="drawerEditData[field.code]"
                           v-bind="getFieldProps(field)"
-                          :disabled="field.ownership === 'source'"
+                          :disabled="field.ownership === 'source' || field.editable === false"
                           :placeholder="field.note || getPlaceholder(field)"
                           style="width: 100%"
                         />
@@ -186,7 +198,7 @@
                     :is="getFieldComponent(field.type)"
                     v-model:value="drawerEditData[field.code]"
                     v-bind="getFieldProps(field)"
-                    :disabled="field.ownership === 'source'"
+                    :disabled="field.ownership === 'source' || field.editable === false"
                     :placeholder="field.note || getPlaceholder(field)"
                     style="width: 100%"
                   />
@@ -202,42 +214,6 @@
           </div>
 
           <div style="margin-top: 16px">
-            <!-- 历史回滚时间线 -->
-            <a-collapse v-model:activeKey="rollbackPanelKey" style="margin-bottom: 16px" :bordered="false">
-              <a-collapse-panel key="rollback" header="🔄 历史回滚">
-                <div v-if="rollbackLoading" style="text-align: center; padding: 16px">
-                  <a-spin tip="加载变更历史..." />
-                </div>
-                <div v-else-if="rollbackHistory.length === 0" style="color: #999; padding: 8px">暂无可回滚的变更记录</div>
-                <a-timeline v-else mode="left" style="max-height: 300px; overflow-y: auto; padding-top: 8px">
-                  <a-timeline-item v-for="(item, index) in rollbackHistory" :key="item.id" :color="rollbackTimelineColor(item.change_type)">
-                    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px">
-                      <div style="flex: 1; min-width: 0">
-                        <div>
-                          <a-tag :color="rollbackChangeTypeColor(item.change_type)" size="small">{{ item.change_type_display }}</a-tag>
-                          <span style="color: #999; font-size: 12px">{{ formatDateTime(item.created_at) }}</span>
-                          <span style="margin-left: 8px; color: #666; font-size: 12px">{{ item.operator }}</span>
-                        </div>
-                        <div v-if="item.field_changes?.length" style="margin-top: 4px; font-size: 12px; color: #666">
-                          <span v-for="(fc, idx) in item.field_changes.slice(0, 3)" :key="idx">
-                            {{ fc.name || fc.field }}<span v-if="idx < Math.min(item.field_changes.length, 3) - 1">、</span>
-                          </span>
-                          <span v-if="item.field_changes.length > 3">等{{ item.field_changes.length }}项</span>
-                        </div>
-                      </div>
-                      <a-button
-                        v-if="canRollbackToPoint(index)"
-                        size="small"
-                        danger
-                        :loading="rollbackingId === item.id"
-                        @click="handleRollbackToChange(item, detailRecord!)"
-                      >回滚到此</a-button>
-                    </div>
-                  </a-timeline-item>
-                </a-timeline>
-              </a-collapse-panel>
-            </a-collapse>
-
             <!-- 变更预览 -->
             <template v-if="editChanges.length > 0">
               <a-alert type="info" show-icon style="margin-bottom: 12px">
@@ -262,149 +238,137 @@
               </a-table>
             </template>
             <a-alert v-else type="info" show-icon style="margin-bottom: 12px">
-              <template #message>档案维护字段可直接修改，源系统维护字段只读；有修改后可保存</template>
+              <template #message>档案维护字段可直接修改，源系统维护字段只读；修改后点「暂存修改」，再到页头「保存」统一提交为一批。如需回滚请查看「变更历史」</template>
             </a-alert>
-            <div style="text-align: right">
-              <a-space>
-                <a-button @click="detailModal = false">关闭</a-button>
-                <a-button type="primary" :loading="saving" :disabled="editChanges.length === 0" @click="handleSaveDrawer">保存</a-button>
-              </a-space>
-            </div>
           </div>
       </template>
-    </a-modal>
+      <template #footer>
+        <div style="text-align: right">
+          <a-space>
+            <a-button @click="detailModal = false">关闭</a-button>
+            <a-button type="primary" :disabled="editChanges.length === 0" @click="handleSaveDrawer">暂存修改</a-button>
+          </a-space>
+        </div>
+      </template>
+    </a-drawer>
 
-    <!-- 变更历史弹窗（记录列表入口：单条记录全部变更 + 双粒度回滚） -->
-    <a-modal
-      v-model:open="historyModal"
-      :title="historyModalTitle"
-      width="860px"
-      :footer="null"
-      :bodyStyle="{ maxHeight: '70vh', overflowY: 'auto' }"
-    >
-      <div v-if="rollbackLoading" style="text-align: center; padding: 24px">
-        <a-spin tip="加载变更历史..." />
-      </div>
-      <a-empty v-else-if="rollbackHistory.length === 0" description="该记录暂无变更历史" />
-      <a-timeline v-else style="padding: 8px 4px 0">
-        <a-timeline-item v-for="(item, index) in rollbackHistory" :key="item.id" :color="rollbackTimelineColor(item.change_type)">
-          <div style="display: flex; justify-content: space-between; gap: 12px">
-            <div style="flex: 1; min-width: 0">
-              <div>
-                <a-tag :color="rollbackChangeTypeColor(item.change_type)">{{ item.change_type_display }}</a-tag>
-                <a-tag :color="historySourceColor(item.change_source)">{{ item.change_source_display }}</a-tag>
-                <span style="color: #999; font-size: 12px">{{ formatDateTime(item.created_at) }}</span>
-                <span style="margin-left: 8px; color: #666; font-size: 12px">{{ item.operator }}</span>
-              </div>
-              <div v-if="item.field_changes?.length" style="margin-top: 6px">
-                <div v-for="(fc, fi) in item.field_changes" :key="fi" style="font-size: 12px; line-height: 1.9">
-                  <span style="color: #1890ff">{{ fc.name || fc.field }}</span>
-                  <span style="color: #999">：</span>
-                  <span style="color: #ff4d4f">{{ fc.old ?? '-' }}</span>
-                  <span style="color: #999"> → </span>
-                  <span style="color: #52c41a">{{ fc.new ?? '-' }}</span>
-                </div>
-              </div>
-            </div>
-            <a-space direction="vertical" :size="4" style="flex-shrink: 0">
-              <a-button v-if="canRollbackDetail(item)" size="small" @click="handleRollbackSingle(item)">回滚此条</a-button>
-              <a-button
-                v-if="canRollbackToPoint(index)"
-                size="small"
-                danger
-                :loading="rollbackingId === item.id"
-                @click="handleRollbackToChange(item, historyRecord!)"
-              >回滚到此</a-button>
-            </a-space>
-          </div>
-        </a-timeline-item>
-      </a-timeline>
-    </a-modal>
+    <!-- 变更历史抽屉（记录列表入口：单条记录全部变更 + 双粒度回滚） | R-057：收敛为 ChangeHistoryDrawer 单组件 -->
+    <ChangeHistoryDrawer
+      v-model:open="historyOpen"
+      :recordId="historyRecordId"
+      :title="historyTitle"
+      enableRollback
+      @rolled-back="onHistoryRolledBack"
+    />
 
-    <!-- 刷新预检弹窗：展示源与档案的 schema/数据变化，确认后执行更新 -->
-    <a-modal
-      v-model:open="previewModal"
-      :title="archive ? `刷新预检 — ${archive.name}` : '刷新预检：检测到以下变化'"
-      width="760px"
-      okText="确认更新"
-      cancelText="取消"
-      :bodyStyle="{ maxHeight: '65vh', overflowY: 'auto' }"
-      @ok="confirmRefresh"
+    <!-- 明细子表行抽屉（批3b：展示记录的全部明细子表行） -->
+    <a-drawer
+      v-model:open="detailRowsOpen"
+      :title="detailRowsTitle"
+      width="900px"
+      :destroyOnClose="true"
+      :bodyStyle="{ padding: '16px 24px' }"
     >
-      <template v-if="previewData">
-        <!-- 结构变化 -->
-        <template v-if="previewData.schema_changes?.has_changes">
-          <a-alert type="warning" show-icon style="margin-bottom: 12px">
-            <template #message>模型结构有变化，确认后将先同步结构再刷新数据（schema 版本 +1）</template>
-          </a-alert>
-          <div v-if="previewData.schema_changes.added?.length" style="margin-bottom: 8px">
-            <b>新增字段：</b>
-            <a-tag v-for="f in previewData.schema_changes.added" :key="f.code" color="green">{{ f.name }}</a-tag>
-          </div>
-          <div v-if="previewData.schema_changes.removed?.length" style="margin-bottom: 8px">
-            <b>移除字段：</b>
-            <a-tag v-for="f in previewData.schema_changes.removed" :key="f.code" color="red">{{ f.name }}</a-tag>
-          </div>
-          <div v-if="previewData.schema_changes.changed?.length" style="margin-bottom: 8px">
-            <b>字段变更：</b>
-            <div v-for="f in previewData.schema_changes.changed" :key="f.code" style="margin: 4px 0 0 12px">
-              <span style="color: #1890ff">{{ f.name }}</span>
-              <span v-for="(c, i) in f.changes" :key="i" style="margin-left: 8px; color: #666">
-                {{ c.attr }}：<span style="color: #ff4d4f">{{ c.old ?? '-' }}</span> → <span style="color: #52c41a">{{ c.new ?? '-' }}</span>
-              </span>
-            </div>
-          </div>
-          <a-divider style="margin: 12px 0" />
-        </template>
-        <!-- 数据变化 -->
-        <template v-if="previewData.data_changes?.has_changes">
-          <div style="margin-bottom: 8px">
-            <b>数据变化：</b>
-            <a-tag v-if="previewData.data_changes.would_create" color="green">新增 {{ previewData.data_changes.would_create }} 条</a-tag>
-            <a-tag v-if="previewData.data_changes.would_update" color="blue">更新 {{ previewData.data_changes.would_update }} 条</a-tag>
-            <a-tag v-if="previewData.data_changes.would_deactivate" color="orange">源侧已删将停用 {{ previewData.data_changes.would_deactivate }} 条</a-tag>
+      <a-spin :spinning="detailRowsLoading">
+        <template v-if="detailRows.length > 0">
+          <div style="margin-bottom: 12px; color: #666; font-size: 13px">
+            共 {{ detailRows.length }} 条明细行，按行键排序
           </div>
           <a-table
-            v-if="previewData.data_changes.changes_sample?.length"
-            :dataSource="previewData.data_changes.changes_sample"
-            :columns="[{ title: '记录标识', dataIndex: 'record_key', key: 'record_key', width: 140 }, { title: '字段变化', key: 'fields' }]"
+            :dataSource="detailRows"
+            :columns="detailRowColumns"
             :pagination="false"
-            rowKey="record_key"
+            rowKey="id"
             size="small"
-            :scroll="{ y: 240 }"
+            bordered
           >
-            <template #bodyCell="{ column, record: s }">
-              <template v-if="column.key === 'fields'">
-                <div v-for="(cf, i) in s.changed_fields" :key="i" style="line-height: 1.8">
-                  <span style="color: #1890ff">{{ cf.name }}</span>
-                  <span style="color: #999">：</span>
-                  <span style="color: #ff4d4f">{{ cf.old ?? '-' }}</span>
-                  <span style="color: #999"> → </span>
-                  <span style="color: #52c41a">{{ cf.new ?? '-' }}</span>
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'row_key'">
+                <span style="font-weight: 500">{{ record.row_key || '-' }}</span>
+              </template>
+              <template v-if="column.key === 'status'">
+                <a-tag :color="record.status === 'active' ? 'green' : 'default'">
+                  {{ record.status === 'active' ? '启用' : '已停用' }}
+                </a-tag>
+              </template>
+              <template v-if="column.key === 'data'">
+                <div style="max-height: 200px; overflow-y: auto; font-size: 12px">
+                  <div v-for="(v, k) in record.data" :key="k" style="line-height: 1.7">
+                    <span style="color: #1890ff">{{ k }}</span>：<span>{{ formatCellValue(v, 'string') }}</span>
+                  </div>
                 </div>
+              </template>
+              <template v-if="column.key === 'updated_at'">
+                {{ formatDateTime(record.updated_at) }}
               </template>
             </template>
           </a-table>
-          <div v-if="(previewData.data_changes.would_update || 0) > (previewData.data_changes.changes_sample?.length || 0)" style="color: #999; margin-top: 4px">
-            仅展示前 {{ previewData.data_changes.changes_sample?.length }} 条变化样本
-          </div>
         </template>
-        <a-alert v-if="previewData.data_changes?.errors?.length" type="error" show-icon style="margin-top: 8px">
-          <template #message>试算遇到错误：{{ previewData.data_changes.errors.slice(0, 5).join('；') }}</template>
-        </a-alert>
+        <a-empty v-else description="该记录暂无明细子表数据" />
+      </a-spin>
+      <template #footer>
+        <div style="text-align: right">
+          <a-button @click="detailRowsOpen = false">关闭</a-button>
+        </div>
       </template>
+    </a-drawer>
+
+    <!-- 刷新预检弹窗（schema 变化+数据试算+波及告警+warnings） | R-062：收敛为 RefreshPreviewModal 单组件，确认意图上抛父组件执行 -->
+    <RefreshPreviewModal
+      v-model:open="previewModal"
+      :previewData="previewData"
+      :archiveName="archive?.name ?? ''"
+      @confirm="confirmRefresh"
+    />
+
+    <!-- 字段去重值弹窗（字段导航入口） -->
+    <a-modal
+      v-model:open="dvModalOpen"
+      :title="`去重值 — ${dvModalField?.name || ''}`"
+      :footer="null"
+      width="520px"
+    >
+      <a-spin :spinning="dvLoading">
+        <template v-if="dvModalData">
+          <div style="color: #666; margin-bottom: 8px">
+            <span style="color: #999">{{ dvModalField?.code }}</span>
+            <a-tag style="margin-left: 8px">{{ dvModalData.distinct_count }} 个不同值</a-tag>
+            <span style="margin-left: 8px">共 {{ dvModalData.total_records }} 条记录</span>
+          </div>
+          <template v-if="dvModalData.values.length">
+            <div style="display: flex; flex-wrap: wrap; gap: 4px; max-height: 400px; overflow-y: auto">
+              <a-tooltip
+                v-for="v in dvModalData.values"
+                :key="v.value"
+                :title="`${v.count} 条记录`"
+              >
+                <a-tag style="margin: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis">
+                  {{ v.value }}<span style="color: #999; margin-left: 4px">({{ v.count }})</span>
+                </a-tag>
+              </a-tooltip>
+            </div>
+            <div v-if="dvModalData.distinct_count > dvModalData.values.length" style="color: #999; font-size: 12px; margin-top: 8px">
+              …还有 {{ dvModalData.distinct_count - dvModalData.values.length }} 个值未显示
+            </div>
+          </template>
+          <a-empty v-else description="该字段全部为空" :image-style="{ height: '40px' }" />
+        </template>
+      </a-spin>
     </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, h } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { message, Modal } from 'ant-design-vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
+import { message, Modal, notification } from 'ant-design-vue'
 import { archiveApi, archiveRecordApi, changeLogApi } from '@/api/archive'
+import type { FieldDistinctValue } from '@/api/archive'
 import { formatDateTime } from '@/utils/date'
 import { extractApiError } from '@/utils/apiError'
-import type { Archive, ArchiveRecord, ArchiveSchemaItem, ChangeDetail } from '@/types'
+import type { Archive, ArchiveRecord, ArchiveSchemaItem } from '@/types'
+import ChangeHistoryDrawer from './components/ChangeHistoryDrawer.vue'
+import RefreshPreviewModal from './components/RefreshPreviewModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -434,29 +398,70 @@ const previewModal = ref(false)
 const previewLoading = ref(false)
 const previewData = ref<any>(null)
 
+// 字段去重值弹窗（字段导航入口，按需加载+缓存）
+const dvModalOpen = ref(false)
+const dvModalField = ref<{ code: string; name: string } | null>(null)
+const dvModalData = ref<{ distinct_count: number; values: { value: string; count: number }[]; total_records: number } | null>(null)
+const dvLoading = ref(false)
+const dvCache = ref<Record<string, FieldDistinctValue>>({})
+
+async function openFieldDistinctValues(field: ArchiveSchemaItem) {
+  dvModalField.value = { code: field.code, name: field.name }
+  dvModalData.value = null
+  dvModalOpen.value = true
+  // 命中缓存直接展示
+  if (dvCache.value[field.code]) {
+    const cached = dvCache.value[field.code]
+    dvModalData.value = { distinct_count: cached.distinct_count, values: cached.values, total_records: dvTotalRecords.value }
+    return
+  }
+  // 首次加载：拉全量缓存
+  dvLoading.value = true
+  try {
+    const { data } = await archiveApi.fieldDistinctValues(archiveId)
+    dvTotalRecords.value = data.total_records
+    for (const f of data.fields) {
+      dvCache.value[f.code] = f
+    }
+    if (dvCache.value[field.code]) {
+      const cached = dvCache.value[field.code]
+      dvModalData.value = { distinct_count: cached.distinct_count, values: cached.values, total_records: data.total_records }
+    } else {
+      dvModalData.value = { distinct_count: 0, values: [], total_records: data.total_records }
+    }
+  } catch (e: any) {
+    message.error(extractApiError(e) || '加载去重值失败')
+  } finally {
+    dvLoading.value = false
+  }
+}
+const dvTotalRecords = ref(0)
+
+// 明细子表行列定义
+const detailRowColumns = [
+  { title: '行键', key: 'row_key', width: 120 },
+  { title: '数据', key: 'data' },
+  { title: '状态', key: 'status', width: 80 },
+  { title: '更新时间', key: 'updated_at', width: 170 },
+]
+
 // 记录详情弹窗
 const detailModal = ref(false)
 const detailRecord = ref<ArchiveRecord | null>(null)
 const drawerEditData = ref<Record<string, any>>({})
 const drawerEditOperator = ref('')
 
-// 历史回滚时间线（详情弹窗内可展开面板 + 独立变更历史弹窗共用数据源）
-const rollbackPanelKey = ref<string[]>([])
-const rollbackLoading = ref(false)
-const rollbackHistory = ref<ChangeDetail[]>([])
-const rollbackingId = ref<number | null>(null)
+// 变更历史抽屉（记录列表入口） | R-057：渲染与回滚收敛进 ChangeHistoryDrawer 组件，父组件只管开关/标题/回滚后刷新
+const historyOpen = ref(false)
+const historyRecordId = ref<number | null>(null)
+const historyTitle = ref('')
 
-// 变更历史弹窗（记录列表入口）
-const historyModal = ref(false)
-const historyRecord = ref<ArchiveRecord | null>(null)
-
-const historyModalTitle = computed(() => {
-  if (!historyRecord.value || !archive.value?.schema) return '变更历史'
-  const labelParts = archive.value.schema.slice(0, 3)
-    .map(f => historyRecord.value!.data?.[f.code])
-    .filter(v => v != null && v !== '')
-  return labelParts.length ? `变更历史 — ${labelParts.join(' / ')}` : '变更历史'
-})
+// 明细子表行抽屉（批3b）
+const detailRowsOpen = ref(false)
+const detailRows = ref<any[]>([])
+const detailRowsLoading = ref(false)
+const detailRowsRecordId = ref<number | null>(null)
+const detailRowsTitle = ref('')
 
 // 弹窗标题动态标识业务对象
 const detailModalTitle = computed(() => {
@@ -467,7 +472,10 @@ const detailModalTitle = computed(() => {
   return labelParts.length ? `记录详情 — ${labelParts.join(' / ')}` : '记录详情'
 })
 
-const saving = ref(false)
+// v18 攒批保存：待存队列（草稿仅存浏览器，未保存前不落库）
+interface PendingEdit { record: ArchiveRecord; data: Record<string, any>; operator: string }
+const pendingEdits = ref<PendingEdit[]>([])
+const batchSaving = ref(false)
 
 // ===== 动态列计算 =====
 const DATA_COLUMN_WIDTH = 160
@@ -786,19 +794,47 @@ async function doRefreshPreview() {
     }
     previewModal.value = true
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '预检失败')
+    message.error(extractApiError(e) || '预检失败')
   } finally {
     previewLoading.value = false
   }
 }
 
 // 确认更新：schema 有变走同步结构（含拉数），无变仅刷数据；两路径均生成变更日志
-function confirmRefresh() {
+async function confirmRefresh() {
   previewModal.value = false
-  if (previewData.value?.schema_changes?.has_changes) {
-    doSyncSchema()
-  } else {
-    doRefreshData()
+  loading.value = true
+  try {
+    const res = previewData.value?.schema_changes?.has_changes
+      ? await archiveApi.syncSchema(archiveId)
+      : await archiveApi.refreshData(archiveId)
+    const stats = res.data.sync_stats
+    if (stats) {
+      const parts: string[] = []
+      if ((stats.tables_synced ?? 0) > 0) parts.push(`${previewData.value?.schema_changes?.has_changes ? '同步' : '刷新'}了 ${stats.tables_synced} 张表`)
+      if (stats.records_created > 0) parts.push(`新增 ${stats.records_created} 条记录`)
+      if (stats.records_updated > 0) parts.push(`更新 ${stats.records_updated} 条记录`)
+      if ((stats.records_deactivated ?? 0) > 0) parts.push(`源侧已删，停用 ${stats.records_deactivated} 条记录`)
+      if ((stats.records_reactivated ?? 0) > 0) parts.push(`源侧恢复，复活 ${stats.records_reactivated} 条记录`)
+      if (parts.length === 0) parts.push('数据已是最新，无变更')
+      if (stats.errors?.length > 0) {
+        Modal.warning({ title: `完成，但有 ${stats.errors.length} 个错误`, content: stats.errors.slice(0, 10).join('\n') })
+      } else if (stats.warnings && stats.warnings.length > 0) {
+        message.success(parts.join('，'))
+        Modal.warning({ title: `${stats.warnings.length} 条提醒`, content: stats.warnings.slice(0, 10).join('\n') })
+      } else {
+        message.success(parts.join('，'))
+      }
+      showConsistencyWarning(stats)
+    } else {
+      message.success('操作完成')
+    }
+    await loadArchive()
+    await loadRecords()
+  } catch (e: any) {
+    message.error(extractApiError(e) || '操作失败')
+  } finally {
+    loading.value = false
   }
 }
 
@@ -806,17 +842,11 @@ function confirmRefresh() {
 function showConsistencyWarning(stats: any) {
   const cc = stats?.consistency_check
   if (!cc || !(cc.mismatch_count > 0)) return
-  const lines = (cc.samples || []).slice(0, 10).map((s: any) =>
-    `[${s.record_key}] ${s.name}：主字段 ${s.primary_source}=${s.primary_value ?? '空'}，成员 ${s.member_source}=${s.member_value ?? '空'}`)
-  Modal.confirm({
-    title: `一致性检查：${cc.mismatch_records} 条记录、${cc.mismatch_count} 处成员值与主字段不一致`,
-    icon: undefined,
-    content: h('div', { style: 'max-height:300px;overflow:auto;font-size:12px;white-space:pre-wrap' },
-      lines.join('\n') + (cc.mismatch_count > lines.length ? `\n…仅展示前 ${lines.length} 条样本` : '')),
-    width: 640,
-    okText: '前往一致性检查',
-    cancelText: '知道了',
-    onOk: () => { router.push(`/archive/${archiveId}/consistency`) },
+  notification.warning({
+    message: `一致性提醒：${cc.mismatch_records} 条记录、${cc.mismatch_count} 处不一致`,
+    description: '数据已以主字段为准写入，不一致项仅为提醒，可稍后到一致性检查页处理。',
+    duration: 8,
+    style: { width: 360 },
   })
 }
 
@@ -838,6 +868,12 @@ async function doRefreshData() {
           title: `刷新完成，但有 ${stats.errors.length} 个错误`,
           content: stats.errors.slice(0, 10).join('\n'),
         })
+      } else if (stats.warnings && stats.warnings.length > 0) {
+        message.success(`刷新完成：${parts.join('，')}`)
+        Modal.warning({
+          title: `${stats.warnings.length} 条提醒`,
+          content: stats.warnings.slice(0, 10).join('\n'),
+        })
       } else {
         message.success(`刷新完成：${parts.join('，')}`)
       }
@@ -848,7 +884,7 @@ async function doRefreshData() {
     await loadArchive()
     await loadRecords()
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '刷新失败')
+    message.error(extractApiError(e) || '刷新失败')
   } finally {
     loading.value = false
   }
@@ -872,6 +908,12 @@ async function doSyncSchema() {
           title: `同步完成，但有 ${stats.errors.length} 个错误`,
           content: stats.errors.slice(0, 10).join('\n'),
         })
+      } else if (stats.warnings && stats.warnings.length > 0) {
+        message.success(`同步完成：${parts.join('，')}`)
+        Modal.warning({
+          title: `${stats.warnings.length} 条提醒`,
+          content: stats.warnings.slice(0, 10).join('\n'),
+        })
       } else {
         message.success(`同步完成：${parts.join('，')}`)
       }
@@ -882,7 +924,7 @@ async function doSyncSchema() {
     await loadArchive()
     await loadRecords()
   } catch (e: any) {
-    message.error(extractApiError(e) || e.message || '同步失败')
+    message.error(extractApiError(e) || '同步失败')
   } finally {
     loading.value = false
   }
@@ -894,130 +936,54 @@ async function doSyncSchema() {
 function openDetailDrawer(rec: ArchiveRecord) {
   detailRecord.value = rec
   highlightChangedCodes.value = []
-  drawerEditData.value = convertRecordData(rec)
-  drawerEditOperator.value = ''
-  rollbackPanelKey.value = []
-  rollbackHistory.value = []
+  // 已有待存修改的记录重新打开时，载入暂存值继续编辑
+  const pending = pendingEdits.value.find(p => p.record.id === rec.id)
+  drawerEditData.value = pending ? { ...pending.data } : convertRecordData(rec)
+  drawerEditOperator.value = pending?.operator || ''
   detailModal.value = true
-  loadRollbackHistory(rec.id)
 }
 
-async function loadRollbackHistory(recordId: number) {
-  rollbackLoading.value = true
-  try {
-    const res = await changeLogApi.listDetails({ record: recordId, page_size: 50, ordering: '-id' })
-    // 过滤掉 created 和 rollback 类型（不可回滚的也展示但无按钮）
-    rollbackHistory.value = res.data.results
-  } catch {
-    rollbackHistory.value = []
-  } finally {
-    rollbackLoading.value = false
-  }
-}
-
-function canRollbackDetail(item: ChangeDetail) {
-  return !['created', 'rollback'].includes(item.change_type) && (item.field_changes?.length ?? 0) > 0
-}
-
-// 能否「回滚到此时点」：时间线按 id 降序（最新在前），需存在比当前节点更新且可撤销的变更（非 created/rollback），否则后端必然 400
-function canRollbackToPoint(index: number) {
-  return rollbackHistory.value.slice(0, index).some(c => !['created', 'rollback'].includes(c.change_type))
-}
-
-function historySourceColor(s: string) {
-  return ({ sync: 'geekblue', manual: 'orange', consistency: 'cyan' } as Record<string, string>)[s] || 'orange'
-}
-
-// 记录列表「变更历史」入口
+// 记录列表「变更历史」入口（R-057：打开抽屉，标题仍取 schema 前 3 字段拼接）
 function openHistoryModal(rec: ArchiveRecord) {
-  historyRecord.value = rec
-  rollbackHistory.value = []
-  historyModal.value = true
-  loadRollbackHistory(rec.id)
+  historyRecordId.value = rec.id
+  const labelParts = archive.value?.schema?.slice(0, 3).map(f => rec.data?.[f.code]).filter(v => v != null && v !== '') ?? []
+  historyTitle.value = labelParts.length ? `变更历史 — ${labelParts.join(' / ')}` : '变更历史'
+  historyOpen.value = true
 }
 
-// 单条变更回滚（只撤销这一条的字段变化）
-function handleRollbackSingle(item: ChangeDetail) {
-  const isSyncSource = item.change_source === 'sync'
-  const warningText = isSyncSource ? '\n\n⚠️ 此变更来自源系统同步，回滚后下次刷新可能再次被覆盖。' : ''
-  Modal.confirm({
-    title: '确认回滚此条变更',
-    content: `将把这条变更涉及的 ${item.field_changes?.length || 0} 个字段恢复到变更前的值（不影响其它变更）。${warningText}`,
-    okText: '确认回滚',
-    okType: 'danger',
-    cancelText: '取消',
-    async onOk() {
-      rollbackingId.value = item.id
-      try {
-        const res = await changeLogApi.rollback(item.id)
-        const data = res.data
-        if (data.rolled_back_fields === 0) {
-          message.info(data.message || '所有字段已是目标值，无需回滚')
-        } else {
-          message.success(`已回滚 ${data.rolled_back_fields} 个字段`)
-          await refreshAfterRollback()
-        }
-      } catch (e: any) {
-        message.error(extractApiError(e))
-      } finally {
-        rollbackingId.value = null
-      }
-    },
-  })
+// 明细子表行抽屉
+async function openDetailRowsDrawer(rec: ArchiveRecord) {
+  detailRowsRecordId.value = rec.id
+  const labelParts = archive.value?.schema?.slice(0, 3).map(f => rec.data?.[f.code]).filter(v => v != null && v !== '') ?? []
+  detailRowsTitle.value = labelParts.length ? `明细子表 — ${labelParts.join(' / ')}` : '明细子表'
+  detailRowsOpen.value = true
+  await loadDetailRows()
 }
 
-// 回滚后统一刷新：列表 + 当前打开的弹窗上下文（以弹窗打开状态为准，避免已关弹窗的残留记录干扰）
-async function refreshAfterRollback() {
-  const targetId = historyModal.value ? historyRecord.value?.id : detailRecord.value?.id
-  if (targetId) {
-    try {
-      const fresh = await archiveRecordApi.get(targetId)
-      if (historyModal.value && historyRecord.value?.id === targetId) historyRecord.value = fresh.data
-      if (detailModal.value && detailRecord.value?.id === targetId) {
-        detailRecord.value = fresh.data
-        drawerEditData.value = convertRecordData(fresh.data)
-      }
-    } catch { /* 刷新失败不阻断 */ }
-    loadRollbackHistory(targetId)
+async function loadDetailRows() {
+  if (!detailRowsRecordId.value) return
+  detailRowsLoading.value = true
+  detailRows.value = []
+  try {
+    const res = await archiveRecordApi.listDetails(detailRowsRecordId.value)
+    detailRows.value = res.data
+  } catch (e: any) {
+    message.error(extractApiError(e) || '加载明细行失败')
+  } finally {
+    detailRowsLoading.value = false
   }
+}
+
+// 回滚后刷新（R-057：时间线由组件自行重载，父组件刷记录列表 + 详情抽屉上下文）
+async function onHistoryRolledBack(recordId: number) {
+  try {
+    const fresh = await archiveRecordApi.get(recordId)
+    if (detailModal.value && detailRecord.value?.id === recordId) {
+      detailRecord.value = fresh.data
+      drawerEditData.value = convertRecordData(fresh.data)
+    }
+  } catch { /* 刷新失败不阻断 */ }
   loadRecords()
-}
-
-function rollbackTimelineColor(changeType: string) {
-  return ({ updated: 'blue', deactivated: 'red', reactivated: 'green', reviewed: 'gray', ignored: 'gray', rollback: 'orange' } as Record<string, string>)[changeType] || 'blue'
-}
-
-function rollbackChangeTypeColor(changeType: string) {
-  return ({ created: 'green', updated: 'blue', deactivated: 'red', reactivated: 'purple', reviewed: 'cyan', ignored: 'default', rollback: 'volcano' } as Record<string, string>)[changeType] || 'default'
-}
-
-async function handleRollbackToChange(item: ChangeDetail, targetRecord: ArchiveRecord) {
-  const isSyncSource = item.change_source === 'sync'
-  const warningText = isSyncSource ? '\n\n⚠️ 此变更来自源系统同步，回滚后下次刷新可能再次被覆盖。' : ''
-  Modal.confirm({
-    title: '确认回滚到此时点',
-    content: `将撤销此条变更之后的所有修改，恢复到该时点的状态。${warningText}`,
-    okText: '确认回滚',
-    okType: 'danger',
-    cancelText: '取消',
-    async onOk() {
-      rollbackingId.value = item.id
-      try {
-        const res = await archiveRecordApi.rollbackToChange(targetRecord.id, item.id)
-        const data = res.data
-        if (data.rolled_back_fields === 0) {
-          message.info(data.message || '所有字段已是目标值，无需回滚')
-        } else {
-          message.success(`已回滚 ${data.rolled_back_fields} 个字段到该时点`)
-          await refreshAfterRollback()
-        }
-      } catch (e: any) {
-        message.error(extractApiError(e))
-      } finally {
-        rollbackingId.value = null
-      }
-    },
-  })
 }
 
 function convertRecordData(rec: ArchiveRecord): Record<string, any> {
@@ -1038,37 +1004,124 @@ function convertRecordData(rec: ArchiveRecord): Record<string, any> {
   return data
 }
 
-async function handleSaveDrawer() {
+function handleSaveDrawer() {
+  // v18 攒批保存：不立即落库，加入待存队列（同一记录重复暂存以最新一次为准）
   if (!detailRecord.value) return
-  saving.value = true
+  const rec = detailRecord.value
+  const item: PendingEdit = {
+    record: rec,
+    data: { ...drawerEditData.value },
+    operator: drawerEditOperator.value || '管理员',
+  }
+  const idx = pendingEdits.value.findIndex(p => p.record.id === rec.id)
+  if (idx >= 0) pendingEdits.value[idx] = item
+  else pendingEdits.value.push(item)
+  message.success('已暂存，点页头「保存」统一提交为一批')
+  detailModal.value = false
+}
+
+// 页头「保存」：开启人工批次 → 逐条 PUT 攒入本批（保存即批次封口）
+async function savePendingEdits(): Promise<boolean> {
+  if (!pendingEdits.value.length || !archive.value) return true
+  batchSaving.value = true
   try {
-    await archiveRecordApi.update(detailRecord.value.id, {
-      data: drawerEditData.value,
-      updated_by: drawerEditOperator.value || '管理员',
-    })
-    message.success('更新成功')
-    // 保存后关闭弹窗退出
-    detailModal.value = false
+    const batchRes = await changeLogApi.startManualBatch(archive.value.id)
+    const batchId = batchRes.data.id
+    const failed: PendingEdit[] = []
+    let ok = 0
+    for (const p of pendingEdits.value) {
+      try {
+        await archiveRecordApi.update(p.record.id, {
+          data: p.data, updated_by: p.operator, change_batch_id: batchId,
+        })
+        ok += 1
+      } catch (e: any) {
+        failed.push(p)
+        message.error(`记录 #${p.record.id} 保存失败：${extractApiError(e)}`)
+      }
+    }
+    pendingEdits.value = failed
+    if (failed.length) {
+      message.warning(`成功 ${ok} 条，${failed.length} 条失败已保留在待存队列`)
+    } else {
+      message.success(`已保存 ${ok} 条修改（批次 #${batchId}）`)
+    }
     await loadRecords()
+    return failed.length === 0
   } catch (e: any) {
-    message.error(e.message || '保存失败')
+    message.error(extractApiError(e) || '保存失败')
+    return false
   } finally {
-    saving.value = false
+    batchSaving.value = false
   }
 }
 
-// ===== 启用/停用 =====
-async function doToggleStatus(rec: ArchiveRecord, newStatus: 'active' | 'deleted') {
-  try {
-    await archiveRecordApi.update(rec.id, {
-      status: newStatus,
-      updated_by: '管理员',
+// 离开拦截：列出待存内容，保存并离开 / 放弃并离开 / 留下
+onBeforeRouteLeave(() => {
+  if (!pendingEdits.value.length) return true
+  return new Promise<boolean>((resolve) => {
+    const lines = pendingEdits.value.map(p => {
+      const orig = p.record.data || {}
+      const n = Object.keys(p.data).filter(k => String(p.data[k] ?? '') !== String(orig[k] ?? '')).length
+      return `・记录 #${p.record.id}（${n} 个字段）`
     })
-    message.success(newStatus === 'active' ? '已启用' : '已停用')
-    await loadRecords()
-  } catch (e: any) {
-    message.error(e.message || '操作失败')
+    Modal.confirm({
+      title: `有 ${pendingEdits.value.length} 条记录的修改未保存`,
+      content: lines.join('\n') + '\n\n保存后这些修改将合并为一个批次。',
+      okText: '保存并离开',
+      cancelText: '不保存',
+      async onOk() {
+        resolve(await savePendingEdits())
+      },
+      onCancel() {
+        Modal.confirm({
+          title: '确认放弃未保存的修改？',
+          content: '离开后这些修改将丢失，不可恢复。',
+          okText: '放弃并离开',
+          okType: 'danger',
+          cancelText: '返回继续编辑',
+          onOk() { pendingEdits.value = []; resolve(true) },
+          onCancel() { resolve(false) },
+        })
+      },
+    })
+  })
+})
+
+// 浏览器关闭/刷新拦截（草稿仅存浏览器）
+function beforeUnloadGuard(e: BeforeUnloadEvent) {
+  if (pendingEdits.value.length) {
+    e.preventDefault()
+    e.returnValue = ''
   }
+}
+onMounted(() => window.addEventListener('beforeunload', beforeUnloadGuard))
+onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnloadGuard))
+
+// ===== 启用/停用（R-055：危险操作补二次确认，开关为受控绑定取消后自动回弹） =====
+function doToggleStatus(rec: ArchiveRecord, newStatus: 'active' | 'deleted') {
+  const isDisable = newStatus === 'deleted'
+  Modal.confirm({
+    title: isDisable ? '确认停用这条记录' : '确认启用这条记录',
+    content: isDisable
+      ? '停用后该记录退出有效状态（标记为停用），随时可以再次启用。'
+      : '启用后该记录恢复为有效状态。',
+    okText: isDisable ? '确认停用' : '确认启用',
+    okType: isDisable ? 'danger' : 'primary',
+    cancelText: '取消',
+    async onOk() {
+      try {
+        await archiveRecordApi.update(rec.id, {
+          status: newStatus,
+          updated_by: '管理员',
+        })
+        message.success(newStatus === 'active' ? '已启用' : '已停用')
+        await loadRecords()
+      } catch (e: any) {
+        message.error(extractApiError(e) || '操作失败')
+      }
+    },
+  })
 }
 
 // ===== 字段血缘展示 =====
@@ -1096,7 +1149,19 @@ function goBack() {
 onMounted(async () => {
   await loadArchive()
   await loadRecords()
+  // 后台预加载去重值数据（不阻塞页面）
+  preloadDistinctValues()
 })
+
+async function preloadDistinctValues() {
+  try {
+    const { data } = await archiveApi.fieldDistinctValues(archiveId)
+    dvTotalRecords.value = data.total_records
+    for (const f of data.fields) {
+      dvCache.value[f.code] = f
+    }
+  } catch { /* 预加载失败不阻断，点击时再重试 */ }
+}
 </script>
 
 <style scoped>
@@ -1164,6 +1229,21 @@ onMounted(async () => {
   background: #fff7e6;
   color: #fa8c16;
   font-weight: 600;
+}
+.field-nav-dv {
+  float: right;
+  font-size: 10px;
+  color: #1890ff;
+  cursor: pointer;
+  opacity: 0.6;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: #e6f7ff;
+  line-height: 16px;
+}
+.field-nav-dv:hover {
+  opacity: 1;
+  background: #bae7ff;
 }
 :deep(.col-flash) {
   background-color: #fff7e6 !important;

@@ -1,7 +1,7 @@
 <template>
   <div>
     <div class="page-header">
-      <h2>系统设置 — 技术函数</h2>
+      <h2>技术函数</h2>
       <a-space>
         <a-button @click="loadTemplate">下载模板</a-button>
         <a-button :loading="listLoading" @click="loadPlugins">刷新</a-button>
@@ -72,14 +72,7 @@
             </a-list-item-meta>
             <template #actions>
               <a-button size="small" :loading="reloadingMap[item.filename]" @click="handleReload(item.filename)">重载</a-button>
-              <a-popconfirm
-                :title="`确认卸载插件 ${item.filename}？卸载后其注册的函数将从公式引擎移除。`"
-                ok-text="确认卸载"
-                cancel-text="取消"
-                @confirm="handleUnload(item.filename)"
-              >
-                <a-button size="small" danger :loading="unloadingMap[item.filename]">卸载</a-button>
-              </a-popconfirm>
+              <a-button size="small" danger :loading="unloadingMap[item.filename]" @click="confirmUnload(item.filename)">卸载</a-button>
             </template>
           </a-list-item>
         </template>
@@ -110,7 +103,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, reactive } from 'vue'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { InboxOutlined } from '@ant-design/icons-vue'
 import { computedFieldApi, type PluginInfo } from '@/api/modeling'
 import { extractApiError } from '@/utils/apiError'
@@ -189,6 +182,17 @@ async function handleUnload(filename: string) {
   } finally {
     unloadingMap[filename] = false
   }
+}
+
+function confirmUnload(filename: string) {
+  Modal.confirm({
+    title: `确认卸载插件 ${filename}？`,
+    content: '卸载后其注册的函数将从公式引擎移除（可随时重新上传恢复）。',
+    okText: '确认卸载',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: () => handleUnload(filename),
+  })
 }
 
 async function loadTemplate() {

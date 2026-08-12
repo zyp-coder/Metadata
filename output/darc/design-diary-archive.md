@@ -4,6 +4,154 @@
 
 ---
 
+## 2026-08-05 v19 — API管理完整设计（REQ-005 / F-204+F-205）：API Key 鉴权 + 对外网关 + 读写范围 + API文档 + 限流 + 调用日志【推翻 2026-07-23「API 开放权限只存数据结构，真实鉴权留待 auth 模块」】
+
+### 方向锁定（prjm 循环 checklist，用户全部 ✓）
+
+1. **范围**：完整落地 REQ-005 API 部分（F-204 接口配置 + F-205 密钥管理 + 故事线步骤1）
+2. **鉴权**：推翻 2026-07-23 宪法决策——本期做真实鉴权（自建 API Key 机制，不等 auth 模块角色体系；auth 模块启动后联动升级，替换点为单文件 open_api_auth.py）
+3. **读写**：读写全设计（查询/新增/修改/删除）；Hub 宪法「永不回写源表」不变——写操作落 manual_data 层/软停用
+4. **密钥粒度**：独立密钥 × 多 API 授权（ApiKeyGrant 中间表，每授权关系独立操作范围）
+5. **调用日志**：ApiCallLog 落库保留 90 天自动清理 + 近 7 天统计；与「数据变更日志永久存库」决策不冲突（后者指 ArchiveChangeBatch/Detail 数据变更留痕）
+
+### 设计原则
+
+- **方向承载点单点化**（rule §11.2）：鉴权/限流收敛 `open_api_auth.py`、网关读写逻辑收敛 `open_api_gateway.py` 两个单文件；auth 模块启动后仅替换 open_api_auth.py，不散布在 views/serializers
+- **Hub 宪法不变**：永不回写源表；外部写操作一律 manual_data 层（ownership=archive 字段）或软停用；source 字段写入 400 拦截
+- **外部新增不违反「禁止档案端人工新增」**：该宪法决策约束的是前端档案页人工入口；REQ-005 场景调用方是下游业务系统，允许在 API 开放 create 权限时通过网关新增记录
+- **字段释放粒度=每 API 独立（用户第一百一十五轮确认）**：exposed_fields 挂在每个 ArchiveApi 上，同一档案可建多个 API 各自释放不同字段子集（前端新建/编辑抽屉分组勾选，空=全部）；网关读按 exposed_fields 投影、写限 exposed_fields∩ownership=archive；与两层释放体系衔接：物理字段→释放到档案→再按 API 分别释放给不同调用方。不引入读写分离字段清单/密钥级字段再收窄（用户确认现状已够）
+
+### 业务流程（接口开放→调用→审计）
+
+| 节点 | 入口状态 | 出口状态 | 触发条件 | 异常处理 |
+|------|---------|---------|---------|---------|
+| 接口配置 | 档案已有 schema | API 可开放 | 管理员配操作范围/限流/slug | 档案无 schema 提示先同步 |
+| 密钥发放 | API 已配置 | 调用方可接入 | 生成密钥+勾选授权 API×操作 | 明文密钥仅展示一次 |
+| 对外调用 | 调用方持密钥 | 数据读写完成 | X-API-Key 请求 /api/open/{slug}/ | 401/403/429 分类拒绝并落调用日志 |
+| 写入留痕 | 网关写成功 | 变更日志可查 | create/update/delete 成功 | 事务内同批次落 ChangeBatch(source=api) |
+| 日志清理 | 调用日志累积 | 仅留 90 天 | daemon 每日清理 | 清理失败只记日志 |
+
+### 数据模型
+
+| 表 | 说明 | 主键 | 核心字段 | 关联 |
+|----|------|------|---------|------|
+| ApiKey | API 密钥（F-205） | id | name/key_prefix(展示 mdm_ab12****)/key_hash(SHA-256，明文不落库)/status(active/revoked)/expires_at(空=永久)/revoked_at/last_used_at/total_calls/created_by | — |
+| ApiKeyGrant | 密钥×API 授权（独立粒度） | id | api_key(FK CASCADE)/api(FK→ArchiveApi CASCADE)/allowed_operations(JSON 子集 read/create/update/delete)；unique(api_key, api) | ApiKey、ArchiveApi |
+| ApiCallLog | 调用日志（90 天） | id | api(FK SET_NULL)/api_key(FK SET_NULL)/key_name(快照防删失联)/method/path/status_code/duration_ms/client_ip/error_summary(≤200)/created_at；索引 (created_at)、(api, created_at) | ArchiveApi、ApiKey |
+| ArchiveApi（扩展） | 接口配置 | id | ➕ slug(CharField(100) unique，对外网关路径段，默认取 path 末段)、➕ allowed_operations(JSON，默认 ['read'])、➕ rate_limit_per_min(Integer，0=不限，按密钥维度计数）；path/auth_roles/exposed_fields/filter_conditions/status 保留语义不变 | Archive |
+| ChangeSource（扩展） | 变更批次来源 | — | ➕ 'api'（API 写入批次，operator 落密钥名称） | ArchiveChangeBatch |
+
+> 密钥安全：密钥格式 `mdm_`+32位随机 hex；库中仅存 SHA-256 哈希（hmac.compare_digest 恒定时间比对）；明文仅创建成功弹窗展示一次；不落任何日志。
+
+### 对外契约
+
+**对外网关**（统一挂 `/api/open/`，鉴权头 `X-API-Key: mdm_xxx`，豁免管理端 DRF 路由）：
+
+| 端点 | 方法 | 说明 | 拒绝码 |
+|------|------|------|--------|
+| /api/open/{slug}/ | GET | 列表查询：exposed_fields 投影 + 静态 filter_conditions + 动态参数（?{code}=值 / {code}__contains= 等）+ 分页 page/page_size（默认 20 上限 500）；返回 {count,page,page_size,results} | 401/403/429 |
+| /api/open/{slug}/{record_key}/ | GET | 单条查询（主键值定位 record_key） | 同上 + 404 |
+| /api/open/{slug}/docs/ | GET | 接口文档：端点/认证/字段说明/请求示例(curl+python)/响应结构 | 同上 |
+| /api/open/{slug}/ | POST | 新增记录：仅可写 exposed∩ownership=archive 字段；主键字段必填校验；落 manual_data+merge | 400 字段违规 |
+| /api/open/{slug}/{record_key}/ | PATCH | 修改：archive 字段 diff 写 manual_data（==源值删键回落，复用 ArchiveRecordUpdateSerializer 语义）；source 字段 400 | 400/404 |
+| /api/open/{slug}/{record_key}/ | DELETE | 软停用（status=deleted，不物理删除，对齐人工停用语义） | 404 |
+
+**管理端契约**（新增）：
+
+| 端点 | 方法 | 返回 |
+|------|------|------|
+| /api/api-keys/ | GET/POST | 列表（key_hash 永不回传）；POST 创建返回 {…, key: 明文}（仅此一次） |
+| /api/api-keys/{id}/rotate/ | POST | 旧密钥吊销+同授权生成新密钥，返回新明文一次 |
+| /api/api-keys/{id}/revoke/ | POST | 吊销（已吊销 400） |
+| /api/api-keys/{id}/call-logs/ | GET | 该密钥调用日志分页 |
+| /api/api-call-stats/ | GET | 近 7 天按 api×日 调用量/成功率/平均耗时 |
+| ArchiveApiSerializer | 扩展 | ➕ slug/allowed_operations/rate_limit_per_min/public_url（加法兼容，不破坏已发布签名） |
+
+**鉴权拦截链**（open_api_auth.py 单点，顺序执行）：
+取 X-API-Key → 哈希比对（无/无效/已吊销/过期→401）→ API 停用（403）→ 无该 API 授权（403）→ 操作不在 allowed_operations∩grant（403）→ 限流滑动窗口超 rate_limit_per_min（429）→ 放行并异步落 ApiCallLog + 更新 last_used_at/total_calls。BR-013 满足。
+
+**外部写入落变更日志**：事务内建 ChangeBatch(change_source='api', operator=密钥名称) + ChangeDetail（created/updated/deactivated），与人工编辑同构，变更日志页天然可见。
+
+### 前端交互（ApiManagement.vue 改造）
+
+页面升级为双 Tab（页面路径 /archive/api-management 不变）：
+
+**Tab1 接口管理**（现有表格增强）：
+- 列加「操作范围」（读/增/改/删 tag）+「限流」（N/分钟 或 不限）；操作列：查看数据 | 文档 | 启/停 | 删除
+- 编辑抽屉加：操作范围 checkbox-group（查询/新增/修改/删除，至少一项）+ 限流 a-input-number（0=不限）+ slug 输入（默认取 path 末段自动带出）
+- 「文档」→ 弹窗：公网端点地址+复制按钮、字段说明表、curl/python 请求示例（复制）、响应结构示例
+
+**Tab2 密钥管理**（新建）：
+- 表格列：密钥名称/密钥标识（mdm_ab12****）/状态/授权（N 个 API tag）/累计调用/最近调用/到期时间/操作（吊销 | 轮换 | 调用日志）
+- 「新建密钥」弹窗：名称+有效期选择（永久/30/90/365 天）+授权配置（API 多选表格，每行勾操作范围）；创建成功弹窗展示完整明文密钥一次+复制按钮+红色警示「关闭后无法再次查看」
+- 「调用日志」抽屉：时间/接口/方法/状态码/耗时/IP 分页表格
+
+### 方向承载点清单（方向推翻时只动这些文件）
+
+| 文件 | 职责 |
+|------|------|
+| `backend/apps/archive/open_api_auth.py`（新） | 鉴权/授权校验/限流/调用日志单点 |
+| `backend/apps/archive/open_api_gateway.py`（新） | 对外网关读写逻辑 |
+| `backend/apps/archive/models.py` | ApiKey/ApiKeyGrant/ApiCallLog + ArchiveApi 扩展字段 |
+| `backend/config/urls.py` | /api/open/ 路由注册 |
+| `frontend/src/views/archive/ApiManagement.vue` | 密钥管理 Tab + 文档弹窗 |
+
+### 实施顺序与波及
+
+①模型+迁移（0014）→ ②open_api_auth 鉴权链 → ③网关端点（先读后写）→ ④密钥管理端点 → ⑤文档端点 → ⑥前端双 Tab+文档弹窗 → ⑦daemon 清理挂 apps.py。仅波及 archive 模块，modeling/quality 零波及；现有 /archive-apis/{id}/data/ 管理端预览 action 保留不动（管理端免鉴权，与全站现状一致）。
+
+### 验收标准（reqa REQ-005）
+
+| 项 | 验证 |
+|----|------|
+| 无密钥/无效/吊销/过期 → 401 | 实测四例 |
+| 无授权/操作越权 → 403；限流 → 429 | 实测 |
+| 密钥生成/轮换/吊销全生命周期 | 端点实测 |
+| 明文密钥仅创建/轮换时返回一次 | 列表接口不含 key/key_hash |
+| GET 分页+动态过滤；POST/PATCH/DELETE 落 manual_data+变更日志 source=api | Django test Client 闭环 |
+| source 字段写入 400 | 实测 |
+| 90 天清理 | 清理函数单测 |
+| API 调用成功率≥99%（reqa 指标） | 回测全绿即满足 |
+
+### 本批不做
+
+- 签名认证（OAuth/HMAC 签名，故事线备选方案，API Key 已满足 BR-015 首期）；auth 模块角色体系联动（auth_roles 字段保留展示用）；跨实例限流（内存滑动窗口，重启清零，多实例部署时需换 Redis——登记技术债）。
+
+---
+
+## 2026-08-03 v18 — 变更日志×批次×回滚重构：回滚语义收口 + 批次视图 + 攒批保存 + 预检告警【推翻 v17 字段级部分回滚语义；收缩 v14 双事实源】
+
+### 设计决策（多轮讨论用户确认，第九十六轮）
+
+1. **回滚统一为「恢复快照」语义**（修 C1 版本回滚不分层隐性 Bug + 消 C3 双事实源）：
+   - 版本回滚 /records/{id}/rollback/：内部改走 _execute_field_rollback（快照全字段作 target，按 ownership 分层写回），响应体不变（ArchiveRecordDetailSerializer）；
+   - 时间点回滚 rollback-to-change：不再从 field_changes 反推目标值，改为按明细新字段 version_after 直接恢复对应版本快照；
+   - 单条回滚 change-details/{id}/rollback/：语义改「恢复到本条变更之前的状态」（version_before 快照，**本条之后的变更会一并撤销**，前端确认文案明示）；存量历史明细（version 字段 NULL）降级回旧字段级 old 值恢复逻辑兼容；
+   - 新增批次级回滚 POST /change-batches/{id}/rollback/（撤销本次刷新）：逐明细恢复 version_before；**该批之后又被人工编辑过的记录跳过并列出**（用户选定）；记录已删跳过；无 version_before 的存量明细跳过。
+2. **ArchiveChangeDetail 新增 version_before/version_after（可空 IntegerField，迁移 0011）**：变更前/后版本号；写入点五处（同步更新/复活、同步新建[before=null/after=1]、停用清扫[无版本变动两者相等]、人工编辑 update、回滚执行器）；一致性审核明细不动（无版本变动，保持 NULL）。方向承载点：rollback 三端点 + _execute_field_rollback + 五处 version 写入点。
+3. **批次视图页面**（VersionManagement 翻新）：首页一行一批次（时间/来源/影响记录数/涉及字段数/操作人/⚠标记），行展开下钻明细；同日人工批次展示层折叠（数据不合并）；顶部汇总卡；导出保留。
+4. **人工编辑攒批保存**：页面级待保存改动清单，保存按钮点亮显示改动数；保存=批次封口（不做同日事后合并）；离开拦截（vue-router beforeRouteLeave + beforeunload）列出待保存内容；后端新增 POST /change-batches/start-manual/ 开批 + update 端点新增可选参数 change_batch_id 复用同一批次；未保存草稿仅在浏览器内存（用户已接受崩溃丢失风险）。
+5. **刷新预检源侧告警**：refresh-preview 试算时检测「ownership=archive 字段被源侧值改变」，stats 新增 archive_owned_impact{records, fields_sample}；预检弹窗警告区展示，确认后才执行；变更明细 field_changes 项加 archive_owned:true 标记供前端橙标。
+
+### 接口契约变化（均为新增/内部重实现，不破坏已发布签名）
+
+| 接口 | 变化 |
+|---|---|
+| POST /records/{id}/rollback/ | 内部重实现（分层写回），响应体不变 |
+| POST /records/{id}/rollback-to-change/ | 改快照恢复；存量明细（version NULL）返回 400 提示 |
+| POST /change-details/{id}/rollback/ | 新语义（恢复 version_before）；存量明细降级旧字段级逻辑 |
+| POST /change-batches/{id}/rollback/ | 新增：整批撤销，返回 {rolled_back_records, skipped_edited[], skipped_deleted, skipped_legacy, batch_id} |
+| POST /change-batches/start-manual/ | 新增：开人工批次，返回 {batch_id} |
+| PUT /records/{id}/ | 新增可选参数 change_batch_id（复用批次） |
+| GET /archives/{id}/refresh-preview/ | data_changes 新增 archive_owned_impact |
+| ChangeDetailSerializer | 新增只读字段 version_before/version_after/record_version（加法兼容） |
+
+### 实施顺序
+
+③回滚收口+隐性Bug → ④预检告警 → ①批次视图页面 → ②攒批保存。仅波及 archive 模块，不波及 modeling/quality。
+
+---
+
 ## 2026-07-25 v17 — 变更日志回滚功能（单条回滚 + 时间点回滚）
 
 ### 设计决策
@@ -562,3 +710,25 @@ flowchart LR
 | 导入 | POST | /api/domains/{domainId}/records/import | 上传Excel导入 |
 | 导入校验 | POST | /api/domains/{domainId}/records/import/validate | 仅校验不写入 |
 | 操作日志列表 | GET | /api/domains/{domainId}/operation-logs | 日志查询（审计） |
+
+---
+
+## 档案权限全景（2026-08-05，第一百二十轮）
+
+### 需求与决策（质问闸门 3 问锁定）
+
+用户诉求：一站式看到某档案的①配了什么 API ②API 释放了什么字段 ③哪些系统调用过 ④配了什么角色 ⑤角色有哪些用户 ⑥可操作什么字段。三项决策：入口=档案列表操作列（不新建独立菜单页）；仅管理员可见；只读+跳转配置（不做编辑）。
+
+### 方案：单点聚合端点 + 抽屉两区块
+
+**方向承载点**（本方向推翻时只需动这两个文件）：后端 `apps/archive/views.py permission_overview` + 前端 `views/archive/components/PermissionOverview.vue`。
+
+- 后端：`GET /api/archives/{id}/permission-overview/`（ArchiveViewSet action，IsMdmAdmin 403）。零新模型，聚合既有数据：机器权限=ArchiveApi+ApiKeyGrant+ApiCallLog；人用权限=RoleFieldPermission（domain_id）+角色用户。「哪个系统调用」口径：调用日志无系统标识，按密钥维度聚合（每个 API Key 代表一个接入系统，by_key 按 key_name 快照聚合 count/last_at/ips）。
+- 前端：960px 抽屉「权限全景 — {档案名}」，机器权限区块（API 表：路径/状态/允许操作/暴露字段/授权密钥/调用情况）+人用权限区块（角色表：可见字段/可编辑字段/用户）；区块头「去配置 →」跳既有配置页，保持单一配置入口不重复建设。
+- 入口可见性：ArchiveList 操作列「权限」链接仅 is_admin 可见（getMeApi），后端 403 兜底防直连。
+
+### API 契约（新增）
+
+| 接口 | 方法 | 路径 | 说明 |
+|------|------|------|------|
+| 权限全景 | GET | /api/archives/{id}/permission-overview/ | 仅管理员；返回 {archive, field_names, apis[{…grants, call_stats{total,last_at,by_key}}], roles[{…visible_codes, editable_codes, users}]} |

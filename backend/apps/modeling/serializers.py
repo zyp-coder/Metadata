@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import DataSource, Domain, Table, FieldGroup, Field, FieldOption, FieldMapping, StandardField, AIConfig, ComputedField
+from rest_framework.validators import UniqueTogetherValidator
+from .models import DataSource, Domain, Table, FieldGroup, Field, FieldOption, FieldMapping, StandardField, AIConfig, ComputedField, ConfigTable, DetailTableConfig
 
 
 class DataSourceSerializer(serializers.ModelSerializer):
@@ -227,17 +228,173 @@ class ClassificationConfirmSerializer(serializers.Serializer):
     redundant_handling = serializers.ListField(child=serializers.DictField(), required=False, default=list)
 
 
+class DetailTableUniqueValidator(UniqueTogetherValidator):
+    """预组合唯一性（2026-08-11 修复）：同一域内一张明细表只能注册一次。
+
+    覆盖默认 UniqueTogetherValidator 错误模板（「字段 domain, table 必须能构成唯一集合」，
+    用户无法得知被哪个组合占用），改为指明占用方并给出操作指引。
+    """
+    def __call__(self, attrs, serializer):
+        try:
+            super().__call__(attrs, serializer)
+        except serializers.ValidationError:
+            domain = attrs.get('domain')
+            table = attrs.get('table')
+            dup = None
+            if domain and table:
+                qs = DetailTableConfig.objects.filter(domain=domain, table=table)
+                if serializer.instance:
+                    qs = qs.exclude(pk=serializer.instance.pk)
+                dup = qs.first()
+            if dup:
+                combo = f'{dup.header_table.name} + {table.name}' if dup.header_table_id else table.name
+                raise serializers.ValidationError({
+                    'table': f'明细表「{table.name}」已注册为组合「{combo}」（ID={dup.id}）；一个明细表只能注册一次，如需修改请在「管理注册」中编辑该组合，或选择其他明细表'
+                })
+            raise
+
+
+class DetailTableConfigSerializer(serializers.ModelSerializer):
+    """明细子表注册序列化器（2026-08-11 交互改造；第三轮扩展预组合=头表+明细表）。"""
+    table_name = serializers.CharField(source='table.name', read_only=True)
+    table_code = serializers.CharField(source='table.code', read_only=True)
+    domain_name = serializers.CharField(source='domain.name', read_only=True)
+    header_table_name = serializers.CharField(source='header_table.name', read_only=True, allow_null=True)
+    header_table_code = serializers.CharField(source='header_table.code', read_only=True, allow_null=True)
+    header_link_field_name = serializers.CharField(source='header_link_field.name', read_only=True, allow_null=True)
+    detail_link_field_name = serializers.CharField(source='detail_link_field.name', read_only=True, allow_null=True)
+    row_key_field_name = serializers.CharField(source='row_key_field.name', read_only=True, allow_null=True)
+    display_sort_field_name = serializers.CharField(source='display_sort_field.name', read_only=True, allow_null=True)
+    mapping_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DetailTableConfig
+        fields = ['id', 'domain', 'domain_name', 'table', 'table_name', 'table_code',
+                  'header_table', 'header_table_name', 'header_table_code',
+                  'header_link_field', 'header_link_field_name',
+                  'detail_link_field', 'detail_link_field_name',
+                  'row_key_field', 'row_key_field_name', 'display_sort_field', 'display_sort_field_name',
+                  'display_sort_desc', 'conditions', 'created_at', 'updated_at', 'mapping_count']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+        validators = [DetailTableUniqueValidator(DetailTableConfig.objects.all(), ('domain', 'table'))]
+
+    def get_mapping_count(self, obj):
+        return obj.mappings.count()
+
+    def validate(self, attrs):
+        """预组合校验（2026-08-11 第三轮）：头表与明细表关联字段成对；
+        头表关联字段必须属于头表、明细表关联字段必须属于明细表。"""
+        header_table = attrs.get('header_table')
+        header_link_field = attrs.get('header_link_field')
+        detail_link_field = attrs.get('detail_link_field')
+        if header_table or header_link_field or detail_link_field:
+            if not (header_table and header_link_field and detail_link_field):
+                raise serializers.ValidationError({'header_table': '预组合必须同时配置头表、头表关联字段、明细表关联字段'})
+            from .models import Field as MField
+            hf = header_link_field if isinstance(header_link_field, MField) else MField.objects.filter(pk=header_link_field).first()
+            df = detail_link_field if isinstance(detail_link_field, MField) else MField.objects.filter(pk=detail_link_field).first()
+            if hf and hf.table_id != header_table.id:
+                raise serializers.ValidationError({'header_link_field': '头表关联字段必须属于头表'})
+            detail_table = attrs.get('table')
+            if df and detail_table and df.table_id != detail_table.id:
+                raise serializers.ValidationError({'detail_link_field': '明细表关联字段必须属于明细表'})
+        return attrs
+
+
+class FieldMappingUniqueValidator(UniqueTogetherValidator):
+    """字段映射唯一性（2026-08-11 第一百四十三轮修复）：同一四元组
+    (source_table, source_field, target_table, target_field) 只能建立一条关系。
+
+    覆盖默认 UniqueTogetherValidator 错误模板（「字段 source_table, source_field,
+    target_table, target_field 必须能构成唯一集合」，用户无法得知被哪条已存在关系占用），
+    改为指明占用方（表名.字段名 → 表名.字段名 + ID + 关系类型）并给出操作指引。
+    """
+    def __call__(self, attrs, serializer):
+        try:
+            super().__call__(attrs, serializer)
+        except serializers.ValidationError:
+            st = attrs.get('source_table')
+            sf = attrs.get('source_field')
+            tt = attrs.get('target_table')
+            tf = attrs.get('target_field')
+            dup = None
+            if st and sf and tt and tf:
+                qs = FieldMapping.objects.filter(source_table=st, source_field=sf,
+                                                 target_table=tt, target_field=tf)
+                if serializer.instance:
+                    qs = qs.exclude(pk=serializer.instance.pk)
+                dup = qs.first()
+            if dup:
+                raise serializers.ValidationError({
+                    'target_field': f'该关系已存在：{dup.source_table.name}.{dup.source_field.name} → '
+                                    f'{dup.target_table.name}.{dup.target_field.name}（ID={dup.id}，'
+                                    f'关系类型={dup.get_relation_type_display()}）；同一组源/目标字段只能建立一条关系，'
+                                    f'如需修改请在关系管理列表中找到该关系并编辑'
+                })
+            raise
+
+
 class FieldMappingSerializer(serializers.ModelSerializer):
     source_table_name = serializers.CharField(source='source_table.name', read_only=True)
     source_field_name = serializers.CharField(source='source_field.name', read_only=True)
     target_table_name = serializers.CharField(source='target_table.name', read_only=True)
     target_field_name = serializers.CharField(source='target_field.name', read_only=True)
+    relation_type_label = serializers.CharField(source='get_relation_type_display', read_only=True)
+    row_key_field_name = serializers.CharField(source='row_key_field.name', read_only=True, allow_null=True)
+    display_sort_field_name = serializers.CharField(source='display_sort_field.name', read_only=True, allow_null=True)
+    detail_config_id = serializers.IntegerField(read_only=True)
+    detail_config_name = serializers.SerializerMethodField()
+    detail_config_combo = serializers.SerializerMethodField()
 
     class Meta:
         model = FieldMapping
         fields = ['id', 'source_table', 'source_table_name', 'source_field', 'source_field_name',
-                  'target_table', 'target_table_name', 'target_field', 'target_field_name', 'created_at']
+                  'target_table', 'target_table_name', 'target_field', 'target_field_name',
+                  'relation_type', 'relation_type_label', 'row_key_field', 'row_key_field_name',
+                  'display_sort_field', 'display_sort_field_name', 'display_sort_desc', 'conditions',
+                  'created_at', 'detail_config', 'detail_config_id', 'detail_config_name', 'detail_config_combo']
         read_only_fields = ['id', 'created_at']
+        validators = [FieldMappingUniqueValidator(FieldMapping.objects.all(),
+                                                  ('source_table', 'source_field', 'target_table', 'target_field'))]
+
+    def get_detail_config_name(self, obj):
+        if obj.detail_config:
+            return str(obj.detail_config.table)
+        return None
+
+    def get_detail_config_combo(self, obj):
+        """预组合全名（第一百四十四轮）：头表名 + 明细表名，供关系管理列表展示（旧注册无头表时只显示明细表名）。"""
+        if not obj.detail_config:
+            return None
+        dc = obj.detail_config
+        if dc.header_table_id:
+            return f'{dc.header_table.name} + {dc.table.name}'
+        return dc.table.name
+
+    def validate(self, attrs):
+        """2026-08-11 交互改造校验：relation_type=detail 时必填 detail_config、target_field 必须目标表主键。"""
+        relation_type = attrs.get('relation_type') or getattr(getattr(self, 'instance', None), 'relation_type', None)
+        detail_config = attrs.get('detail_config')
+        target_field = attrs.get('target_field') or getattr(getattr(self, 'instance', None), 'target_field', None)
+
+        if relation_type == FieldMapping.RelationType.DETAIL:
+            if not detail_config:
+                raise serializers.ValidationError({'detail_config': '明细子表关系必须挂载到已注册的子表配置（先注册再挂载）'})
+            if not target_field:
+                raise serializers.ValidationError({'target_field': '明细子表关系必须选择目标字段'})
+            # 校验 target_field 是目标表主键字段
+            from .models import Field as MField
+            target_f = target_field if isinstance(target_field, MField) else MField.objects.filter(pk=target_field).first()
+            if target_f and not target_f.is_primary_key:
+                raise serializers.ValidationError({'target_field': '明细子表关系的目标字段必须是目标表的主键字段'})
+            # 校验 detail_config.table == source_table
+            source_table = attrs.get('source_table') or getattr(getattr(self, 'instance', None), 'source_table', None)
+            dc = detail_config if isinstance(detail_config, DetailTableConfig) else DetailTableConfig.objects.filter(pk=detail_config).first()
+            if dc and source_table:
+                src_tbl = source_table if isinstance(source_table, int) else source_table.id
+                if dc.table_id != src_tbl:
+                    raise serializers.ValidationError({'detail_config': '挂载的子表配置必须与源表一致（detail_config.table != source_table）'})
+        return attrs
 
 
 class FieldBatchUpdateSerializer(serializers.Serializer):
@@ -307,3 +464,21 @@ class ComputedFieldSerializer(serializers.ModelSerializer):
         for cf in obj.computed_dependents_reverse.filter(status=ComputedField.Status.ACTIVE):
             downstream.append({'id': cf.id, 'code': cf.code, 'name': cf.name})
         return {'upstream': upstream, 'downstream': downstream}
+
+
+class ConfigTableSerializer(serializers.ModelSerializer):
+    """配置表序列化器。"""
+    domain_name = serializers.CharField(source='domain.name', read_only=True)
+    data_source_name = serializers.CharField(source='data_source.name', read_only=True, default='')
+    row_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ConfigTable
+        fields = ['id', 'domain', 'domain_name', 'name', 'code', 'category',
+                  'columns', 'rows', 'row_count', 'status',
+                  'data_source', 'data_source_name', 'sync_sql', 'last_synced_at',
+                  'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'last_synced_at']
+
+    def get_row_count(self, obj):
+        return len(obj.rows) if isinstance(obj.rows, list) else 0

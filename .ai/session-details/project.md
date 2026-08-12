@@ -2,6 +2,18 @@
 
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
 
+### 第一百四十五轮（2026-08-11）标签：局域网开放测试、防火墙、测试账号
+
+**任务**：用户问能否把本机 IP 放出去给别人测试（同一局域网）；vite.config.ts server.host:true + 手工后台起 runserver 0.0.0.0:8000 --noreload + npm run dev（dev.ps1 不动，测试完 stop+start 恢复本机监听）+ 建 tester（管理员，密码 qQLdeaCIu1）/manager（管理员，密码 i5IdOs5taN）两账号（UserProfile 无自动创建机制，需手工 get_or_create+挂角色，幂等脚本已删）。
+
+**验证**：netstat 0.0.0.0:3000/8000 监听 ✓；本机 curl 10.0.16.56:3000→200、192.168.80.9:3000→200、10.0.16.56:8000/api/domains→401（服务正常）；浏览器实测 http://10.0.16.56:3000/login 页面打开+admin 登录成功+跳转域列表；后端登录 API 三账号（admin/tester/manager）全 HTTP 200 带 token。
+
+**防火墙**：netsh add rule 需管理员权限，沙箱提权 UAC 弹不出、普通 shell 被拒（「请求的操作需要提升」），规则未加成——已给用户两条 netsh 命令自行管理员运行（MetaData002 Frontend 3000 / Backend 8000）。
+
+**用户反馈排查**：用户报「加了我的 IP 也是登录不了的」→ 实测本机 IP 访问+登录全通（排除服务/账号问题）→ 用户自答「IP 写错了」，已自解。教训：本机自连自己 IP 不经过防火墙入站拦截，**别人电脑访问才需要防火墙放行**，交付时需讲清。
+
+**遗留**：①防火墙放行待用户管理员跑两条命令（对方电脑能访问的前提）；②测试结束恢复：dev.ps1 stop（按端口杀 0.0.0.0 进程）→ dev.ps1 start（恢复 127.0.0.1 本机模式）；③vite host:true 保留（本机使用无害，下次开放不用再改）；④tester/manager 账号密码见本条目，测试完可删（幂等脚本已删，用 manage.py shell 删用户即可）。
+
 ### 第一百轮（2026-08-04）标签：测试扩展、CI、better-harness
 
 **来源**：better-harness 评分发现的 Medium 级问题（测试覆盖面浅）
@@ -60,6 +72,19 @@
 ### 第二十四轮（2026-07-24）标签：-
 
 - **更早操作**：2026-07-24 — AI配置模型改纯选择+升级DeepSeek V4（第二十四轮）：①模型字段从 a-auto-complete（可输入可选择）改为 a-select show-search（纯选择可搜索）；②DeepSeek 模型列表从旧版 deepseek-chat/deepseek-reasoner 升级为 deepseek-v4-flash/deepseek-v4-pro（旧模型 2026-07-24 停用）；③默认模型改为 deepseek-v4-flash；④DeepSeek API 地址从 https://api.deepseek.com/v1 改为 https://api.deepseek.com（官方最新）。验证：vue-tsc 零错误
+
+### 第一百四十六轮（2026-08-11）标签：Docker Compose 内网部署、Nginx、Gunicorn、数据迁移
+**任务**：局域网开放失败（对方 ping 不通——公司网络 VLAN 隔离），用户决定部署到内网服务器（方案B：Docker Compose 全套部署到公司内网 Linux 服务器，数据迁移）。
+**前置阅读**：用户确认 Linux 服务器 + 内网 IP 访问 + 迁移现有数据。
+**修改文件**：
+- `frontend/nginx.conf` — 新增，Nginx 配置（serve 前端静态文件 + 反向代理 /api 到后端 gunicorn + SPA fallback + 缓存策略）
+- `deploy/docker-compose.yml` — 新增，生产环境编排（nginx:alpine + backend:gunicorn + postgres:15 + redis:7-alpine，启动链：migrate→loaddata→init_admin→collectstatic→gunicorn）
+- `deploy/.env` — 新增，生产环境变量模板（DEBUG=0、DJANGO_SECRET_KEY、DB_PASSWORD、ALLOWED_HOSTS 占位）
+- `deploy/data_dump.json` — 导出，SQLite 全部业务数据（138 条记录含 admin/tester/manager 三账号+域+6 表+101 字段+6 映射+3 计算字段+6 配置表+1 数据源）
+- `backend/Dockerfile` — 修改，补全 gunicorn CMD（deploy/docker-compose.yml 的 command 覆盖此默认值）
+- `.gitignore` — 修改，加 /deploy/data_dump.json
+**验证**：data_dump.json 138 条记录，模型覆盖 auth(3 user+3 token+1 role+3 userprofile=10) + modeling(1 domain+6 table+101 field+6 mapping+3 computed+6 configtable+1 datasource+2 detailconfig+1 aiconfig=127) + 1 auto; docker-compose.yml 语法通过 docker compose config 检查（需在 Linux 上实际 up）
+**遗留**：①部署前用户需在服务器安装 Docker + docker-compose；②修改 deploy/.env 填入实际服务器 IP 和密码；③代码传到服务器后先 `cd frontend && npm ci && npm run build` 再 `cd deploy && docker compose up -d`；④首次部署需迁移数据（data_dump.json 已导出）；⑤部署完验证 http://服务器IP → 登录页
 
 ### 第二十二轮（2026-07-24）标签：-
 

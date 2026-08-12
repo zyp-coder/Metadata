@@ -263,16 +263,45 @@
                 </div>
                 <div class="plugin-actions">
                   <a-button size="small" :loading="pluginReloadingMap[p.filename]" @click="handlePluginReload(p.filename)">重载</a-button>
-                  <a-popconfirm
-                    :title="`确认卸载 ${p.filename}？`"
-                    ok-text="确认"
-                    cancel-text="取消"
-                    @confirm="handlePluginUnload(p.filename)"
-                  >
-                    <a-button size="small" danger :loading="pluginUnloadingMap[p.filename]">卸载</a-button>
-                  </a-popconfirm>
+                  <a-button size="small" danger :loading="pluginUnloadingMap[p.filename]" @click="confirmPluginUnload(p.filename)">卸载</a-button>
                 </div>
               </div>
+            </div>
+          </a-tab-pane>
+          <a-tab-pane key="config_tables" tab="配置表">
+            <div v-if="configTablesLoading" class="sidebar-loading"><a-spin size="small" /><span>加载配置表...</span></div>
+            <div v-else-if="!configTables.length" class="sidebar-empty">
+              暂无配置表
+              <div style="font-size: 12px; color: #888; margin-top: 4px">可在「管理表 → 配置表」页面创建</div>
+            </div>
+            <div v-else class="config-tables-list">
+              <div style="font-size: 12px; color: #888; margin-bottom: 8px">
+                在公式中用配置表编码引用：MAP_VALUE(值, "编码", "默认值")
+              </div>
+              <a-collapse v-model:activeKey="expandedConfigTable" :bordered="false">
+                <a-collapse-panel v-for="ct in configTables" :key="String(ct.id)" :header="`${ct.name}（${ct.code}）`">
+                  <template #extra>
+                    <a-tag size="small">{{ ct.row_count }} 行</a-tag>
+                  </template>
+                  <div style="font-size: 12px; color: #888; margin-bottom: 6px">
+                    公式引用：<code style="background: #f5f5f5; padding: 2px 6px; border-radius: 3px; color: #d4380d">"{{ ct.code }}"</code>
+                  </div>
+                  <div class="config-table-data" v-if="ct.rows && ct.rows.length">
+                    <div class="config-table-row config-table-header-row">
+                      <span class="config-table-cell">{{ ct.columns?.[0] || 'Key' }}</span>
+                      <span class="config-table-cell">{{ ct.columns?.[1] || 'Value' }}</span>
+                    </div>
+                    <div class="config-table-row" v-for="(row, idx) in (ct.rows || []).slice(0, 20)" :key="idx">
+                      <span class="config-table-cell">{{ row[ct.columns?.[0] || 'Key'] || row['Key'] || '' }}</span>
+                      <span class="config-table-cell">{{ row[ct.columns?.[1] || 'Value'] || row['Value'] || '' }}</span>
+                    </div>
+                    <div v-if="(ct.rows?.length || 0) > 20" style="text-align: center; color: #888; font-size: 11px; padding: 4px 0">
+                      ... 共 {{ ct.row_count }} 行，仅显示前 20 行
+                    </div>
+                  </div>
+                  <div v-else style="color: #888; font-size: 12px">暂无数据</div>
+                </a-collapse-panel>
+              </a-collapse>
             </div>
           </a-tab-pane>
         </a-tabs>
@@ -344,11 +373,11 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import { message } from 'ant-design-vue'
-import { computedFieldApi } from '@/api/modeling'
+import { message, Modal } from 'ant-design-vue'
+import { computedFieldApi, configTableApi } from '@/api/modeling'
 import { formatExpressionText } from '@/utils/formula'
 import { extractApiError } from '@/utils/apiError'
-import type { ComputedFieldModel, FormulaValidationResult, AvailableFunction, AvailableReference, PreviewDataResult, PluginInfo } from '@/api/modeling'
+import type { ComputedFieldModel, FormulaValidationResult, AvailableFunction, AvailableReference, PreviewDataResult, PluginInfo, ConfigTable } from '@/api/modeling'
 
 const props = defineProps<{
   open: boolean
@@ -398,6 +427,11 @@ const pluginsLoading = ref(false)
 const pluginUploading = ref(false)
 const pluginReloadingMap = ref<Record<string, boolean>>({})
 const pluginUnloadingMap = ref<Record<string, boolean>>({})
+
+// 配置表
+const configTables = ref<(ConfigTable & { rows?: Record<string, any>[] })[]>([])
+const configTablesLoading = ref(false)
+const expandedConfigTable = ref<string[]>([])
 
 // 函数库和引用列表
 const functions = ref<AvailableFunction[]>([])
@@ -561,6 +595,7 @@ watch(() => props.open, async (val) => {
     showAllPreview.value = false
     await loadSidebarData()
     loadPlugins()
+    loadConfigTables()
     // 编辑模式已有表达式：自动验证 + 默认展示数据预览
     if (form.value.expression.trim()) {
       handleValidate()
@@ -604,6 +639,31 @@ async function loadPlugins() {
     message.error('加载技术函数插件失败')
   } finally {
     pluginsLoading.value = false
+  }
+}
+
+// -------- 配置表查看 --------
+async function loadConfigTables() {
+  configTablesLoading.value = true
+  try {
+    const res = await configTableApi.list({ domain: props.domainId })
+    const tables = res.data.results || []
+    // 加载每张表的行数据
+    const withRows = await Promise.all(
+      tables.map(async (t) => {
+        try {
+          const rowsRes = await configTableApi.getRows(t.id)
+          return { ...t, rows: rowsRes.data.rows || [] }
+        } catch {
+          return { ...t, rows: [] }
+        }
+      })
+    )
+    configTables.value = withRows
+  } catch (e: any) {
+    message.error('加载配置表失败')
+  } finally {
+    configTablesLoading.value = false
   }
 }
 
@@ -665,6 +725,17 @@ async function handlePluginUnload(filename: string) {
   } finally {
     pluginUnloadingMap.value[filename] = false
   }
+}
+
+function confirmPluginUnload(filename: string) {
+  Modal.confirm({
+    title: `确认卸载插件 ${filename}？`,
+    content: '卸载后其注册的函数将从公式引擎移除（可随时重新上传恢复）。',
+    okText: '确认卸载',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: () => handlePluginUnload(filename),
+  })
 }
 
 async function handleDownloadTemplate() {
@@ -1263,6 +1334,39 @@ async function handleSaveAndTrial() {
   display: flex;
   gap: 4px;
   justify-content: flex-end;
+}
+.config-tables-list {
+  max-height: 480px;
+  overflow-y: auto;
+}
+.config-table-data {
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.config-table-row {
+  display: flex;
+  border-bottom: 1px solid #f5f5f5;
+}
+.config-table-row:last-child {
+  border-bottom: none;
+}
+.config-table-header-row {
+  background: #fafafa;
+  font-weight: 600;
+  font-size: 12px;
+}
+.config-table-cell {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-table-cell:first-child {
+  border-right: 1px solid #f0f0f0;
 }
 .ref-item {
   padding: 4px 6px;

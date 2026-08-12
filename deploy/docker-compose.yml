@@ -1,0 +1,87 @@
+# MetaData002 生产环境 Docker Compose
+# 部署：docker compose up -d
+# 停止：docker compose down
+# 日志：docker compose logs -f
+
+services:
+  # ---------- PostgreSQL 数据库 ----------
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ${DB_NAME:-metadata}
+      POSTGRES_USER: ${DB_USER:-metadata}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-metadata123}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-metadata}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------- Redis 缓存 ----------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------- Django 后端 ----------
+  backend:
+    build:
+      context: ../backend
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py loaddata /app/data_dump.json &&
+             python manage.py init_admin &&
+             python manage.py collectstatic --noinput &&
+             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 120"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # 数据导入文件
+      - ../deploy/data_dump.json:/app/data_dump.json:ro
+      # Django 静态文件（给 Nginx 共享）
+      - static_volume:/app/static
+    env_file:
+      - .env
+    environment:
+      # Docker Compose 内部服务发现（不覆盖 .env 中的 DB_HOST/DB_PORT）
+      - DB_HOST=db
+      - DB_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------- Nginx 前端 ----------
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      # 前端构建产物
+      - ../frontend/dist:/usr/share/nginx/html:ro
+      # Nginx 配置
+      - ../frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Django 静态文件（admin / rest_framework）
+      - static_volume:/usr/share/nginx/static:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  static_volume:

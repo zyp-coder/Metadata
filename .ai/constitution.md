@@ -42,6 +42,8 @@
 
 | 问题 | 状态 | 日期 |
 |------|------|------|
+| 变更日志明细页菜单误高亮「档案管理」：MainLayout 高亮白名单手动维护，/archive/versions 漏登记落入 /archive 前缀 | ✅ 已修复（白名单改从 menuItems 递归自动推导+下钻页别名表，见 debug-diary-archive BUG-2026-0806-01；修复中曾引入 TDZ 白屏已当场拦截） | 2026-08-06 |
+| 同步假变更风暴：同名未映射列写入越权（他表同名空列偷渡清空已有值→归属表再写回，同批次同记录两条假明细+版本号虚增2；batch#48 全批 1522 条明细全假） | ✅ 已修复（兜底收紧为仅主键列，写入/预检两处；存量清理脚本删假明细1522+假快照1522，见 debug-diary BUG-2026-0805-01） | 2026-08-05 |
 | Django 6.0.7 需要 ATOMIC_REQUESTS 配置 | ✅ 已修复 | 2026-07-17 |
 | Django 6.0+ 动态数据库连接必需包含 ATOMIC_REQUESTS/TIME_ZONE/CONN_MAX_AGE/CONN_HEALTH_CHECKS | ✅ 已修复 | 2026-07-21 |
 | config/settings.py 末尾自动导入 local_settings.py（开发环境 SQLite3） | ✅ 已修复 | 2026-07-21 |
@@ -76,7 +78,6 @@
 | 数据变更日志（数据核对） | 源侧同步与档案侧编辑统一落 ArchiveChangeBatch（批次，change_source=sync/manual，零变更不建批次）+ ArchiveChangeDetail（明细，change_type=created/updated/deactivated/reactivated，field_changes 字段级旧值→新值，record_key 主键快照）；无人工核对确认环节—直接以源为准更新+日志留痕一处查看；判定：复活优先于修改、新增不展开字段值、停用 field_changes=[] | 2026-07-25 |
 | 数据服务API归属 | API 配置在档案层（数据层）而非主数据域（定义层）；因为API对外开放的是数据（ArchiveRecord），数据实体在档案里 | 2026-07-23 |
 | 档案维护导航拆分 | 拆为档案管理（/archive CRUD）+ 档案列表（/archive/browse 只读三级下钻：域→档案→API→字段+数据）+ 操作日志 | 2026-07-23 |
-| API开放权限 | 定义为角色/部门授权；本期只做数据结构存储+展示，不做真实鉴权（留待 auth 模块启动后联动） | 2026-07-23 |
 | axios 拦截器保留响应 | config：api/index.ts 响应错误拦截器 reject 的 Error 必须挂载原始 err.response（(error as any).response = err.response）并把 data.error 纳入 msg 兜底；否则调用方 catch 拿不到结构化错误体（如 sync_stats），只能看到「Request failed with status code 4xx」 | 2026-07-23 |
 | 标准字段页重构三分类架构 | 【推翻 2026-07-24 上/下双栏看板+三Tab架构】页面全面重写为三分类架构：左栏200px字段分类导航(档案字段→基础/组合/计算、未分配、废弃) + 右栏字段表格五视图切换；基础字段=单表直接上档案(Field.archive_category='base')；组合字段=StandardField(status='active')；计算字段=新增ComputedField模型(骨架)；未分配=archive_category='unassigned'；废弃=跨类型聚合(Field.deprecated+StandardField.discarded+ComputedField.discarded)；删除AI检测功能；数据迁移策略：现有数据全部归入未分配字段 | 2026-07-25 |
 | 计算字段功能设计 | Excel公式风格配置+依赖自动解析(DAG)+枚举试算验证+物化存储+自动重算(同步后批量+编辑实时)；引用范围仅同域字段({表名.字段名}语法)；计算结果参与档案消费可同步到物理表 | 2026-07-25 |
@@ -99,6 +100,9 @@
 | 版本功能前端零入口(v16) | 【推翻 v15 「ArchiveDetail 页面信息架构收缩为记录+字段导航+版本历史」、v14「变更与版本合并页」中版本视图、v13「版本历史仅保留对比」】用户确认审计日志可完成回滚（field_changes 逆向回放即可），版本快照仅为工程便利缓存——前端彻底删除版本入口：全局页只留变更日志视图（删 radio/versionColumns/loadRecordVersions），ArchiveDetail 删 versionColumns/versions/viewVersions/loadVersions/tab=versions 全链路；后端 RecordVersionViewSet 保留供将来扩展 | 2026-07-31 |
 | 一致性检查历史记录(v16) | ConsistencyIssueHistory 独立表（FK→ConsistencyIssue+checked_at+primary_value+member_value），每次检查 append 历史快照保留差异值变化轨迹；前端展开行展示时间线，列重排强调「发现时间→成员表.字段→差异对比」 | 2026-07-31 |
 | 变更日志回滚功能(v17) | 基于 ArchiveChangeDetail.field_changes 逆向回放实现数据回滚；**粒度**：单条明细回滚（一条 ChangeDetail 的 field_changes 逆向写回）+ 按时间点回滚（某记录在指定时刻之后的全部变更逆序回放）；**同步变更处理**：允许回滚 change_source=sync 的变更，但弹窗警告「此变更来自源系统，回滚后下次刷新可能再次覆盖」，**不加 override 保护**（下次刷新可覆盖回去）；**留痕**：回滚操作本身落一条 ChangeDetail（change_type='rollback', change_source='manual'，field_changes 记录本次逆向写入的字段和值）；**UI 入口**：全局变更日志表（VersionManagement）每行「回滚」按钮（单条回滚） + 记录详情弹窗内「历史回滚」区域（时间线选点回滚） | 2026-07-31 |
+| API管理完整落地 REQ-005(v19) | 【推翻 2026-07-23 API开放权限只存数据结构决策】API 管理本期做真实鉴权：①数据模型——ApiKey（mdm_+32位hex，仅存 SHA-256 哈希，明文仅创建/轮换时返回一次）+ApiKeyGrant（密钥×API 独立授权，每关系独立操作范围 read/create/update/delete，unique(api_key,api)）+ApiCallLog（调用日志落库保留90天自动清理+近7天统计）；ArchiveApi 扩展 slug（unique 对外路径段）/allowed_operations/rate_limit_per_min（按密钥维度，0=不限）；ChangeSource 加 'api'（外部写入落变更日志批次，operator=密钥名称）②对外网关统一挂 /api/open/{slug}/，鉴权头 X-API-Key：GET 列表（exposed 投影+静态筛选+动态参数+分页上限500）/单条/docs 文档/POST 新增/PATCH 修改/DELETE 软停用；拦截链 401（无/无效/吊销/过期）→403（API停用/无授权/操作越权）→429（限流）③写操作守 Hub 宪法：永不回写源表，落 manual_data 层（仅 ownership=archive 字段，source 字段 400）/软停用；外部新增不违反「禁止人工新增」（该决策约束前端人工入口，REQ-005 调用方是下游业务系统）④方向承载点单点化：open_api_auth.py（鉴权/限流/日志）+open_api_gateway.py（读写）两文件，auth 模块启动后仅替换前者⑤密钥管理端点 /api/api-keys/（创建/rotate轮换/revoke吊销/call-logs）+api-call-stats；前端 ApiManagement 双 Tab（接口管理+密钥管理）+文档弹窗；不做：签名认证/auth角色联动/跨实例限流（内存窗口重启清零，多实例需换 Redis）；字段释放粒度=每 API 独立 exposed_fields（同档案多 API 各自释放不同字段子集，读投影/写限 exposed∩archive，与两层释放体系衔接；不引入读写分离字段清单与密钥级字段再收窄，第一百一十五轮用户确认现状已够） | 2026-08-05 |
+| 回滚体系统一(v18) | 【局部推翻 v17 逆向回放语义（单条/时间点回滚）、修复版本回滚只写合并层的隐性 Bug】回滚统一为「恢复快照」语义，全部走共用执行器 _execute_field_rollback 按 ownership 分层写回（source→source_data，archive→manual_data/回落），回滚效果不再被下次合并/刷新静默吃掉。支撑：ArchiveChangeDetail 加 version_before/version_after 版本映射（迁移0011，存量 NULL 不回填→单条回滚降级旧字段级逻辑、时间点回滚 400 提示）。三粒度回滚：单条（恢复 version_before 快照，后续变更一并撤销）/整批（POST /change-batches/{id}/rollback/ 应对源侧批量刷错，后续又编辑过的记录跳过并列出）/版本（响应体不变）。人工编辑攒批保存：start-manual 开批次+PUT records 带 change_batch_id，草稿仅存浏览器、保存即批次封口、离开拦截列出待存内容；同日批次不事后合并（展示层折叠）。刷新预检加 archive_owned_impact 告警（档案维护字段被源侧刷新波及，仅提醒不阻断）。变更日志页翻新为批次视图（首页看事件，业务人员无版本概念）+下钻明细 | 2026-08-03 |
+| 配置表数据源同步(v12+) | ConfigTable 扩展从外部数据源同步数据：①模型加 data_source(FK→DataSource, nullable)+sync_sql(TextField, blank)+last_synced_at；②DataSourceViewSet 新增 execute-query action（只读安全：仅允许 SELECT、超时 30s、行数上限 10000）；③ConfigTableViewSet 新增 sync action（调用 _sync_config_table 可复用函数）；④前端 ConfigTables.vue 加同步配置区（选数据源+SQL 编辑器+同步按钮+预览）；⑤自动调度同步：管理命令 sync_config_tables + 搭车档案 daemon 线程（ARCHIVE_AUTO_REFRESH_MINUTES 间隔）；⑥MAP_ORDER 函数扩展多位置模式（"5,6,7" 依次取段查表，向后兼容单值模式）。连接层复用现有 DataSource 动态连接注册，业务层新建 | 2026-08-08 |
 
 ### 交互级决策（页面/控件/展示 — 按需检索）
 
@@ -163,7 +167,87 @@
 | 标准字段界面5项交互微调 | 【推翻 2026-07-24 上表列定义(标准编码/标准中文名/成员字段/操作/启用)】上下表列对齐：上表列改为字段编码/字段名称/来源/数据去重内容/查看/是否确认到档案（来源显示首表名+“…共N项”；去重内容显示首成员表.编码+提示点查看；查看→抽屉并排展示成员去重值）；解散按钮从表格操作列移到查看抽屉(≤2成员popconfirm直接询问/>2成员Modal.confirm)；统计显示“已确认到档案：N/M”(N=is_active启用数)；上下表列名“启用”→“是否确认到档案”+switch children改“是/否”；“确认到上面”按钮+弹窗标题改“确认到标准字段” | 2026-07-24 |
 | 标准字段界面列宽对齐+数据去重内容+批量取消 | 【推翻上轮统计用is_active】“已确认到档案”统计改为按release_to_archive===true计数(is_active是概念模型门控非档案门控)；上表“数据去重内容”列改为tag展示第一个成员字段的distinct_values(后端StandardFieldSerializer加first_member_distinct_values字段)；上下表列宽统一对齐(字段编码140/字段名称140/来源160/是否确认到档案100)；上表加row-selection+工具栏“批量取消确认到档案”按钮(Modal.confirm确认后逐个patch release_to_archive=false) | 2026-07-24 |
 | 标准字段界面6项微调 | 【推翻上轮来源列显示+统计范围+批量取消范围】上表来源列只显示“共N项”去掉表名；后端 manual_candidates source_label 改为中文表名(t.name)而非数据源/英文表名；来源列宽 160→320；批量取消同时作用上下表选中项(上表standardFieldApi.patch+下表fieldApi.batchUpdateAttributes)；统计“已确认到档案”改为上下表合计(上表release_to_archive===true+下表release_to_archive!==false)；下表顶置类型安全修复(keys.map(Number)) | 2026-07-24 |
+| API开放权限 | 定义为角色/部门授权；本期只做数据结构存储+展示，不做真实鉴权（留待 auth 模块启动后联动）【已被 2026-08-05 API管理完整落地 REQ-005(v19) 推翻：本期自建 API Key 真实鉴权，auth_roles 保留展示用】 | 2026-07-23 |
 | MDM 第6批数据模型 | ArchiveRecord 加 overrides/lineage 两个 JSONField(default=dict)（overrides={field_code:{protected_by,protected_at,original_value}}、lineage={field_code:{source: manual/sync/resolve, source_table, updated_at}}）+ 独立模型 ArchiveFieldConflict（Status: pending/resolved_accept/resolved_keep/voided；SuggestedAction: accept_source/keep_archive；索引 (record,field_code,status)+(archive,status)）；一次迁移 0003 | 2026-07-28 |
 | MDM 比对引擎(第6批落地) | _upsert_records_from_rows 从无条件覆盖重写为逐字段比对：值一致跳过（无血缘首次补建 sync 血缘 BR-018-6）、档案没有的新字段直接写入+lineage=sync、**任何差异一律不覆盖入队 ArchiveFieldConflict**（同 (record,field_code) 旧 pending 置 voided 只留最新）、受 override 保护标 is_protected+建议 keep_archive 否则 accept_source；新字段写入才 version+1+快照且仅无冲突时置 synced；stats 加 conflicts_created；裁决闭环：accept_source→更新字段+version+1+快照(change_summary.conflict_resolution)+解除override+lineage=resolve，keep_archive→登记/维持override，重复裁决400；机制切换首拉会暴露存量真实差异（档案5实测451条），属预期 | 2026-07-28 |
 | MDM 字段级回写(第7批落地) | sync_to_source 加 selections 参数 [{record,fields:[物理列名]}]（fields 缺省=整行用于 INSERT，selections=None 完全向后兼容）；勾选粒度：更新记录差异字段逐个勾选(默认全选)、新增记录整行勾选(INSERT不可拆列)；未选记录/勾选无交集→action='skipped'不回写保持原状态；部分回写（勾选为差异真子集）→sync_status='partial' 不碰 status，全量回写→synced+恢复 active；stats 加 records_partial/records_skipped；前端向导 Step2→Step3 携带 selections 重跑 dry_run 生成按选 SQL（独立 syncSelPreview 不污染全量预览） | 2026-07-28 |
 | 版本对比基准=选中vs最新(v14) | 【推翻原 v-1 vs v 相邻对比】版本「对比」统一改「选中版本(v1) ↔ 当前最新(v2)」：ArchiveDetail 用 selectedRecord.version、VersionManagement 用 GlobalVersionSerializer 新增 record_version（SerializerMethodField，记录已删返回 null）；守卫：null=已删提示无法对比、version≥最新提示无需对比；diff 弹窗文案「v{n}（选中） ↔ v{m}（最新）」 | 2026-07-30 |
+| REQ-019 字段权限模型落地（auth） | 人用权限=角色×档案域字段白名单（visible/editable，editable⊆visible），后端序列化层强制过滤（数据不下发，非前端藏列）；过滤单点 apps/auth/permission.py（get_field_permission→(visible,editable)，None=管理员/系统级不过滤；多角色并集；零配置空集全隐藏）；**系统级豁免：user=None（开放网关复用 UpdateSerializer/脚本，无请求上下文）不过滤**——对外 API Key 机器调用走 v19 exposed_fields 控制，与人用角色权限平行；写投影：不可编辑字段静默还原旧值不报错；全局 IsAuthenticated（登录接口 AllowAny，v19 网关自带免登录）；认证用 DRF 内置 TokenAuthentication 零新依赖；内置管理员角色+init_admin 命令（密码走 MDM_ADMIN_PASSWORD 环境变量）；用户不物理删除只禁用（is_active 每请求校验）；前端权限管理菜单仅 is_admin 可见（后端另有 IsMdmAdmin 403） | 2026-08-05 |
+| 可编辑配置限档案侧维护字段（auth） | 角色权限「可编辑」仅对 ownership='archive'（档案侧维护）字段开放：源系统维护字段（ownership='source'）前端复选框置灰+tooltip「源系统维护，档案侧不可人工编辑」+加载历史配置时剔除误存项；后端 PUT permissions 校验 editable_codes 含 source 字段返 400（按域查首个 Archive.schema，与记录更新的 ownership 拦截同口径；域无档案/schema 空跳过）——配置端与执行端同规则，避免配出无效授权 | 2026-08-05 |
+| 档案权限全景只读审计视图（archive） | 用户问「这个档案配了什么 API/释放什么字段/哪些系统调用/什么角色/哪些用户/可操作什么字段」——不新建独立菜单页，入口放档案列表操作列「权限」链接（仅 is_admin 可见，getMeApi 判定，后端 IsMdmAdmin 403 兜底）；纯只读聚合视图不做编辑，区块头「去配置」跳转既有配置页（机器权限→/archive/api-management，人用权限→/settings/roles）；960px 抽屉两区块：机器权限（API+暴露字段+授权密钥+按密钥聚合的调用统计，「哪个系统调用」按密钥维度聚合——调用日志无系统标识，每个 API Key 代表一个接入系统）+人用权限（角色×域字段白名单+角色下用户）；聚合端点 GET /archives/{id}/permission-overview/ 单点收敛，零新模型全复用 v19+REQ-019 数据结构 | 2026-08-05 |
+
+## 架构级决策：同步引擎支持维度模型（2026-08-08）
+- 背景：产品档案同步发现 4 张表（25/26/27/28）数据 0 写入，根因是同步引擎星型假设——组合字段仅主字段可映射（外键列被排除），且无跨表中转关联能力
+- 决策：①保持主表粒度（一物料一行）；②放开匹配通道（组合字段非主成员列可作匹配 key，不写入）；③匹配不到即跳过不创建（非主表）；④确定性排序取首条折叠 1:n；⑤新增 1:n 发散检查（告警不阻断）；⑥NAME 经 FID 中转（FieldMapping 驱动）；⑦同步引擎全局生效（其他档案行为可能变化，需回归）
+- adqa 硬回执：回执：质[✓5条] 伪[✓3证据] 锁[✓确认5/留活口0/否决0]
+
+## 架构级决策：同步引擎全量同步（去 TOP 1000，2026-08-08）
+
+- **背景**：维度模型改造落地实测时发现活跃记录 1000→1334 漂移，诊断确认根因是 `_query_external_table` 的 TOP 1000 硬限制——各源表真实行数远超 1000（主表/物料信息各 209,123、价目表明细 239,504、价目表头 14,883），且各表物理序不一致导致不同表截取不同批次：表 28↔表 22 截断交集为 0（NAME/PRICE 全空假象）、表 24 与表 22 截断批次分裂（两批物料同时活跃漂移）
+- **决策**：①移除 `_query_external_table`/`_query_local_table` 全部分支的行数截断（SQL Server TOP/Oracle ROWNUM/MySQL LIMIT），全量拉取；②fetchmany 分批转换防 C 层物化内存峰值；③无数据差异记录批量落库（bulk_update，SQLite 自动分批）防全量模式下每轮 20 万次逐条 UPDATE；④本轮刚创建记录被后续表合并时不重复记 UPDATED 明细（与 records_updated 统计口径一致，防首次全量 20 万条重复明细爆炸）；⑤SQLite 大列表禁止单条 `id__in`/多次 `exclude(id__in=...)`（999 变量上限，见 BUG-2026-0808-02），统一按 500/批分段
+- **实测**：全量同步 6/6 表、209,123 条记录、errors 空、耗时 11 分钟（增量重跑）；首次从零全量约 59 分钟（一次性成本，后续可优化批量创建）
+- **遗留**：GROUP_NAME 等 4 个分组字段 0 值（表 25/26 未挂组合字段，建模配置缺失非引擎 bug）；7 个计算字段重算失败（公式引用物理名 MNEMONIC_CODE，Field.code=MTL_MCODE，既有配置错误）
+
+## 架构级决策：档案明细致子表与子表关系（2026-08-08 方向锁定，待实施）
+
+- **背景**：用户需求升级——档案需保留 1:n 明细（价格明细表 28 共 239,504 行、单物料最多 3,808 行），原确定性折叠取首条策略（R4）不满足；用户提出「子表关系」概念：在主数据域关系管理（FieldMapping）增加关系类型，先构建子表再嵌套，替代原独立 DetailGroup 配置方案（合并取消）
+- **决策（方向锁定清单 v5，§11.1 全流程）**：①档案=物化 JSON 宽表 + 独立明细致子表（ArchiveRecordDetail）双轨；②子表声明=FieldMapping 加 relation_type（reference/detail），detail=保留全部行，配置界面按主表→子表→嵌套层级展示；③嵌套语义=属性透传（27 表 NAME/DESCRIPTION 并进 28 行），嵌套表本身保留行能力留活口后续可扩；④行键=自动检测唯一列（覆盖「已标记主键但实际不唯一」反例：表 28 FID 标主键但仅 14,883 唯一值/239,504 行），域 14 实证行键=ENTRY_ID；⑤代表行排序=排序字段可配置（EFFECTIVE_DATE DESC）+**自动补行键 DESC 次级键**（同日期取行键最大，默认价可复现）；⑥主表字段=表 28 全 35 字段保留，取值=代表行快照（主表=代表行快照，明细=全量）；⑦编辑联动=独立不联动（明细 manual 层独立，主表字段 manual 覆盖，互不自动覆盖）；⑧审计=日志+版本+回滚全纳入明细行（ChangeDetail 加 detail_group/detail_row_key，版本快照含 details）；⑨API=嵌套 details 随记录返回+分页（page/page_size，前端默认折叠）；⑩ON/WHERE 条件=结构化条件（字段+操作符+值，AND 组合）挂 FieldMapping；⑪发散=cardinality_fold_count 告警（已有机制）；⑫表 25/26 分组链不标 detail（1:1 无保留行意义，属性展开维持现状，可反悔）
+- **实证支撑**：PRICE_PLAN 全空格不可作价目表区分；FID 非行唯一；ENTRY_ID 239,504 零重复零空；EFFECTIVE_DATE 已配置 field_type='date'（date_format 空待补）；表 28 全部 35 字段 release_to_archive=True；28→22 单通道；27/28 无字段重名
+- **adqa 硬回执**：回执：质[✓5条] 伪[✓源库4探针+配置4探针已执行] 锁[✓确认12项/留活口1项(嵌套保留行)/否决0]
+
+## 架构级决策：明细致子表交互改造「先注册后挂载」（2026-08-11 方向锁定，待实施）
+
+- **背景**：用户反馈「关系管理有建立明细子表功能，但明细子表怎么和主表建关系？没有操作空间」——根因是交互缺陷：FieldMapping 方向反直觉（source_table=明细子表 → target_table=主表，与用户直觉相反）且新建映射弹窗无引导，明细子表必须先选主表才能配置（无独立注册空间）
+- **决策（方向理解清单 7 条 + adqa 质疑关 5 条，§11.1 全流程）**：①交互范式改为「先注册后挂载」——明细子表独立注册（域/表/行键/排序字段/条件，允许不选主表独立保存），主表建关联时下拉直接选已注册子表（用户原话确认）；②子表注册独立落库（DetailTableConfig 类新模型，FieldMapping 挂载 FK 关联），一子表可被多主表挂载；③挂载时必须选关联字段（明细表物理列 → 主表主键的映射通道），否则挂载不成立；④同步引擎 detail 查找从 `.first()` 改为多挂载循环（一子表多挂载）；⑤旧入口（新建映射弹窗内嵌 detail 配置）移除，存量迁移做成通用能力（自动检测方向异常的 detail 映射并提示），id=25 等方向异常配置随交互改造统一修正；⑥不做独立主数据（价格列表/产品分组保持附属，一域一档案架构不动），独立主数据+跨域引用留作升级活口；⑦darc 设计时对齐 Archive 模型（明细归属/嵌套语义沿用第一百三十三轮锁定 12 项，不重开）
+- **实证支撑**：源库探针 diag_probe_2728.py——28 销售价目表明细 239,504 行 FID 非空 100%，FID 命中 27 销售价目表 ID 239,504/239,504（命中率 100% 未命中 0），27 表 14,883 行 → 28 是 27 的明细，存量 id=25（source=27→target=28）方向反了且从未产出数据（27 表无映射到档案主键 MATERIAL_ID 的列）
+- **adqa 硬回执**：回执：质[✓5条] 伪[✓源库探针 28.FID↔27.ID 命中率 100%] 锁[✓确认5/留活口1(独立主数据)/否决0]
+
+## 架构级决策：明细致子表交互改造第二轮「建关系直选子表」（2026-08-11 方向锁定，待实施）
+
+- **背景**：用户反馈「关系管理的明细子表没啥用啊。。你不是应该建好明细子表之后就可以用明细子表来和主表关系的么？」——第一百三十七轮已实现「先注册后挂载」（子表独立注册 + 映射下拉选配置），但交互仍有断裂：新建映射弹窗把「关联子表配置」藏在表单尾部，源表/目标表下拉只含普通表，用户注册完子表后不知道如何用它建关系（实际用法=先选主表再选子表配置，与用户直觉相反且无引导）
+- **决策（方向理解清单 v2 + adqa 质疑关 4 条，§11.1 全流程）**：①注册与建关系两步流程保持分开（用户明确「建子表是建子表的流程，选关系就可以选所有表和创建的子表。工作步骤是分开的」，否决「注册即建关系」合并方案）；②子表=有嵌套关系的表专用（分组/价格等，用户纠正「子表的意思是那些有嵌套关系的才需要建立的 例如分组啊 价格这些才需要啊」），普通表间关系走引用类型；③形态1：新建映射弹窗简化——关系类型置顶，选「明细子表」后表单变为：主表下拉（普通表）→ 子表下拉（已注册子表，旁挂「管理注册」快捷入口）→ 关联字段（自动推荐可改：子表物理列中与主表主键同名/相似列优先，探针 28.FID↔27.ID 命中率 100% 已验证该模式）→ 保存；系统自动建「子表→主表」映射（source=子表、target=主表，用户不管方向）并挂载 detail_config；④一子表多主表：保持支持（第一百三十七轮 .all() 多挂载循环已实现）；⑤存量未注册 detail 映射编辑：弹窗内提示 + 可直接补选已注册配置（暂定默认，可反悔）；id=25 方向异常按第一百三十七轮决策一并修正
+- **实证支撑**：库内现状=1 条子表注册（EDS_K3_物料分类）、0 条映射（用户注册了子表但找不到建关系入口）；前端 onDetailConfigChange 存在覆盖 bug（选中配置会把 source_table 覆盖为子表注册的表——用户已选的主表被意外替换，本轮修复）；复用第一百三十七轮探针 28.FID↔27.ID 239,504/239,504 命中率 100%
+- **adqa 硬回执**：回执：质[✓4条] 伪[✓复用137轮探针+实施后多挂载实测] 锁[✓确认5/暂定1(存量编辑)/否决0]
+
+## 架构级决策：明细致子表交互改造第三轮「预组合=头表+明细表」（2026-08-11 方向修正锁定，待实施）
+
+- **背景**：用户纠正第二轮语义理解错误：「你的明细子表的意思理解错了。。。我要求的子表的意思是预组合的意思。就是价格头和价格明细表先组合。分组头和分组明细表先组合。然后后续再用这个预组合的表来关联主表啊。」——第二轮把「子表」理解为**单张明细表**（注册分组头 S_K3_T_BD_MATERIALGROUP 行键 GROUP_ID），实际应为**预组合体**（头表+明细表先组合成一体，再用组合体关联主表）。库内实证表对：价格组合=销售价目表 S_K3_T_SAL_PRICELIST_L(PK=ID)+销售价目表明细 S_K3_T_SAL_PRICELISTENTRY(FID 关联头.ID)；分组组合=物料分组 S_K3_T_BD_MATERIALGROUP(PK=FID)+分组明细 S_K3_T_BD_MATERIALGROUP_L(FID 关联头.FID)
+- **决策（方向理解清单 7 条 + adqa 质疑关 4 条，§11.1 全流程，用户确认「按此实施」）**：①注册=注册预组合体：选头表+选明细表+配头↔明细关联字段（同名校验自动检测可手动）+行键/排序/条件（明细层），域+头表+明细表唯一，「注册是注册」两步分离不变；②挂载=主表↔预组合体：关系类型置顶，主表下拉→预组合下拉（显示头表名+明细表名）→关联字段（主表主键↔组合体字段池=头字段+明细字段平铺，自动推荐可改），保存自动建映射方向系统处理；③组合形态=平铺：同步时头表字段 JOIN 进明细行（一行=一条明细+头字段重复），主表记录下挂平铺行（用户拍板否决嵌套形态）；④存量单表注册（物料分组行键 GROUP_ID，上轮实测数据）删掉重建（用户拍板）；⑤挂载关联字段自动推荐可改（主表主键↔组合体字段，同名/后缀匹配，头表字段优先、明细表字段次之）；⑥上一轮前端改动复用（关系类型置顶/主表下拉/关联字段推荐），子表下拉→预组合下拉、注册弹窗→双表形态；⑦不做：不合并注册/挂载弹窗、不动引用关系、不删旧字段（deprecated 保留）
+- **实证支撑**：库内表对真实存在（见背景）；质疑关裁决——质疑1头明细字段重名（FID 重名）：头表字段统一加前缀或字段池去重标注来源表；质疑2内存 JOIN 性能：对照现有 _query_external_table 本就全量拉取（nested_sources 同模式），风险持平不引入新依赖；质疑3分组组合宽表无物料关联字段（GROUP_ID string vs MATERIAL_GROUP number 类型不匹配）：推荐失败→用户手动选，表单允许；质疑4平铺行归属复用 pk_physical_to_schema：明细表物理列映射不变则归属不变，实施后实测
+- **adqa 硬回执**：回执：质[✓4条] 伪[✓字段交集实测+实施后平铺行实测] 锁[✓确认7/暂定0/否决0]
+
+## 架构级决策：第三轮实施补充「预组合三缺陷修复」（2026-08-11 实施完成，只追加）
+
+- **背景**：第三轮实施（DetailTableConfig 三字段扩展+迁移0032+detect-header-link+_join_header_rows 平铺+挂载/注册弹窗双表形态）完成，浏览器实测挂载价格组合/分组组合时发现 3 个真实缺陷+1 个 UI 问题，全部修复并复测通过
+- **决策（缺陷修复，与第三轮决策块合并生效）**：①前端字段池=头字段+明细字段平铺（质疑1裁决落地）：loadSourceFields 在 relation_type=detail 且配置有 header_table 时并入头表字段，头表字段可作挂载关联键（复测 12 字段含 GROUP_ID）；②后端 pk_physical_to_schema 纳入头表物理列（质疑4裁决落地）：头表字段作关联键时 pk 映射不再为空，明细同步不再整体跳过；③_record_key_for_row 支持 __hdr__ 前缀回退：平铺行中头表字段以 `__hdr__{物理列名}` 形态存在，归属匹配先查本表列再查 __hdr__ 前缀；④UI：筛选条件 placeholder 去 : 绑定（Vue 把 JSON 字符串当对象显示 [object Object]）
+- **实证支撑**：浏览器实测——子表注册弹窗双表形态✓、挂载弹窗预组合下拉（「EDS_K3_销售价目表 + EDS_K3_销售价目表明细」）✓、关联字段自动推荐（MATERIAL_ID）✓、手动改选（GROUP_ID）✓、保存真实请求 201×2+列表 2 行✓、删除 Modal.confirm+DELETE✓、持久化刷新后保留✓；平铺行实测（test_precombine.py，真实外部数据）——价格组合 239,504 行明细平铺每行 35 明细键+6 头字段（__hdr__PK_ID/ID/LOCALE_ID/NAME），头字段命中 3/3；分组组合 __hdr__GROUP_ID=d82dac3f-… 存在、非前缀缺失→归属匹配取 __hdr__ 值；pk 纳入判断 header_table_id=4==True
+- **回执**：回执：闸[✓] 记[✓] 拓[✓] 测[✓]（detect-header-link 2 次+注册 2 次+挂载 4 次+校验 5 次+删除 2 次+平铺行实测 1 次）
+
+## 架构级决策：留痕文件写入编码纪律（2026-08-11 第二次踩坑后固化，只追加）
+
+- **背景**：第一百四十轮修复 modeling.md/rule-hits.md GBK 混合编码损坏（GBK 段无损转 UTF-8）后，第一百四十一轮方向锁定详情写入时再次误用 GBK 编码（Windows PowerShell 工具链默认编码），收尾时第三次检测并修复。同一问题连续两轮复现，说明依赖「每次自觉 UTF-8」不可靠
+- **决策（硬约束）**：凡写入 `.ai/`、`output/` 下任何 md/json 文件，**必须显式 UTF-8**（Python open(..., encoding='utf-8') 或带 -Encoding utf8 的 PowerShell 命令），禁止依赖工具链默认编码；每次会话收尾前对 `.ai/**/*.md` 与 `output/**/*.md` 做一次 UTF-8 解码全检（decode 失败=写入事故，立即用 GBK 段无损转码修复）；发现损坏时同段历史条目一并扫描（同批写入往往多处受损）
+- **适用范围**：全部文档/日记/索引文件写入；代码文件受编辑器编码控制不在此列
+
+## 架构级决策：子表注册唯一性友好化+列表管理入口（第一百四十二轮 Bug 修复方案A，只追加）
+
+- **背景**：用户新建子表注册选「物料分组+物料分组_L」点 OK 报「字段DOMAIN，TABLE，必须能构成唯一集合」（DRF UniqueTogetherValidator 默认模板）——该明细表已被现有注册占用（域2 已有价格组合/分组组合两个注册），前端无已注册提示、后端报错不指明占用方、注册管理无列表/编辑入口。用户确认方案A（禁选+友好提示+列表管理）
+- **决策**：①**唯一性约束不变**（`unique_together=(domain, table)`，一明细表一注册，业务语义锁定）；②后端 `DetailTableUniqueValidator(UniqueTogetherValidator)` 替换默认错误模板，报错指明「明细表『xx』已注册为组合『头+明细』（ID=N）；一个明细表只能注册一次，如需修改请在「管理注册」中编辑」；③前端新建弹窗明细表下拉对已注册项**禁选+标记**「已注册（xx组合）」；④「管理注册」/顶部「子表注册」按钮统一打开**列表管理弹窗**（预组合/关联字段/行键/排序/挂载数/编辑/删除），复活原死变量 dcListModalVisible
+- **边界**：编辑模式（头表/明细表/关联字段禁改）与删除（popconfirm 提示挂载影响，`detail_config` FK=SET_NULL 删除后映射变未挂载不级联）
+- **同类点待办**：FieldMapping 唯一性（source_table/source_field/target_table/target_field）仍为 DRF 默认模板，待用户确认后同类修复
+- **回执**：后端实测 5 项全过 + vue-tsc 0 errors + 浏览器实测 4 项（列表弹窗/禁选标记/编辑回填/挂载弹窗入口）
+
+## 架构级决策：字段映射唯一性友好化+前端预检（第一百四十三轮 Bug 修复方案A，只追加）
+
+- **背景**：用户建「物料主表和明细表的关系」（普通关联 物料.MATERIAL_ID → 物料信息.MATERIAL_ID）报「字段 source_table... 必须能构成唯一集合」——四元组与存量映射 id=5 重复，DRF 默认模板不指明占用方。上一轮（142）已登记同类待办，用户确认方案A（后端友好+前端预检）+本次只修字段映射（其余 7 处同类下批）
+- **决策**：①**唯一性约束不变**（四元组 unique_together 业务语义锁定）；②后端 `FieldMappingUniqueValidator(UniqueTogetherValidator)` 同 DetailTableUniqueValidator 模式：友好报错指明「该关系已存在：源表.源字段 → 目标表.目标字段（ID=N，关系类型=xx）；同一组源/目标字段只能建立一条关系，如需修改请在关系管理列表中找到该关系并编辑」；③前端 handleSubmit 前 `checkMappingDuplicates()` 预检：四元组（composite 联合主键展开逐对）与映射列表比对（排除编辑自身），命中即 message.warning 拦截不发请求——普通关联与 detail 挂载共用 handleSubmit 一处覆盖
+- **边界**：编辑模式排除自身不误伤；跨域重复由后端全库 validator 兜底（前端仅当前域列表预检）
+- **同类点待办**：其余 7 处 unique 约束（Table/Field/StandardField/ComputedField/ConfigTable 编码、FieldOption 枚举值、Domain 编码、DataSource 名称）仍为 DRF 默认模板，用户选择分批处理待确认
+- **回执**：后端实测 6 项全过（重复 id=5 用户场景/重复 id=3 detail 挂载/全新 201+204/编辑自身 200/编辑撞他人 400 友好）+ vue-tsc 0 + django check 0 + 浏览器实测预检拦截（message.warning 指明 ID=5、弹窗保持打开未提交）
+
+## 架构级决策：关系管理列表直观性增强（第一百四十四轮 UX 方案A，只追加）
+
+- **背景**：用户反馈关系管理列表「明细表和主表、普通表的关系不直观」——detail 行只显示明细表名（预组合信息丢失）、目标表主表地位无体现、普通关联裸灰字区分度低
+- **决策**：①后端 FieldMappingSerializer 新增 `detail_config_combo`（SerializerMethodField）——预组合全名「头表名 + 明细表名」（旧注册无头表只返明细表名），不破坏 detail_config_name 既有语义；②前端列表增强：源表列 detail 行显示预组合全名+蓝色小标「明细子表（预组合）」、目标表=域主表（is_primary）金色「主表」tag、普通关联裸灰字升级灰色 tag「普通关联」、detail 行浅蓝底（:row-class-name + scoped :deep 样式）；③展示层纯增强，接口只增字段不破坏调用方
+- **边界**：id=4 旧范式 detail 映射（detail_config 为空）如实显示（浅蓝底+原表名，无组合名）；主表判定用 domainTables 的 is_primary 实时反映主表切换
+- **回执**：后端 APIClient 实测 6 条映射 combo 全对 + vue-tsc 0 + django check 0 + 浏览器 DOM 实测（4 行浅蓝底/预组合名/3 个主表 tag/普通关联 tag；首次抓取未见 tag 为 HMR 重渲染时序，二次确认全过）

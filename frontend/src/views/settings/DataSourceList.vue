@@ -1,7 +1,7 @@
 <template>
   <div>
     <div class="page-header">
-      <h2>系统设置 — 数据源管理</h2>
+      <h2>数据源配置</h2>
       <a-button type="primary" @click="openCreate">新建数据源</a-button>
     </div>
 
@@ -11,6 +11,7 @@
       :loading="loading"
       :pagination="false"
       rowKey="id"
+      :scroll="{ x: 800 }"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'db_type'">
@@ -22,12 +23,10 @@
           </a-tag>
         </template>
         <template v-if="column.key === 'action'">
-          <a-space>
+          <a-space :size="4" style="white-space: nowrap">
             <a @click="openEdit(record)">编辑</a>
             <a-divider type="vertical" />
-            <a-popconfirm title="确定删除此数据源？" @confirm="doDelete(record.id)">
-              <a style="color: #ff4d4f">删除</a>
-            </a-popconfirm>
+            <a style="color: #ff4d4f" @click="confirmDelete(record)">删除</a>
           </a-space>
         </template>
       </template>
@@ -102,8 +101,9 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import { dataSourceApi } from '@/api/modeling'
+import { extractApiError } from '@/utils/apiError'
 import type { DataSource } from '@/types'
 
 const dataSources = ref<DataSource[]>([])
@@ -187,10 +187,21 @@ async function handleSubmit() {
     modalVisible.value = false
     await loadData()
   } catch (e: any) {
-    message.error(e.message || '操作失败')
+    message.error(extractApiError(e) || '操作失败')
   } finally {
     saving.value = false
   }
+}
+
+function confirmDelete(record: DataSource) {
+  Modal.confirm({
+    title: '确认删除此数据源？',
+    content: `数据源「${record.name}」删除后，引用该数据源的档案将无法刷新数据，此操作不可恢复。`,
+    okType: 'danger',
+    okText: '删除',
+    cancelText: '取消',
+    onOk: () => doDelete(record.id),
+  })
 }
 
 async function doDelete(id: number) {
@@ -199,7 +210,7 @@ async function doDelete(id: number) {
     message.success('删除成功')
     await loadData()
   } catch (e: any) {
-    message.error(e.message || '删除失败')
+    message.error(extractApiError(e) || '删除失败')
   }
 }
 
@@ -220,7 +231,7 @@ async function handleTestConnection() {
       testResult.value = res.data
     }
   } catch (e: any) {
-    testResult.value = { success: false, error: `测试失败: ${e.message || '网络错误'}` }
+    testResult.value = { success: false, error: `测试失败: ${extractApiError(e) || '网络错误'}` }
   } finally {
     testing.value = false
   }

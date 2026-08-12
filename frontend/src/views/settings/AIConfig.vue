@@ -1,7 +1,7 @@
 <template>
   <div>
     <div class="page-header">
-      <h2>系统设置 — AI 配置</h2>
+      <h2>AI 配置</h2>
       <a-space>
         <a-button :loading="testing" @click="handleTest">测试连接</a-button>
         <a-button type="primary" :loading="saving" @click="handleSave">保存</a-button>
@@ -107,6 +107,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { aiConfigApi } from '@/api/modeling'
+import { extractApiError } from '@/utils/apiError'
 import type { AIConfigModel } from '@/api/modeling'
 
 // 厂商预设：选定后自动填充接口地址与可选模型
@@ -223,7 +224,7 @@ async function load() {
     prompts.prompt_infer = d.prompt_infer || ''
     Object.assign(promptDefaults, d.prompt_defaults || {})
   } catch (e: any) {
-    message.error(e.message || '加载配置失败')
+    message.error(extractApiError(e) || '加载配置失败')
   } finally {
     loading.value = false
   }
@@ -265,7 +266,7 @@ async function handleSave() {
     form.api_key = ''
     message.success('保存成功')
   } catch (e: any) {
-    message.error(e.message || '保存失败')
+    message.error(extractApiError(e) || '保存失败')
   } finally {
     saving.value = false
   }
@@ -280,8 +281,8 @@ async function handleTest() {
     if (res.data.ok) message.success('连接成功')
     else message.warning(res.data.message)
   } catch (e: any) {
-    testResult.value = { ok: false, message: e.message || '测试失败' }
-    message.error(e.message || '测试失败')
+    testResult.value = { ok: false, message: extractApiError(e) || '测试失败' }
+    message.error(extractApiError(e) || '测试失败')
   } finally {
     testing.value = false
   }

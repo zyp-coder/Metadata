@@ -38,16 +38,17 @@ import { useRoute, useRouter } from 'vue-router'
 
 const props = defineProps<{
   domainName: string
-  stage: 'tables' | 'mappings' | 'fields'
+  stage: 'tables' | 'mappings' | 'fields' | 'config-tables'
 }>()
 
 const route = useRoute()
 const router = useRouter()
 const domainId = Number(route.params.id)
 
-const order = ['tables', 'mappings', 'fields'] as const
+const order = ['tables', 'config-tables', 'mappings', 'fields'] as const
 const stages = [
   { key: 'tables', title: '管理表' },
+  { key: 'config-tables', title: '配置表' },
   { key: 'mappings', title: '关系管理' },
   { key: 'fields', title: '字段管理' },
 ] as const
@@ -58,7 +59,7 @@ function goDomains() {
   router.push('/modeling/domains')
 }
 
-function goTo(key: 'tables' | 'mappings' | 'fields') {
+function goTo(key: 'tables' | 'mappings' | 'fields' | 'config-tables') {
   router.push(`/modeling/domains/${domainId}/${key}`)
 }
 </script>

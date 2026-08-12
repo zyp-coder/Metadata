@@ -75,10 +75,26 @@ def func_split_index(args, ctx):
     return ''
 
 
-@register_function('MAP_VALUE', 2, 3, 'MAP_VALUE(值, "旧1:新1;旧2:新2", [默认值]) — 按映射表转换，未命中返回默认值或原值', category='技术函数')
+@register_function('MAP_VALUE', 2, 3, 'MAP_VALUE(值, "映射串或配置表编码", [默认值]) — 按映射表转换，支持配置表引用（第二参数为配置表编码时自动查表）', category='技术函数')
 def func_map_value(args, ctx):
     val = '' if args[0] is None else str(args[0])
     mapping_str = str(args[1])
+
+    # 尝试配置表查找：第二参数匹配域内配置表编码时，自动从配置表读取映射
+    domain_id = ctx.get('__domain_id__')
+    if domain_id:
+        from .models import ConfigTable
+        ct = ConfigTable.objects.filter(domain_id=domain_id, code=mapping_str, status='active').first()
+        if ct and isinstance(ct.columns, list) and len(ct.columns) >= 2 and isinstance(ct.rows, list):
+            key_col = ct.columns[0]
+            val_col = ct.columns[1]
+            for row in ct.rows:
+                if isinstance(row, dict) and str(row.get(key_col, '')) == val:
+                    return str(row.get(val_col, ''))
+            # 未命中，返回默认值
+            return str(args[2]) if len(args) > 2 else val
+
+    # 回退：旧版映射串逻辑（向后兼容）
     mapping = {}
     for pair in mapping_str.split(';'):
         pair = pair.strip()
@@ -91,6 +107,123 @@ def func_map_value(args, ctx):
     if val in mapping:
         return mapping[val]
     return str(args[2]) if len(args) > 2 else val
+
+
+@register_function('MAP_ORDER', 3, 20,
+    'MAP_ORDER(值, "配置表编码1", ..., ["默认值"]) — 单值级联查多张配置表。'
+    'MAP_ORDER(文本, "分隔符", "位置1,2,...", "配置表编码1", ..., ["默认值"]) — 单字段多位置：依次取各段查表。'
+    'MAP_ORDER(文本1+分隔符+文本2, "分隔符", "位置1,2/位置3,4", "配置表编码1", ..., ["默认值"]) — 多字段多位置："/"分隔不同字段的位罝组',
+    category='技术函数')
+def func_map_order(args, ctx):
+    """按顺序级联配置表查找，支持单值模式和多位置模式。
+
+    单值模式: MAP_ORDER(值, 表编码1, 表编码2, ..., [默认值])
+    多位置模式: MAP_ORDER(文本, "分隔符", "位置1,2,...", 表编码1, ..., [默认值])
+      - 按分隔符拆分文本，依次取各位置段，每段查所有表，命中即返回
+      - 位置组用 "/" 分隔表示多个字段："5,6,7/3,4" = 字段1取5/6/7段，字段2取3/4段
+      - 文本也用 "/" 分隔多个字段，与位置组一一对应
+    """
+    domain_id = ctx.get('__domain_id__')
+    if not domain_id:
+        return ''
+
+    from .models import ConfigTable
+
+    # 检测多位置模式：第2参数是短字符串（分隔符）且第3参数含数字（逗号/斜杠分隔）
+    # 最少 5 参数：文本 + 分隔符 + 位置 + 至少1表编码 + 默认值
+    is_multi = (
+        len(args) >= 5
+        and len(str(args[1])) <= 3
+        and re.match(r'^\d+([,/]\d+)*$', str(args[2]).strip())
+    )
+
+    if is_multi:
+        # 多位置模式
+        full_text = '' if args[0] is None else str(args[0])
+        delimiter = str(args[1])
+        positions_str = str(args[2]).strip()
+
+        # 解析位置组："/" 分隔不同字段的位置
+        position_groups = []
+        for group in positions_str.split('/'):
+            positions = [int(x.strip()) for x in group.split(',') if x.strip()]
+            if positions:
+                position_groups.append(positions)
+
+        # 文本也用 "/" 分隔多个字段，与位置组一一对应
+        # 如果没有 "/"，整个文本作为唯一字段
+        if '/' in full_text and len(position_groups) > 1:
+            field_texts = full_text.split('/')
+        else:
+            field_texts = [full_text]
+
+        # 解析剩余参数：配置表编码 + 可选默认值
+        remaining = [str(a) for a in args[3:]]
+        table_codes, default_val = _parse_table_codes(remaining, domain_id)
+
+        # 依次处理每个字段
+        for i, field_text in enumerate(field_texts):
+            # 取该字段对应的位置组（如果超出位置组数量，用最后一个）
+            group_idx = min(i, len(position_groups) - 1)
+            positions = position_groups[group_idx]
+            parts = field_text.split(delimiter)
+            # 依次取各段，查所有表
+            for pos in positions:
+                if 1 <= pos <= len(parts):
+                    val = parts[pos - 1]
+                    result = _lookup_tables(val, table_codes, domain_id)
+                    if result is not None:
+                        return result
+        return default_val
+
+    # 单值模式（原始行为）
+    val = '' if args[0] is None else str(args[0])
+    all_codes = [str(a) for a in args[1:]]
+    table_codes, default_val = _parse_table_codes(all_codes, domain_id)
+
+    result = _lookup_tables(val, table_codes, domain_id)
+    if result is not None:
+        return result
+    return default_val
+
+
+def _parse_table_codes(codes, domain_id):
+    """从参数列表中分离配置表编码和默认值。
+
+    最后一个参数如果不是已注册的配置表编码，则视为默认值。
+    返回 (table_codes, default_val)。
+    """
+    from .models import ConfigTable
+    codes = list(codes)
+    default_val = ''
+    if len(codes) >= 2:
+        last = codes[-1]
+        exists = ConfigTable.objects.filter(
+            domain_id=domain_id, code=last, status='active'
+        ).exists()
+        if not exists:
+            default_val = last
+            codes = codes[:-1]
+    return codes, default_val
+
+
+def _lookup_tables(val, table_codes, domain_id):
+    """在指定配置表列表中查找值，命中返回结果，全部未命中返回 None。"""
+    from .models import ConfigTable
+    for code in table_codes:
+        ct = ConfigTable.objects.filter(
+            domain_id=domain_id, code=code, status='active'
+        ).first()
+        if not ct or not isinstance(ct.columns, list) or len(ct.columns) < 2:
+            continue
+        if not isinstance(ct.rows, list):
+            continue
+        key_col = ct.columns[0]
+        val_col = ct.columns[1]
+        for row in ct.rows:
+            if isinstance(row, dict) and str(row.get(key_col, '')) == val:
+                return str(row.get(val_col, ''))
+    return None
 
 
 @register_function('HASH_MD5', 1, 2, 'HASH_MD5(文本, [长度]) — 生成MD5摘要（小写16进制），可截取前N位，常用于迁移对账', category='技术函数')

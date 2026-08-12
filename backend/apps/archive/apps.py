@@ -54,12 +54,35 @@ class ArchiveConfig(AppConfig):
                             logger.error(f'档案 {archive.id} 自动刷新失败: {e}')
                 except Exception as e:
                     logger.error(f'档案自动刷新循环异常: {e}')
+                # v19：调用日志 90 天保留清理（搭车刷新循环，失败不影响主流程）
+                try:
+                    from .open_api_auth import cleanup_old_logs
+                    deleted = cleanup_old_logs(retention_days=90)
+                    if deleted:
+                        logger.info(f'API 调用日志清理：删除 {deleted} 条超 90 天记录')
+                except Exception as e:
+                    logger.error(f'API 调用日志清理异常: {e}')
+                # 配置表自动同步（搭车刷新循环）
+                try:
+                    from apps.modeling.models import ConfigTable
+                    from apps.modeling.views import _sync_config_table
+                    config_tables = ConfigTable.objects.filter(
+                        data_source__isnull=False,
+                        status='active',
+                    ).exclude(sync_sql='')
+                    for ct in config_tables.select_related('domain', 'data_source'):
+                        try:
+                            result = _sync_config_table(ct)
+                            logger.info(
+                                f'配置表 {ct.domain.name}/{ct.name}({ct.code}) '
+                                f'自动同步: {result["row_count"]} 行'
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f'配置表 {ct.domain.name}/{ct.name}({ct.code}) '
+                                f'自动同步失败: {e}'
+                            )
+                except Exception as e:
+                    logger.error(f'配置表自动同步异常: {e}')
 
         threading.Thread(target=_loop, name='archive-auto-refresh', daemon=True).start()
-from django.apps import AppConfig
-
-
-class ArchiveConfig(AppConfig):
-    default_auto_field = 'django.db.models.BigAutoField'
-    name = 'apps.archive'
-    verbose_name = '档案维护'

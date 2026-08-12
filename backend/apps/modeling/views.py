@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from django.db import models
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
-from .models import DataSource, Domain, Table, FieldGroup, Field, FieldOption, FieldMapping, StandardField, AIConfig, ComputedField
+from .models import DataSource, Domain, Table, FieldGroup, Field, FieldOption, FieldMapping, StandardField, AIConfig, ComputedField, ConfigTable, DetailTableConfig
 from . import ai_service
 from .serializers import (
     DataSourceSerializer,
@@ -18,6 +18,8 @@ from .serializers import (
     StandardFieldAggregateSerializer,
     AIConfigSerializer,
     ComputedFieldSerializer,
+    ConfigTableSerializer,
+    DetailTableConfigSerializer,
 )
 from .distinct_cache import (
     ENGINE_MAP,
@@ -323,6 +325,249 @@ class DataSourceViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+    @action(detail=True, methods=['post'], url_path='execute-query')
+    def execute_query(self, request, pk=None):
+        """执行只读 SQL 查询（安全限制：仅 SELECT、超时 30s、行数上限 10000）"""
+        from django.db import connections
+        import re
+        ds = self.get_object()
+        sql = request.data.get('sql', '').strip()
+        if not sql:
+            return Response({'error': 'SQL 不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+        # 安全检查：只允许 SELECT
+        sql_upper = sql.upper().strip()
+        if not sql_upper.startswith('SELECT'):
+            return Response({'error': '只允许 SELECT 查询'}, status=status.HTTP_400_BAD_REQUEST)
+        # 禁止危险关键字
+        dangerous = re.findall(r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|EXEC|EXECUTE)\b', sql_upper)
+        if dangerous:
+            return Response(
+                {'error': f'禁止包含以下关键字: {", ".join(set(dangerous))}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        max_rows = min(int(request.data.get('max_rows', 10000)), 10000)
+        alias = None
+        try:
+            alias = f'_eq_{ds.id}'
+            from .distinct_cache import ENGINE_MAP
+            engine = ENGINE_MAP.get(ds.db_type)
+            if not engine:
+                return Response({'error': f'不支持的数据库类型: {ds.db_type}'}, status=400)
+            db_config = {
+                'ENGINE': engine,
+                'NAME': ds.db_name,
+                'HOST': ds.host,
+                'PORT': str(ds.port),
+                'USER': ds.username,
+                'PASSWORD': ds.password,
+                'ATOMIC_REQUESTS': False,
+                'AUTOCOMMIT': True,
+                'TIME_ZONE': None,
+                'CONN_MAX_AGE': 0,
+                'CONN_HEALTH_CHECKS': False,
+                'OPTIONS': {},
+            }
+            if ds.db_type == 'oracle':
+                db_config['OPTIONS'] = {'service_name': ds.db_name}
+            elif ds.db_type == 'sqlserver':
+                db_config['OPTIONS'] = {
+                    'driver': 'ODBC Driver 18 for SQL Server',
+                    'extra_params': 'Encrypt=no',
+                }
+            connections.databases[alias] = db_config
+            conn = connections[alias]
+            conn.ensure_connection()
+            # 超时设置在独立 cursor 中执行，避免影响主查询
+            with conn.cursor() as timeout_cursor:
+                if ds.db_type == 'postgresql':
+                    timeout_cursor.execute("SET statement_timeout = '30s'")
+                elif ds.db_type == 'mysql':
+                    timeout_cursor.execute("SET SESSION MAX_EXECUTION_TIME=30000")
+            with conn.cursor() as cursor:
+                cursor.execute(sql)
+                columns = [col[0] for col in cursor.description]
+                rows_raw = cursor.fetchmany(max_rows)
+                from decimal import Decimal
+                from datetime import date, datetime
+                rows = []
+                for row in rows_raw:
+                    safe_row = {}
+                    for i, val in enumerate(row):
+                        if isinstance(val, Decimal):
+                            val = float(val)
+                        elif isinstance(val, (date, datetime)):
+                            val = val.isoformat()
+                        safe_row[columns[i]] = val
+                    rows.append(safe_row)
+                return Response({
+                    'columns': columns,
+                    'rows': rows,
+                    'row_count': len(rows),
+                    'truncated': len(rows) >= max_rows,
+                })
+        except Exception as e:
+            return Response(
+                {'error': f'查询执行失败: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        finally:
+            if alias:
+                connections.databases.pop(alias, None)
+
+
+def _find_dup_unmerged_field_groups(domain):
+    """扫描域内已维护到档案的字段，返回同名未归并到同一标准字段的字段组。
+
+    口径单一事实源（域配置检查 P1-4 与 dup-fields 接口共用）：
+    - 范围仅档案字段（archive_category='base'，与第一百零八轮「配置检查仅档案字段」决策对齐）；
+      未分配/未分组字段不参与检查
+    - 同一物理列 code 存在于 ≥2 张活跃表
+    - 且未全部挂靠同一个 StandardField（无挂靠/挂靠不一致）
+    - 豁免：主键字段（跨表记录匹配结构性必需）、release_to_concept=False 字段（已排除）
+    返回：[{code, table_names, field_ids}]，按 code 排序
+    """
+    by_code = {}
+    fields = Field.objects.filter(
+        table__domain=domain, table__status='active', status='active',
+        archive_category='base',
+        is_primary_key=False, release_to_concept=True,
+    ).select_related('table').order_by('table_id', 'id')
+    for f in fields:
+        phys = f.code or f.name
+        if phys:
+            by_code.setdefault(phys, []).append(f)
+    groups = []
+    for code, fs in by_code.items():
+        if len({f.table_id for f in fs}) < 2:
+            continue
+        sf_ids = {f.standard_field_id for f in fs}
+        # 已归并 = 全部挂靠同一个标准字段
+        if len(sf_ids) == 1 and None not in sf_ids:
+            continue
+        groups.append({
+            'code': code,
+            'table_names': sorted({f.table.name for f in fs}),
+            'field_ids': [f.id for f in fs],
+        })
+    groups.sort(key=lambda g: g['code'])
+    return groups
+
+
+def _check_domain_config(domain):
+    """域配置完整性检查，返回 9 项检查结果清单。
+
+    每项：{key, label, level, status: 'pass'/'warn'/'fail', message}
+    level: P0（阻断启用）/ P1（警告）/ P2（建议）
+    """
+    checks = []
+    tables = Table.objects.filter(domain=domain, status='active')
+    primary_table = domain.get_primary_table()
+
+    # P0-1: 有主表
+    checks.append({
+        'key': 'has_primary_table', 'label': '已设置主表', 'level': 'P0',
+        'status': 'pass' if primary_table else 'fail',
+        'message': '' if primary_table else '域下没有设置主表（is_primary=True）',
+    })
+
+    # P0-2: 主表有主键
+    if primary_table:
+        pk_count = Field.objects.filter(table=primary_table, is_primary_key=True, status='active').count()
+        checks.append({
+            'key': 'primary_table_has_pk', 'label': '主表已设主键', 'level': 'P0',
+            'status': 'pass' if pk_count > 0 else 'fail',
+            'message': '' if pk_count > 0 else f'主表「{primary_table.name}」没有设置主键字段',
+        })
+    else:
+        checks.append({
+            'key': 'primary_table_has_pk', 'label': '主表已设主键', 'level': 'P0',
+            'status': 'fail', 'message': '无主表，无法检查主键',
+        })
+
+    # P0-3: 所有 active Field 的 code 非空
+    empty_code_fields = Field.objects.filter(
+        table__domain=domain, table__status='active', status='active'
+    ).filter(Q(code='') | Q(code__isnull=True))
+    ec_count = empty_code_fields.count()
+    checks.append({
+        'key': 'fields_code_nonempty', 'label': '字段编码非空', 'level': 'P0',
+        'status': 'fail' if ec_count > 0 else 'pass',
+        'message': f'{ec_count} 个活跃字段的编码为空' if ec_count else '',
+    })
+
+    # P0-4: 标准字段编码唯一性（已有唯一约束，此处检查同域内）
+    from django.db.models import Count
+    dup_codes = StandardField.objects.filter(
+        domain=domain, status='active'
+    ).values('standard_code').annotate(cnt=Count('id')).filter(cnt__gt=1)
+    dup_count = dup_codes.count()
+    checks.append({
+        'key': 'standard_code_unique', 'label': '标准字段编码唯一', 'level': 'P0',
+        'status': 'fail' if dup_count > 0 else 'pass',
+        'message': f'{dup_count} 个标准编码重复' if dup_count else '',
+    })
+
+    # P1-1: 所有 active StandardField 有有效 primary_field
+    active_sfs = StandardField.objects.filter(
+        domain=domain, status='active', is_active=True
+    ).prefetch_related('members')
+    missing_pf = []
+    for sf in active_sfs:
+        if sf.members.count() > 1 and not sf.primary_field_id:
+            missing_pf.append(sf.standard_code)
+    checks.append({
+        'key': 'composite_has_primary_field', 'label': '组合字段已设主字段', 'level': 'P1',
+        'status': 'fail' if missing_pf else 'pass',
+        'message': f'{len(missing_pf)} 个组合字段未设主字段：{", ".join(missing_pf[:5])}' if missing_pf else '',
+    })
+
+    # P1-2: 档案字段的编码和名称不完全相同（仅检查 archive_category='base' 的档案字段，不含组合字段）
+    same_code_name = Field.objects.filter(
+        table__domain=domain, table__status='active', status='active',
+        archive_category='base',
+    ).filter(Q(code=models.F('name')))
+    sn_count = same_code_name.count()
+    checks.append({
+        'key': 'field_code_name_differ', 'label': '档案字段编码与名称有区分', 'level': 'P1',
+        'status': 'warn' if sn_count > 0 else 'pass',
+        'message': f'{sn_count} 个档案字段的编码和名称完全相同（建议区分语义）' if sn_count else '',
+    })
+
+    # P1-3: 源类型表已关联数据源
+    source_no_ds = Table.objects.filter(
+        domain=domain, status='active', type='source', data_source__isnull=True
+    )
+    sds_count = source_no_ds.count()
+    checks.append({
+        'key': 'source_table_has_datasource', 'label': '数据源表已配置数据源', 'level': 'P1',
+        'status': 'warn' if sds_count > 0 else 'pass',
+        'message': f'{sds_count} 个数据源表未关联数据源配置' if sds_count else '',
+    })
+
+    # P2-1: 多表域有字段映射
+    table_count = tables.count()
+    has_mappings = FieldMapping.objects.filter(source_table__domain=domain).exists()
+    checks.append({
+        'key': 'multi_table_has_mappings', 'label': '多表已配置关系映射', 'level': 'P2',
+        'status': 'pass' if table_count < 2 or has_mappings else 'warn',
+        'message': f'{table_count} 个表但未配置任何字段映射关系' if table_count >= 2 and not has_mappings else '',
+    })
+
+    # P1-4: 多表同名未归并字段（BUG-2026-0805-01 遗留建议：同名未映射列曾偷渡写入造成假变更风暴）
+    dup_groups = _find_dup_unmerged_field_groups(domain)
+    checks.append({
+        'key': 'multi_table_dup_field_merged', 'label': '多表同名字段已归并', 'level': 'P1',
+        'status': 'warn' if dup_groups else 'pass',
+        'message': (
+            f'{len(dup_groups)} 组同名字段存在于多张表但未归并到同一标准字段：'
+            + '；'.join(f'{g["code"]}（{"、".join(g["table_names"])}）' for g in dup_groups[:5])
+            + ('…' if len(dup_groups) > 5 else '')
+            + '。请归并到同一标准字段，或将多余列设为不释放到概念层，避免同名空列偷渡写入造成假变更'
+        ) if dup_groups else '',
+    })
+
+    return checks
+
 
 class DomainViewSet(viewsets.ModelViewSet):
     """域管理 API"""
@@ -334,6 +579,44 @@ class DomainViewSet(viewsets.ModelViewSet):
         if self.action == 'list':
             return DomainSerializer
         return DomainDetailSerializer
+
+    def perform_update(self, serializer):
+        """状态变更为 active 时前置 P0 检查"""
+        instance = self.get_object()
+        new_status = self.request.data.get('status')
+        if new_status == 'active' and instance.status != 'active':
+            checks = _check_domain_config(instance)
+            p0_fails = [c for c in checks if c['level'] == 'P0' and c['status'] == 'fail']
+            if p0_fails:
+                from rest_framework.exceptions import ValidationError
+                msgs = [c['message'] for c in p0_fails if c['message']]
+                raise ValidationError(f'配置不完整，无法启用：{"；".join(msgs)}')
+        serializer.save()
+
+    @action(detail=True, methods=['get'], url_path='check-config')
+    def check_config(self, request, pk=None):
+        """域配置完整性检查：返回 9 项检查结果 + 汇总状态"""
+        domain = self.get_object()
+        checks = _check_domain_config(domain)
+        p0_fails = [c for c in checks if c['level'] == 'P0' and c['status'] == 'fail']
+        p1_warns = [c for c in checks if c['level'] in ('P1',) and c['status'] in ('warn', 'fail')]
+        p2_warns = [c for c in checks if c['level'] == 'P2' and c['status'] == 'warn']
+        return Response({
+            'checks': checks,
+            'can_enable': not p0_fails,
+            'p0_fail_count': len(p0_fails),
+            'p1_warn_count': len(p1_warns),
+            'p2_warn_count': len(p2_warns),
+        })
+
+    @action(detail=True, methods=['get'], url_path='dup-fields')
+    def dup_fields(self, request, pk=None):
+        """多表同名未归并字段清单（字段属性配置页标记展示用）。
+
+        口径与域配置检查 P1-4 同源（_find_dup_unmerged_field_groups）。
+        """
+        domain = self.get_object()
+        return Response({'groups': _find_dup_unmerged_field_groups(domain)})
 
     @action(detail=True, methods=['get'], url_path='pk-status')
     def pk_status(self, request, pk=None):
@@ -517,6 +800,7 @@ class TableViewSet(viewsets.ModelViewSet):
                     table=table,
                     name=col_name,
                     code=col_name,
+                    physical_name=col_name,
                     comment=str(col_comment) if col_comment else '',
                     field_type=field_type,
                     length=col_length,
@@ -1481,6 +1765,169 @@ class StandardFieldViewSet(viewsets.ModelViewSet):
             })
         return Response({'members': data})
 
+    @action(detail=True, methods=['post'], url_path='rename')
+    def rename(self, request, pk=None):
+        """组合字段改名：更新 standard_code 和/或 standard_name，级联更新所有引用。
+
+        请求体：{"new_code": "...", "new_name": "..."}（至少填一个）
+        级联：schema → ArchiveRecord.data/source_data/manual_data key → ConsistencyIssue.field_code
+        """
+        sf = self.get_object()
+        new_code = (request.data.get('new_code') or '').strip()
+        new_name = request.data.get('new_name')
+        old_code = sf.standard_code
+        old_name = sf.standard_name
+
+        if not new_code and new_name is None:
+            return Response({'error': 'new_code 或 new_name 至少填一个'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 编码变更：唯一性检查 + 级联更新
+        code_changed = bool(new_code) and new_code != old_code
+        if code_changed:
+            # 同域唯一性检查
+            if StandardField.objects.filter(domain=sf.domain, standard_code=new_code).exclude(pk=sf.pk).exists():
+                return Response({'error': f'编码「{new_code}」在同域下已被其他标准字段使用'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 执行改名
+        update_fields = []
+        if code_changed:
+            sf.standard_code = new_code
+            update_fields.append('standard_code')
+        if new_name is not None and new_name != old_name:
+            sf.standard_name = new_name[:200]
+            update_fields.append('standard_name')
+        if update_fields:
+            sf.save(update_fields=update_fields)
+
+        # 级联更新（仅当 code 变更时）
+        cascade_stats = {'archives_updated': 0, 'records_updated': 0, 'consistency_issues_updated': 0}
+        if code_changed:
+            from apps.archive.models import Archive, ArchiveRecord, ConsistencyIssue as CI
+
+            archives = Archive.objects.filter(domain=sf.domain)
+            for archive in archives:
+                schema = archive.schema or []
+                schema_changed = False
+                for item in schema:
+                    if item.get('code') == old_code:
+                        item['code'] = new_code
+                        schema_changed = True
+                if schema_changed:
+                    archive.schema = schema
+                    archive.save(update_fields=['schema'])
+                    cascade_stats['archives_updated'] += 1
+
+                # 更新档案记录 data/source_data/manual_data 中的 key
+                records = ArchiveRecord.objects.filter(archive=archive)
+                updated_count = 0
+                for rec in records:
+                    rec_changed = False
+                    for layer in ('data', 'source_data', 'manual_data'):
+                        layer_data = getattr(rec, layer) or {}
+                        if old_code in layer_data:
+                            layer_data[new_code] = layer_data.pop(old_code)
+                            setattr(rec, layer, layer_data)
+                            rec_changed = True
+                    if rec_changed:
+                        rec.save(update_fields=['data', 'source_data', 'manual_data'])
+                        updated_count += 1
+                cascade_stats['records_updated'] += updated_count
+
+                # 更新一致性检查记录
+                ci_updated = CI.objects.filter(
+                    archive=archive, field_code=old_code
+                ).update(field_code=new_code)
+                cascade_stats['consistency_issues_updated'] += ci_updated
+
+        return Response({
+            'ok': True,
+            'old_code': old_code, 'new_code': sf.standard_code,
+            'old_name': old_name, 'new_name': sf.standard_name,
+            'cascade': cascade_stats,
+        })
+
+    @action(detail=False, methods=['post'], url_path='rename-solo')
+    def rename_solo(self, request):
+        """独立字段（solo）改名：更新物理 Field 的 code 和/或 name，级联更新所有引用。
+
+        请求体：{"field_id": N, "new_code": "...", "new_name": "..."}
+        """
+        field_id = request.data.get('field_id')
+        new_code = (request.data.get('new_code') or '').strip()
+        new_name = request.data.get('new_name')
+        if not field_id:
+            return Response({'error': 'field_id 必填'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            field = Field.objects.get(id=field_id, status=Field.Status.ACTIVE)
+        except Field.DoesNotExist:
+            return Response({'error': '字段不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        old_code = field.code
+        old_name = field.comment or field.name
+
+        if not new_code and new_name is None:
+            return Response({'error': 'new_code 或 new_name 至少填写一个'}, status=status.HTTP_400_BAD_REQUEST)
+
+        code_changed = bool(new_code) and new_code != old_code
+        if code_changed:
+            # 同表唯一性检查
+            if Field.objects.filter(table=field.table, code=new_code, status=Field.Status.ACTIVE).exclude(pk=field.pk).exists():
+                return Response({'error': f'编码「{new_code}」在同表下已被使用'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 执行改名
+        if code_changed:
+            field.code = new_code
+            field.save(update_fields=['code'])
+        if new_name is not None and new_name != old_name:
+            field.comment = new_name[:200]
+            field.save(update_fields=['comment'])
+
+        # 级联更新（仅当 code 变更时）
+        cascade_stats = {'archives_updated': 0, 'records_updated': 0, 'consistency_issues_updated': 0}
+        if code_changed:
+            from apps.archive.models import Archive, ArchiveRecord, ConsistencyIssue as CI
+
+            domain = field.table.domain
+            archives = Archive.objects.filter(domain=domain)
+            for archive in archives:
+                schema = archive.schema or []
+                schema_changed = False
+                for item in schema:
+                    if item.get('code') == old_code:
+                        item['code'] = new_code
+                        schema_changed = True
+                if schema_changed:
+                    archive.schema = schema
+                    archive.save(update_fields=['schema'])
+                    cascade_stats['archives_updated'] += 1
+
+                records = ArchiveRecord.objects.filter(archive=archive)
+                updated_count = 0
+                for rec in records:
+                    rec_changed = False
+                    for layer in ('data', 'source_data', 'manual_data'):
+                        layer_data = getattr(rec, layer) or {}
+                        if old_code in layer_data:
+                            layer_data[new_code] = layer_data.pop(old_code)
+                            setattr(rec, layer, layer_data)
+                            rec_changed = True
+                    if rec_changed:
+                        rec.save(update_fields=['data', 'source_data', 'manual_data'])
+                        updated_count += 1
+                cascade_stats['records_updated'] += updated_count
+
+                ci_updated = CI.objects.filter(
+                    archive=archive, field_code=old_code
+                ).update(field_code=new_code)
+                cascade_stats['consistency_issues_updated'] += ci_updated
+
+        return Response({
+            'ok': True,
+            'old_code': old_code, 'new_code': field.code,
+            'old_name': old_name, 'new_name': field.comment or field.name,
+            'cascade': cascade_stats,
+        })
+
 
 class AIConfigViewSet(viewsets.ModelViewSet):
     """AI 服务配置 API（系统设置，单例语义）。
@@ -1524,10 +1971,82 @@ class AIConfigViewSet(viewsets.ModelViewSet):
         ok, message = ai_service.test_connection(cfg=cfg)
         return Response({'ok': ok, 'message': message},
                         status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST)
+class DetailTableConfigViewSet(viewsets.ModelViewSet):
+    """明细子表注册配置 API（2026-08-11 交互改造「先注册后挂载」；第三轮扩展预组合）。"""
+    queryset = DetailTableConfig.objects.select_related(
+        'domain', 'table', 'header_table', 'header_link_field', 'detail_link_field',
+        'row_key_field', 'display_sort_field'
+    ).all()
+    serializer_class = DetailTableConfigSerializer
+    filterset_fields = ['domain', 'table']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        domain_id = self.request.query_params.get('domain')
+        if domain_id:
+            qs = qs.filter(domain_id=domain_id)
+        return qs
+
+    @action(detail=False, methods=['post'], url_path='detect-header-link')
+    def detect_header_link(self, request):
+        """自动检测头表↔明细表关联字段（2026-08-11 第三轮）：同名/同码列优先，
+        PK 列优先（如头表 ID ↔ 明细 FID 后缀匹配）。"""
+        header_table_id = request.data.get('header_table')
+        detail_table_id = request.data.get('detail_table')
+        if not header_table_id or not detail_table_id:
+            return Response({'error': '需要 header_table 和 detail_table 参数'}, status=400)
+        try:
+            from .models import Field as MField
+            hf = MField.objects.filter(table_id=header_table_id, is_primary_key=True).first()
+            hf_code = (hf.code if hf else None) or ''
+            df = MField.objects.filter(table_id=detail_table_id).all()
+            # 1) 同名命中（头表 PK code 在明细表存在同名列）
+            for f in df:
+                if hf_code and f.code == hf_code:
+                    return Response({'header_link_field': hf.id, 'detail_link_field': f.id,
+                                     'matched_by': '同名'})
+            # 2) 后缀匹配：明细表 code 以 FID 结尾（ID→FID 模式）
+            if hf_code:
+                suffix = 'F' + hf_code  # ID → FID
+                for f in df:
+                    if f.code.upper() == suffix.upper():
+                        return Response({'header_link_field': hf.id, 'detail_link_field': f.id,
+                                         'matched_by': '后缀'})
+            # 3) 仅返回头表 PK 与明细表候选字段供手动选择
+            return Response({'header_link_field': hf.id if hf else None, 'detail_link_field': None,
+                             'matched_by': None,
+                             'note': '自动检测未命中，请在注册时手动选择关联字段'})
+        except Exception as e:
+            return Response({'error': f'检测失败: {e}'}, status=400)
+
+    @action(detail=True, methods=['post'], url_path='detect-row-key')
+    def detect_row_key(self, request, pk=None):
+        """自动检测明细子表行键列（复用 FieldMappingViewSet.detect_row_key 逻辑）。"""
+        cfg = self.get_object()
+        table = cfg.table
+        if not table.data_source:
+            return Response({'error': '表未配置数据源，无法检测'}, status=400)
+        from apps.archive.views import ArchiveViewSet
+        try:
+            viewset = ArchiveViewSet()
+            rows = viewset._query_external_table(table)
+            if rows is None:
+                return Response({'error': '无法连接数据源或表为空'}, status=400)
+            candidate = viewset._detect_unique_column(table, rows)
+            return Response({
+                'candidate': candidate,
+                'total_rows': len(rows),
+                'note': 'candidate=None 表示无唯一列，需手动指定或检查数据',
+            })
+        except Exception as e:
+            return Response({'error': f'检测失败: {e}'}, status=400)
 
 
 class FieldMappingViewSet(viewsets.ModelViewSet):
-    """字段映射 API"""
+    """字段映射 API
+
+    2026-08-11 扩展：detail-check action 用于检测存量 detail 映射的注册状态与方向异常。
+    """
     queryset = FieldMapping.objects.select_related(
         'source_table', 'source_field', 'target_table', 'target_field'
     ).all()
@@ -1546,6 +2065,112 @@ class FieldMappingViewSet(viewsets.ModelViewSet):
                 models.Q(target_table__domain_id=domain_id)
             )
         return qs
+
+    @action(detail=True, methods=['post'], url_path='detect-row-key')
+    def detect_row_key(self, request, pk=None):
+        """自动检测明细子表行键列（2026-08-08）：全量拉取 source_table 源数据，逐列统计唯一性
+        （无空值且 COUNT(DISTINCT)==总行数），优先已标主键列；复用同步引擎 _detect_unique_column。"""
+        from apps.archive.views import ArchiveViewSet
+
+        fm = self.get_object()
+        table = fm.source_table  # 子表关系：source_table 是明细致子表
+        if not table.data_source:
+            return Response({'error': '源表未配置数据源，无法检测'}, status=400)
+        try:
+            viewset = ArchiveViewSet()
+            rows = viewset._query_external_table(table)
+            if rows is None:
+                return Response({'error': '无法连接数据源或表为空'}, status=400)
+            candidate = viewset._detect_unique_column(table, rows)
+            return Response({
+                'candidate': candidate,
+                'total_rows': len(rows),
+                'column_count': len(rows[0]) if rows else 0,
+                'note': 'candidate=None 表示无唯一列，需手动指定或检查数据',
+            })
+        except Exception as e:
+            return Response({'error': f'检测失败: {e}'}, status=400)
+
+    @action(detail=False, methods=['post'], url_path='infer-mappings')
+    def infer_mappings(self, request):
+        """AI 推断表间字段映射关系。"""
+        domain_id = request.data.get('domain') or request.query_params.get('domain')
+        if not domain_id:
+            return Response({'error': '请提供域 ID'}, status=400)
+        try:
+            suggestions = ai_service.infer_mappings(int(domain_id))
+            # 补充表名和字段名供前端展示
+            from .models import Field, Table
+            field_cache = {}
+            table_cache = {}
+            for s in suggestions:
+                for key in ['source_field_id', 'target_field_id']:
+                    fid = s[key]
+                    if fid not in field_cache:
+                        f = Field.objects.filter(id=fid).select_related('table').first()
+                        if f:
+                            field_cache[fid] = {
+                                'field_code': f.code,
+                                'field_name': f.name or f.comment or f.code,
+                                'table_id': f.table_id,
+                                'table_name': f.table.name,
+                                'is_primary_key': f.is_primary_key,
+                            }
+                    if fid in field_cache:
+                        info = field_cache[fid]
+                        prefix = 'source' if 'source' in key else 'target'
+                        s[f'{prefix}_field_code'] = info['field_code']
+                        s[f'{prefix}_field_name'] = info['field_name']
+                        s[f'{prefix}_table_name'] = info['table_name']
+                        s[f'{prefix}_is_primary_key'] = info['is_primary_key']
+            return Response({'suggestions': suggestions, 'count': len(suggestions)})
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+    @action(detail=False, methods=['get'], url_path='detail-check')
+    def detail_check(self, request):
+        """存量检测（2026-08-11）：检查域内 detail 映射的注册状态与方向异常。
+        返回 {registered: [{id, source_table, target_table}],
+               unregistered: [{id, source_table, target_table, reason}],
+               suspect: [{id, source_table, target_table, reason}]}
+        """
+        domain_id = request.query_params.get('domain')
+        if not domain_id:
+            return Response({'error': '请提供 domain 参数'}, status=400)
+
+        registered = []
+        unregistered = []
+        suspect = []
+        detail_fms = FieldMapping.objects.filter(
+            source_table__domain_id=domain_id,
+            relation_type=FieldMapping.RelationType.DETAIL,
+        ).select_related('source_table', 'target_table', 'detail_config')
+
+        for fm in detail_fms:
+            entry = {'id': fm.id, 'source_table': fm.source_table.name, 'target_table': fm.target_table.name}
+            if fm.detail_config:
+                registered.append(entry)
+            else:
+                unregistered.append({**entry, 'reason': '未注册子表配置（请先注册再挂载）'})
+
+            # 方向异常检测：source_table 的字段是否有 is_primary_key 列可映射到档案主键
+            from .models import Field as MField
+            src_pk = MField.objects.filter(
+                table=fm.source_table, is_primary_key=True, status='active'
+            ).exists()  # 自身有主键列
+            has_pk_mapping = FieldMapping.objects.filter(
+                source_table=fm.source_table,
+                target_field__is_primary_key=True,
+                target_field__status='active',
+            ).exists()  # 经 FieldMapping 映射到其他表主键
+            if not (src_pk or has_pk_mapping):
+                suspect.append({**entry, 'reason': '方向可能反了（明细子表无法映射到档案主键，无归属主记录通道）'})
+
+        return Response({
+            'registered': registered,
+            'unregistered': unregistered,
+            'suspect': suspect,
+        })
 
 
 class ComputedFieldViewSet(viewsets.ModelViewSet):
@@ -1919,3 +2544,155 @@ class ComputedFieldViewSet(viewsets.ModelViewSet):
             })
 
         return Response({'fields': fields_out, 'computed_fields': computed_out})
+
+
+def _sync_config_table(table):
+    """执行配置表数据源同步（可被 ViewSet action 和管理命令共用）。
+
+    返回 {'row_count': N, 'columns': [...], 'source_columns': [...]}。
+    失败抛出异常。
+    """
+    from django.db import connections
+    from django.utils import timezone
+    from .distinct_cache import ENGINE_MAP
+    from decimal import Decimal
+    from datetime import date, datetime
+    import re
+
+    if not table.data_source:
+        raise ValueError('未配置数据源')
+    sql = table.sync_sql.strip()
+    if not sql:
+        raise ValueError('未配置同步SQL')
+    # 安全检查
+    sql_upper = sql.upper().strip()
+    if not sql_upper.startswith('SELECT'):
+        raise ValueError('只允许 SELECT 查询')
+    dangerous = re.findall(r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|EXEC|EXECUTE)\b', sql_upper)
+    if dangerous:
+        raise ValueError(f'禁止包含以下关键字: {", ".join(set(dangerous))}')
+
+    ds = table.data_source
+    alias = None
+    try:
+        alias = f'_ctsync_{ds.id}_{table.id}'
+        engine = ENGINE_MAP.get(ds.db_type)
+        if not engine:
+            raise ValueError(f'不支持的数据库类型: {ds.db_type}')
+        db_config = {
+            'ENGINE': engine,
+            'NAME': ds.db_name,
+            'HOST': ds.host,
+            'PORT': str(ds.port),
+            'USER': ds.username,
+            'PASSWORD': ds.password,
+            'ATOMIC_REQUESTS': False,
+            'AUTOCOMMIT': True,
+            'TIME_ZONE': None,
+            'CONN_MAX_AGE': 0,
+            'CONN_HEALTH_CHECKS': False,
+            'OPTIONS': {},
+        }
+        if ds.db_type == 'oracle':
+            db_config['OPTIONS'] = {'service_name': ds.db_name}
+        elif ds.db_type == 'sqlserver':
+            db_config['OPTIONS'] = {
+                'driver': 'ODBC Driver 18 for SQL Server',
+                'extra_params': 'Encrypt=no',
+            }
+        connections.databases[alias] = db_config
+        conn = connections[alias]
+        conn.ensure_connection()
+        with conn.cursor() as timeout_cursor:
+            if ds.db_type == 'postgresql':
+                timeout_cursor.execute("SET statement_timeout = '30s'")
+            elif ds.db_type == 'mysql':
+                timeout_cursor.execute("SET SESSION MAX_EXECUTION_TIME=30000")
+        with conn.cursor() as cursor:
+            cursor.execute(sql)
+            col_names = [col[0] for col in cursor.description]
+            rows_raw = cursor.fetchmany(10000)
+            rows = []
+            for row in rows_raw:
+                safe_row = {}
+                for i, val in enumerate(row):
+                    if isinstance(val, Decimal):
+                        val = float(val)
+                    elif isinstance(val, (date, datetime)):
+                        val = val.isoformat()
+                    safe_row[col_names[i]] = val
+                rows.append(safe_row)
+        # 写入配置表：前两列作为 Key-Value
+        if len(col_names) >= 2:
+            key_col = col_names[0]
+            val_col = col_names[1]
+            table.columns = ['Key', 'Value']
+            table.rows = [
+                {'Key': str(r.get(key_col, '')), 'Value': str(r.get(val_col, ''))}
+                for r in rows
+            ]
+        else:
+            table.columns = ['Key', 'Value']
+            table.rows = [
+                {'Key': str(r.get(col_names[0], '')), 'Value': ''}
+                for r in rows
+            ]
+        table.last_synced_at = timezone.now()
+        table.save(update_fields=['columns', 'rows', 'last_synced_at', 'updated_at'])
+        return {
+            'row_count': len(table.rows),
+            'columns': table.columns,
+            'source_columns': col_names,
+        }
+    finally:
+        if alias:
+            connections.databases.pop(alias, None)
+
+
+class ConfigTableViewSet(viewsets.ModelViewSet):
+    """配置表管理（域内轻量级查找表，供 MAP_VALUE 等函数引用）。
+
+    支持 CRUD + 行数据管理（rows action）。
+    """
+    serializer_class = ConfigTableSerializer
+
+    def get_queryset(self):
+        qs = ConfigTable.objects.all()
+        domain_id = self.request.query_params.get('domain')
+        if domain_id:
+            qs = qs.filter(domain_id=domain_id)
+        category = self.request.query_params.get('category')
+        if category:
+            qs = qs.filter(category=category)
+        return qs.order_by('-created_at')
+
+    @action(detail=True, methods=['get', 'put'], url_path='rows')
+    def rows(self, request, pk=None):
+        """配置表行数据管理：GET 读取 / PUT 全量替换。"""
+        table = self.get_object()
+        if request.method == 'GET':
+            return Response({'columns': table.columns, 'rows': table.rows})
+        # PUT: 全量替换行数据
+        new_rows = request.data.get('rows')
+        if not isinstance(new_rows, list):
+            return Response({'success': False, 'error': 'rows 必须是数组'}, status=400)
+        table.rows = new_rows
+        table.save(update_fields=['rows', 'updated_at'])
+        return Response({'columns': table.columns, 'rows': table.rows})
+
+    @action(detail=True, methods=['post'], url_path='sync')
+    def sync(self, request, pk=None):
+        """从数据源同步数据到配置表：执行 sync_sql 并将结果写入 columns/rows。"""
+        table = self.get_object()
+        try:
+            result = _sync_config_table(table)
+            return Response({
+                'success': True,
+                'columns': table.columns,
+                'rows': table.rows,
+                'row_count': result['row_count'],
+                'last_synced_at': table.last_synced_at.isoformat(),
+                'source_columns': result['source_columns'],
+            })
+        except Exception as e:
+            return Response({'error': f'同步失败: {str(e)}'}, status=400)

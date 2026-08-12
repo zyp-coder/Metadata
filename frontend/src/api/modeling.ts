@@ -22,6 +22,9 @@ export const dataSourceApi = {
     }),
   testConnection: (id: number) => api.get<{ success: boolean; message?: string; error?: string }>(`/data-sources/${id}/test-connection/`),
   testConnectionParams: (data: Partial<DataSource>) => api.post<{ success: boolean; message?: string; error?: string }>('/data-sources/test-connection/', data),
+  executeQuery: (id: number, sql: string, maxRows?: number) => api.post<{
+    columns: string[]; rows: Record<string, any>[]; row_count: number; truncated: boolean;
+  }>(`/data-sources/${id}/execute-query/`, { sql, max_rows: maxRows }),
 }
 
 // 域管理
@@ -31,6 +34,11 @@ export const domainApi = {
   create: (data: Partial<Domain>) => api.post<Domain>('/domains/', data),
   update: (id: number, data: Partial<Domain>) => api.put<Domain>(`/domains/${id}/`, data),
   delete: (id: number) => api.delete(`/domains/${id}/`),
+  patch: (id: number, data: Partial<Domain>) => api.patch<Domain>(`/domains/${id}/`, data),
+  checkConfig: (id: number) => api.get<{
+    checks: { key: string; label: string; level: string; status: string; message: string }[];
+    can_enable: boolean; p0_fail_count: number; p1_warn_count: number; p2_warn_count: number;
+  }>(`/domains/${id}/check-config/`),
   pkStatus: (id: number) => api.get<{
     tables: {
       table_id: number; table_code: string; table_name: string;
@@ -39,6 +47,9 @@ export const domainApi = {
     }[];
     all_configured: boolean; total: number; configured_count: number;
   }>(`/domains/${id}/pk-status/`),
+  dupFields: (id: number) => api.get<{
+    groups: { code: string; table_names: string[]; field_ids: number[] }[];
+  }>(`/domains/${id}/dup-fields/`),
 }
 
 // 表管理
@@ -222,6 +233,12 @@ export const standardFieldApi = {
   // 设置主字段：fieldId=null 清除人工指定并按主表自动重分配
   setPrimaryField: (id: number, fieldId: number | null) =>
     api.post<StandardFieldModel>(`/standard-fields/${id}/set-primary-field/`, { field_id: fieldId }),
+  rename: (id: number, data: { new_code?: string; new_name?: string }) =>
+    api.post<{ ok: boolean; old_code: string; new_code: string; old_name: string; new_name: string; cascade: any }>(
+      `/standard-fields/${id}/rename/`, data),
+  renameSolo: (data: { field_id: number; new_code?: string; new_name?: string }) =>
+    api.post<{ ok: boolean; old_code: string; new_code: string; old_name: string; new_name: string; cascade: any }>(
+      '/standard-fields/rename-solo/', data),
 }
 
 // 字段分类计数
@@ -450,9 +467,81 @@ export const fieldOptionApi = {
   delete: (id: number) => api.delete(`/field-options/${id}/`),
 }
 
+// 明细子表注册
+import type { DetailTableConfig } from '@/types'
+
+export const detailConfigApi = {
+  list: (params?: any) => api.get<PaginatedResponse<DetailTableConfig>>('/detail-configs/', { params: withFullPage(params) }),
+  create: (data: Partial<DetailTableConfig>) => api.post<DetailTableConfig>('/detail-configs/', data),
+  update: (id: number, data: Partial<DetailTableConfig>) => api.patch<DetailTableConfig>(`/detail-configs/${id}/`, data),
+  delete: (id: number) => api.delete(`/detail-configs/${id}/`),
+  detectHeaderLink: (data: { header_table: number; detail_table: number }) =>
+    api.post<{ header_link_field?: number | null; detail_link_field?: number | null; matched_by?: string | null; note?: string }>(
+      `/detail-configs/detect-header-link/`, data),
+  detectRowKey: (id: number) =>
+    api.post<{ candidate: string; total_rows: number; note?: string }>(
+      `/detail-configs/${id}/detect-row-key/`, {}),
+}
+
 // 字段映射
 export const fieldMappingApi = {
   list: (params?: any) => api.get<PaginatedResponse<FieldMapping>>('/field-mappings/', { params: withFullPage(params) }),
   create: (data: Partial<FieldMapping>) => api.post<FieldMapping>('/field-mappings/', data),
+  update: (id: number, data: Partial<FieldMapping>) => api.patch<FieldMapping>(`/field-mappings/${id}/`, data),
   delete: (id: number) => api.delete(`/field-mappings/${id}/`),
+  detectRowKey: (id: number) =>
+    api.post<{ candidate: string; total_rows: number; column_count: number; note?: string }>(
+      `/field-mappings/${id}/detect-row-key/`, {}),
+  inferMappings: (domainId: number) =>
+    api.post<{
+      suggestions: {
+        source_table_id: number; source_field_id: number; source_table_name: string;
+        source_field_code: string; source_field_name: string; source_is_primary_key: boolean;
+        target_table_id: number; target_field_id: number; target_table_name: string;
+        target_field_code: string; target_field_name: string; target_is_primary_key: boolean;
+        confidence: number; reason: string;
+      }[];
+      count: number;
+    }>('/field-mappings/infer-mappings/', { domain: domainId }),
+  detailCheck: (domainId: number) =>
+    api.get<{
+      registered: { id: number; source_table: string; target_table: string }[]
+      unregistered: { id: number; source_table: string; target_table: string; reason: string }[]
+      suspect: { id: number; source_table: string; target_table: string; reason: string }[]
+    }>('/field-mappings/detail-check/', { params: { domain: domainId } }),
+}
+
+// 配置表
+export interface ConfigTable {
+  id: number
+  domain: number
+  domain_name: string
+  name: string
+  code: string
+  category: string
+  columns: string[]
+  rows: Record<string, any>[]
+  row_count: number
+  status: string
+  data_source: number | null
+  data_source_name: string
+  sync_sql: string
+  last_synced_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export const configTableApi = {
+  list: (params?: any) => api.get<PaginatedResponse<ConfigTable>>('/config-tables/', { params: withFullPage(params) }),
+  get: (id: number) => api.get<ConfigTable>(`/config-tables/${id}/`),
+  create: (data: Partial<ConfigTable>) => api.post<ConfigTable>('/config-tables/', data),
+  update: (id: number, data: Partial<ConfigTable>) => api.put<ConfigTable>(`/config-tables/${id}/`, data),
+  patch: (id: number, data: Partial<ConfigTable>) => api.patch<ConfigTable>(`/config-tables/${id}/`, data),
+  delete: (id: number) => api.delete(`/config-tables/${id}/`),
+  getRows: (id: number) => api.get<{ columns: string[]; rows: Record<string, any>[] }>(`/config-tables/${id}/rows/`),
+  updateRows: (id: number, rows: Record<string, any>[]) => api.put<{ columns: string[]; rows: Record<string, any>[] }>(`/config-tables/${id}/rows/`, { rows }),
+  sync: (id: number) => api.post<{
+    success: boolean; columns: string[]; rows: Record<string, any>[];
+    row_count: number; last_synced_at: string; source_columns: string[];
+  }>(`/config-tables/${id}/sync/`),
 }

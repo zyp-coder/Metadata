@@ -30,6 +30,27 @@ class Archive(models.Model):
         return f'{self.domain.name} - 档案'
 
 
+class ArchiveSchemaSnapshot(models.Model):
+    """Schema 版本快照历史（去重：一份 Schema 只存一次，版本快照通过 FK 引用）
+
+    每条记录对应一次 schema_version 变更时的完整字段结构快照。
+    ArchiveRecordVersion 通过 schema_version_ref 引用本表，避免 109 万条重复存储。
+    """
+    archive = models.ForeignKey(Archive, on_delete=models.CASCADE, related_name='schema_snapshots', verbose_name='所属档案')
+    schema_version = models.IntegerField('Schema 版本号')
+    schema = models.JSONField('Schema 快照', default=list, help_text='创建/同步模型时从 StandardField 生成的完整字段结构')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Schema 版本快照'
+        verbose_name_plural = 'Schema 版本快照'
+        unique_together = [('archive', 'schema_version')]
+        ordering = ['-schema_version']
+
+    def __str__(self):
+        return f'archive#{self.archive_id} schema_v{self.schema_version}'
+
+
 class ArchiveRecord(models.Model):
     """档案记录（主数据实例）"""
     class Status(models.TextChoices):
@@ -72,6 +93,50 @@ class ArchiveRecord(models.Model):
         return f'{self.archive.name}#{self.id}'
 
 
+class ArchiveRecordDetail(models.Model):
+    """档案记录明细行（子表关系 relation_type=detail 保留的全部行，双层存储同 ArchiveRecord）。
+
+    2026-08-08 方向锁定：明细子表保留全部 1:n 行（如价目明细 28），行身份=row_key（自动检测唯一列）；
+    source_data 源同步底层整层替换 + manual_data 人工覆盖层 + data 合并物化；
+    主表展示字段取代表行（display_sort DESC + row_key DESC 次级键，确定性可复现）。
+    """
+    class Status(models.TextChoices):
+        ACTIVE = 'active', '启用'
+        DELETED = 'deleted', '已删除'
+
+    record = models.ForeignKey('ArchiveRecord', on_delete=models.CASCADE, related_name='details',
+                               verbose_name='所属记录')
+    mapping = models.ForeignKey('modeling.FieldMapping', on_delete=models.SET_NULL, related_name='+',
+                                verbose_name='来源子表关系', null=True, blank=True,
+                                help_text='relation_type=detail 的字段映射；删除后明细保留但来源标记丢失')
+    row_key = models.CharField('行键值', max_length=200, blank=True, default='',
+                               help_text='行键列（row_key_field）的值，明细行身份')
+    source_data = models.JSONField('源同步底层', default=dict, blank=True,
+                                   help_text='schema code → 源值，同步时整层替换')
+    manual_data = models.JSONField('人工覆盖层', default=dict, blank=True,
+                                   help_text='人工修改的字段值，合并时覆盖底层')
+    data = models.JSONField('合并物化结果', default=dict, blank=True,
+                            help_text='source_data 为底 + manual_data 覆盖')
+    lineage = models.JSONField('字段血缘', default=dict, blank=True,
+                               help_text='每个字段值的来源与更新时间')
+    overrides = models.JSONField('修正保护标记', default=dict, blank=True)
+    status = models.CharField('状态', max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '档案记录明细'
+        verbose_name_plural = '档案记录明细'
+        unique_together = [('record', 'mapping', 'row_key')]
+        indexes = [
+            models.Index(fields=['record', 'mapping']),
+        ]
+        ordering = ['row_key']
+
+    def __str__(self):
+        return f'{self.record}#{self.row_key}'
+
+
 class ArchiveRecordVersion(models.Model):
     """版本快照"""
     class OperationType(models.TextChoices):
@@ -87,6 +152,10 @@ class ArchiveRecordVersion(models.Model):
     data = models.JSONField('该版本数据快照')
     # Schema 快照（用于追溯当时的字段结构）
     schema = models.JSONField('该版本 Schema 快照', blank=True, null=True)
+    # 优化：引用 ArchiveSchemaSnapshot 去重存储（一份 Schema 不存 109 万份）
+    schema_version_ref = models.ForeignKey('ArchiveSchemaSnapshot', on_delete=models.SET_NULL,
+                                           null=True, blank=True, related_name='versions',
+                                           verbose_name='Schema 版本快照引用')
     operated_by = models.CharField('操作人', max_length=100)
     operated_at = models.DateTimeField('操作时间', auto_now_add=True)
     operation_type = models.CharField('操作类型', max_length=20, choices=OperationType.choices)
@@ -152,6 +221,15 @@ class ArchiveApi(models.Model):
                                       help_text='字段 code 列表，空表示全部字段')
     # 筛选条件: [{"field":"code","operator":"eq/ne/gt/lt/contains","value":"x"}]
     filter_conditions = models.JSONField('筛选条件', default=list, blank=True)
+    # v19：对外网关路径段（/api/open/{slug}/），唯一；path 保留仅展示
+    slug = models.CharField('对外路径标识', max_length=100, unique=True, blank=True, null=True,
+                            help_text='对外网关路径段，如 store-master，生成 /api/open/store-master/')
+    # v19：允许的操作范围（read/create/update/delete 子集），默认只读
+    allowed_operations = models.JSONField('允许操作', default=list, blank=True,
+                                          help_text='read/create/update/delete 子集，默认 [read]')
+    # v19：限流（按密钥维度，每分钟调用次数上限，0=不限）
+    rate_limit_per_min = models.IntegerField('限流（次/分/密钥）', default=0,
+                                             help_text='按密钥维度每分钟调用上限，0=不限')
     # 角色/部门授权（名称字符串数组）
     auth_roles = models.JSONField('角色/部门授权', default=list, blank=True)
     status = models.CharField('状态', max_length=20, choices=Status.choices, default=Status.ENABLED)
@@ -169,6 +247,83 @@ class ArchiveApi(models.Model):
 
     def __str__(self):
         return f'{self.name} ({self.path})'
+
+
+class ApiKey(models.Model):
+    """API 密钥（v19，REQ-005）：mdm_+32位随机 hex，仅存 SHA-256 哈希，明文仅创建/轮换时返回一次"""
+    class Status(models.TextChoices):
+        ACTIVE = 'active', '启用'
+        REVOKED = 'revoked', '已吊销'
+
+    name = models.CharField('密钥名称', max_length=100)
+    key_prefix = models.CharField('密钥标识', max_length=12,
+                                  help_text='明文前缀，如 mdm_ab12****，仅展示用')
+    key_hash = models.CharField('密钥哈希', max_length=64, unique=True,
+                                help_text='SHA-256，明文不落库')
+    status = models.CharField('状态', max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    expires_at = models.DateTimeField('过期时间', blank=True, null=True,
+                                      help_text='空=永久有效')
+    revoked_at = models.DateTimeField('吊销时间', blank=True, null=True)
+    last_used_at = models.DateTimeField('最近调用时间', blank=True, null=True)
+    total_calls = models.IntegerField('累计调用次数', default=0)
+    created_by = models.CharField('创建人', max_length=100, blank=True, default='')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'API密钥'
+        verbose_name_plural = 'API密钥'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.name} ({self.key_prefix}****)'
+
+
+class ApiKeyGrant(models.Model):
+    """密钥×API 授权关系（v19）：每个关系独立配置允许的操作范围"""
+    api_key = models.ForeignKey(ApiKey, on_delete=models.CASCADE, related_name='grants', verbose_name='所属密钥')
+    api = models.ForeignKey(ArchiveApi, on_delete=models.CASCADE, related_name='key_grants', verbose_name='授权接口')
+    allowed_operations = models.JSONField('操作范围', default=list,
+                                          help_text='read/create/update/delete 子集，不得超过 API 自身 allowed_operations')
+    created_at = models.DateTimeField('授权时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = '密钥授权'
+        verbose_name_plural = '密钥授权'
+        constraints = [
+            models.UniqueConstraint(fields=['api_key', 'api'], name='uniq_api_key_grant'),
+        ]
+
+    def __str__(self):
+        return f'{self.api_key.name} → {self.api.name}'
+
+
+class ApiCallLog(models.Model):
+    """API 调用日志（v19）：落库保留 90 天自动清理，近 7 天统计"""
+    api = models.ForeignKey(ArchiveApi, on_delete=models.SET_NULL, related_name='call_logs',
+                            verbose_name='调用接口', blank=True, null=True)
+    api_key = models.ForeignKey(ApiKey, on_delete=models.SET_NULL, related_name='call_logs',
+                                verbose_name='调用密钥', blank=True, null=True)
+    key_name = models.CharField('密钥名称快照', max_length=100, blank=True, default='')
+    method = models.CharField('请求方法', max_length=10)
+    path = models.CharField('请求路径', max_length=300)
+    status_code = models.IntegerField('响应状态码', default=0)
+    duration_ms = models.IntegerField('耗时(ms)', default=0)
+    client_ip = models.CharField('客户端IP', max_length=64, blank=True, default='')
+    error_summary = models.CharField('错误摘要', max_length=200, blank=True, default='')
+    created_at = models.DateTimeField('调用时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'API调用日志'
+        verbose_name_plural = 'API调用日志'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['-created_at']),
+            models.Index(fields=['api', '-created_at']),
+            models.Index(fields=['api_key', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.method} {self.path} {self.status_code}'
 
 
 class ArchiveOperationLog(models.Model):
@@ -212,6 +367,7 @@ class ArchiveChangeBatch(models.Model):
         SYNC = 'sync', '源侧同步'
         MANUAL = 'manual', '档案侧编辑'
         CONSISTENCY = 'consistency', '一致性审核'
+        API = 'api', '外部接口写入'  # v19：网关写操作批次，operator=密钥名称
 
     archive = models.ForeignKey('Archive', on_delete=models.CASCADE, related_name='change_batches', verbose_name='所属档案')
     change_source = models.CharField('变更来源', max_length=20, choices=ChangeSource.choices)
@@ -237,11 +393,12 @@ class ArchiveChangeDetail(models.Model):
     class ChangeType(models.TextChoices):
         CREATED = 'created', '新增'
         UPDATED = 'updated', '修改'
-        DEACTIVATED = 'deactivated', '停用'
-        REACTIVATED = 'reactivated', '复活'
+        DEACTIVATED = 'deactivated', '停用（源侧已删）'
+        REACTIVATED = 'reactivated', '复活（源侧恢复）'
         REVIEWED = 'reviewed', '已审核'
         IGNORED = 'ignored', '已忽略'
         ROLLBACK = 'rollback', '回滚'
+        DETAIL_SYNC = 'detail_sync', '明细同步'
 
     batch = models.ForeignKey('ArchiveChangeBatch', on_delete=models.CASCADE, related_name='details', verbose_name='所属批次')
     archive = models.ForeignKey('Archive', on_delete=models.CASCADE, related_name='change_details', verbose_name='所属档案')
@@ -254,6 +411,14 @@ class ArchiveChangeDetail(models.Model):
     change_type = models.CharField('变更类型', max_length=20, choices=ChangeType.choices)
     field_changes = models.JSONField('字段变更', default=list, blank=True,
                                      help_text='[{"field":"code","name":"中文名","old":旧值,"new":新值}]')
+    # 版本映射（v18）：回滚统一为「恢复快照」语义的支撑字段；存量历史明细为 NULL（回滚降级旧字段级逻辑）
+    version_before = models.IntegerField('变更前版本号', blank=True, null=True)
+    version_after = models.IntegerField('变更后版本号', blank=True, null=True)
+    # 明细变更关联（批2）：明细行变更时记录关联，解耦回滚（不依赖 detail 表存活）
+    detail_group = models.ForeignKey('ArchiveRecordDetail', on_delete=models.SET_NULL,
+                                     verbose_name='关联明细行', blank=True, null=True)
+    detail_row_key = models.CharField('明细行键', max_length=200, blank=True, default='',
+                                       help_text='行键值快照，明细行删除后仍可识别')
     created_at = models.DateTimeField('变更时间', auto_now_add=True)
 
     class Meta:
@@ -269,11 +434,15 @@ class ArchiveChangeDetail(models.Model):
 
 
 class ConsistencyIssue(models.Model):
-    """一致性差异记录（组合字段非主字段成员值≠主字段值）
+    """一致性差异记录（支持多种检查类型）
+
+    检查类型：
+    - composite_member: 组合字段非主字段成员值≠主字段值
+    - archive_source_diff: 档案侧人工覆盖与源侧数据差异
+    - orphan_source_record: 源侧数据无法关联主表主键
+    - schema_drift: 档案 schema 与当前建模结构不一致
 
     纯内部管理数据，不回写任何源表（Hub 式 MDM 宪法）。
-    重新检查时按唯一键 upsert：仍存在→更新值/last_checked_at，
-    已消失→自动置 resolved，新差异→open。
     """
     class Status(models.TextChoices):
         OPEN = 'open', '待审核'
@@ -281,16 +450,28 @@ class ConsistencyIssue(models.Model):
         IGNORED = 'ignored', '已忽略'
         RESOLVED = 'resolved', '已消失'
 
+    class CheckType(models.TextChoices):
+        COMPOSITE_MEMBER = 'composite_member', '组合字段成员一致性'
+        ARCHIVE_SOURCE_DIFF = 'archive_source_diff', '档案侧与源侧差异'
+        ORPHAN_SOURCE_RECORD = 'orphan_source_record', '源侧孤立记录'
+        SCHEMA_DRIFT = 'schema_drift', 'Schema 结构漂移'
+
     archive = models.ForeignKey('Archive', on_delete=models.CASCADE, related_name='consistency_issues', verbose_name='所属档案')
     record = models.ForeignKey('ArchiveRecord', on_delete=models.SET_NULL, related_name='consistency_issues',
                                verbose_name='所属记录', blank=True, null=True)
     record_key = models.CharField('记录标识', max_length=200, help_text='主键值快照')
-    field_code = models.CharField('字段编码', max_length=100)
+    field_code = models.CharField('字段编码', max_length=100, blank=True, default='')
     field_name = models.CharField('字段名称', max_length=200, blank=True, default='')
+    check_type = models.CharField('检查类型', max_length=30, choices=CheckType.choices,
+                                   default=CheckType.COMPOSITE_MEMBER)
+    check_rule_key = models.CharField('规则标识', max_length=500, blank=True, default='',
+                                       help_text='标识具体检查规则，如 composite_member:field_code:member_source')
     primary_source = models.CharField('主字段来源', max_length=200, blank=True, default='', help_text='表名.物理列')
     primary_value = models.TextField('主字段值', blank=True, null=True)
-    member_source = models.CharField('成员来源', max_length=200, help_text='表名.物理列')
+    member_source = models.CharField('成员来源', max_length=200, blank=True, default='', help_text='表名.物理列')
     member_value = models.TextField('成员值', blank=True, null=True)
+    detail = models.JSONField('补充详情', blank=True, null=True, default=None,
+                               help_text='不同检查类型的额外信息，如 schema_drift 的具体差异、orphan 的主键值等')
     status = models.CharField('状态', max_length=20, choices=Status.choices, default=Status.OPEN)
     review_note = models.CharField('审核备注', max_length=500, blank=True, default='')
     reviewed_by = models.CharField('审核人', max_length=100, blank=True, default='')
@@ -303,12 +484,43 @@ class ConsistencyIssue(models.Model):
         verbose_name_plural = '一致性差异记录'
         ordering = ['-id']
         constraints = [
-            models.UniqueConstraint(fields=['archive', 'record_key', 'field_code', 'member_source'],
+            models.UniqueConstraint(fields=['archive', 'record_key', 'field_code', 'member_source', 'check_type'],
                                     name='uniq_consistency_issue_key'),
         ]
         indexes = [
             models.Index(fields=['archive', 'status']),
+            models.Index(fields=['archive', 'check_type']),
         ]
+
+
+class ConsistencyCheckRule(models.Model):
+    """一致性检查规则失效配置。
+
+    用户可以将特定检查规则失效，失效后该规则产生的差异不计入统计。
+    规则粒度：check_type + field_code + member_source（如失效“表A.字段X”的成员一致性检查）。
+    """
+    archive = models.ForeignKey('Archive', on_delete=models.CASCADE, related_name='consistency_rules',
+                                 verbose_name='所属档案')
+    check_type = models.CharField('检查类型', max_length=30, choices=ConsistencyIssue.CheckType.choices)
+    field_code = models.CharField('字段编码', max_length=100, blank=True, default='')
+    member_source = models.CharField('成员来源', max_length=200, blank=True, default='')
+    disabled = models.BooleanField('已失效', default=True)
+    disabled_by = models.CharField('操作人', max_length=100, blank=True, default='')
+    disabled_at = models.DateTimeField('失效时间', auto_now_add=True)
+    disabled_reason = models.CharField('失效原因', max_length=500, blank=True, default='')
+
+    class Meta:
+        verbose_name = '一致性检查规则'
+        verbose_name_plural = '一致性检查规则'
+        ordering = ['-disabled_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['archive', 'check_type', 'field_code', 'member_source'],
+                name='uniq_consistency_check_rule'),
+        ]
+
+    def __str__(self):
+        return f'{self.get_check_type_display()} {self.field_code} {self.member_source}'
 
 
 class ConsistencyIssueHistory(models.Model):

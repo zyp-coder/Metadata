@@ -144,6 +144,7 @@ def create_local_table_from_excel(domain_id, file_name, table_code, table_name_e
             table=table,
             name=f.get('name') or col_code,
             code=col_code,
+            physical_name=col_code,
             comment=f.get('comment', '')[:500],
             field_type=f.get('field_type', 'string'),
             length=f.get('length'),

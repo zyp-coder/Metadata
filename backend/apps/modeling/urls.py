@@ -13,6 +13,8 @@ router.register(r'field-mappings', views.FieldMappingViewSet, basename='field-ma
 router.register(r'standard-fields', views.StandardFieldViewSet, basename='standard-field')
 router.register(r'ai-config', views.AIConfigViewSet, basename='ai-config')
 router.register(r'computed-fields', views.ComputedFieldViewSet, basename='computed-field')
+router.register(r'config-tables', views.ConfigTableViewSet, basename='config-table')
+router.register(r'detail-configs', views.DetailTableConfigViewSet, basename='detail-config')
 
 urlpatterns = [
     path('', include(router.urls)),

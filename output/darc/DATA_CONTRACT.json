@@ -102,12 +102,13 @@
       { "endpoint": "/consistency-issues/batch-review/", "method": "POST", "params": { "ids": "number[]", "action": "'reviewed'|'ignored'|'reopen'", "note": "string?", "operated_by": "string?" }, "response": "{updated, skipped, action, batch_ids}" },
       { "endpoint": "/archive-apis/", "method": "GET|POST", "params": { "archive": "number?", "body": "Partial<ArchiveApi>" }, "response": "PaginatedResponse<ArchiveApi> | ArchiveApi" },
       { "endpoint": "/archive-apis/{id}/", "method": "GET|PUT|DELETE", "params": { "body": "Partial<ArchiveApi>" }, "response": "ArchiveApi" },
-      { "endpoint": "/archive-apis/{id}/data/", "method": "GET", "params": {}, "response": "ArchiveApiData" }
+      { "endpoint": "/archive-apis/{id}/data/", "method": "GET", "params": {}, "response": "ArchiveApiData" },
+      { "endpoint": "/archives/{id}/field-distinct-values/", "method": "GET", "params": {}, "response": "{ fields: FieldDistinctValue[], total_records: number }" }
     ]
   },
   "_type_locations": {
     "types/index.ts": ["DataSource", "Domain", "Table", "FieldGroup", "Field", "FieldOption", "FieldMapping", "Archive", "ArchiveApi", "ArchiveApiData", "ArchiveSchemaItem", "ArchiveRecord", "ArchiveVersion", "VersionCompare", "GlobalVersion", "SyncLog", "ChangeBatch", "ChangeDetail", "ConsistencyIssue", "PaginatedResponse"],
     "api/modeling.ts": ["StandardFieldModel", "StandardFieldAggregate", "StandardFieldSuggestion", "StandardFieldMember", "StandardFieldMemberDistinct", "ComputedFieldModel", "FormulaValidationResult", "TrialCalculateResult", "PreviewDataResult", "GenerateFormulaResult", "AvailableReference", "AIConfigModel", "FieldCategoryCounts", "ManualFieldCandidate", "ArchiveSchemaItem(重复定义)"],
-    "api/archive.ts": ["DomainChangeStat"]
+    "api/archive.ts": ["DomainChangeStat", "FieldDistinctValue"]
   }
 }

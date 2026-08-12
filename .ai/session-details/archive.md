@@ -1,75 +1,373 @@
-# 操作详情 — archive 模块（倒序，最新在前）
+# 模块详情：archive
 
-> 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
+### 第一百三十五轮（2026-08-10）标签：明细致子表批2、审计扩展、ChangeDetail扩展、DETAIL_SYNC、聚合变更日志、回滚
 
-### 第八十九轮（2026-07-25）标签：/archive/versions、/archive/5、回滚、变更日志、版本
+**任务**：明细致子表批2（审计扩展）实施。方向判定表：四项不触及（数据流向/存储模型不涉及模型新增，仅扩展已有 ChangeDetail 字段；模块边界/核心交互范式不触及）。
 
-- 2026-07-25 — 第八十九轮：v17 回滚前端落地 + 回滚报错修复 + v17.1 记录列表「变更历史」入口。阶段一（v17 前端）：types change_type 枚举加 'rollback'；api/archive.ts 加 changeLogApi.rollback（POST /change-details/{id}/rollback/）+ archiveRecordApi.rollbackToChange（POST /records/{id}/rollback-to-change/，返回类型含 message?: string——vue-tsc TS2339 两处由此修复）；VersionManagement 操作列 90→140px 加「回滚」链接（canRollback=record 非空+非 created/rollback+有 field_changes；sync 来源 Modal.confirm okType=danger 警告「回滚后下次刷新可能再次被覆盖」；changeTypeColor 加 rollback:volcano+.disabled-link 样式）；ArchiveDetail 详情弹窗加「历史回滚」时间线。阶段二（用户报「回滚报错」+需记录级变更历史入口）：根因排查=test Client 冒烟单条回滚 200 但打运行中服务 HTTP 404 → 旧 Django 进程（PID 23608，--noreload）未加载新端点，taskkill 提权后重启（新 PID 31544）端点实测生效；次要真 Bug=时间线最新节点「回滚到此」点击必 400「该时间点之后无可回滚的变更」→ 前端 canRollbackToPoint(index)（时间线 id 降序，slice(0,index) 存在非 created/rollback 变更才显示，最新节点自动隐藏）；新功能=ArchiveDetail 记录表操作列加「变更历史」链接（openHistoryModal）→ 860px 历史弹窗（a-timeline 每变更节点：类型/来源 tag+时间+操作人+全量字段 old→new+「回滚此条」canRollbackDetail/「回滚到此」canRollbackToPoint 双按钮；historyModalTitle=前3个 schema 字段值拼接），与详情弹窗内嵌时间线共用 rollbackHistory/rollbackLoading/rollbackingId 数据源（loadRollbackHistory：changeLogApi.listDetails({record, page_size:50, ordering:'-id'})），refreshAfterRollback 以 historyModal/detailModal 打开状态判定刷新目标，handleRollbackToChange 重构为 (item, targetRecord) 双参。验证：vue-tsc 0 errors、端到端冒烟（运行中服务）时间点回滚 200 + 留痕 change_type=rollback✓，冒烟脚本已清理。debug-diary BUG-2026-0725-04、design-diary-archive v17+v17.1 已登记
+**变更文件**：
+- `backend/apps/archive/models.py`（M1）：ArchiveChangeDetail 扩展——`detail_group` FK（ArchiveRecordDetail，nullable，SET_NULL）+ `detail_row_key` CharField（max_length=200，行键值快照，解耦回滚）；新增 `ChangeType.DETAIL_SYNC = 'detail_sync', '明细同步'`
+- `backend/apps/archive/serializers.py`（M2）：ChangeDetailSerializer 扩展 detail_group / detail_row_key 字段
+- `backend/apps/archive/views.py`（M3/M4/M5）：
+  - M3：`_sync_detail_rows` 末尾追加聚合 change_entries——统计 details_created/updated/deactivated，生成 DETAIL_SYNC 类型条目（field_changes 存 detail_stats 聚合字典，不逐行创建）；record_id=None、record_key='{源表名} 明细'、version_before/after=None、detail_group/detail_row_key=None/''
+  - M4：`ArchiveChangeDetail.bulk_create` 补充 detail_group_id / detail_row_key 字段（从 change_entries dict 取值）
+  - M5：新增 rollback_detail action（POST /archives/{id}/rollback-detail/）——接收 detail_fm_id + operated_by；构造同步上下文（_build_code_to_physical + pk_fields + match_channels）→ _query_external_table + _sync_detail_rows 全量覆盖 → 有变更则建 ArchiveChangeBatch + ArchiveChangeDetail（含 DETAIL_SYNC 聚合条目）→ 写 ArchiveOperationLog
+- 迁移：archive 0016（archivechangedetail.detail_group + detail_row_key + change_type 扩展），migrate OK
+- `backend/apps/archive/tests.py`：新增 3 定向测试（聚合变更条目验证 + 无变更无条目 + 模型扩展字段及 ChangeType）
 
-### 第八十八轮（2026-07-30）标签：/modeling/domains/8/fields、/archive/5、同步、计算字段、版本
+**状态变更**：批1 明细变更不进 change_entries 限制解除（批2 统一加了 DETAIL_SYNC 聚合日志）。批2 范围边界：回滚=重新同步覆盖（不创建 ArchiveRecordDetailVersion 快照，不逐行回滚）；嵌套表保留行能力仍留活口（批1 边界未动）；前端（明细区变更日志展示 + 回滚按钮）留批3。
 
-- **上次操作**：2026-07-30 — 第八十八轮：测试报告 7 项全栈整改（/modeling/domains/8/fields 3 项 + /archive/5 3 项 + /archive/versions 1 项；AskUserQuestion 四决策：①蓝色长字=**改图标按钮**②问题4=**详情即编辑**（推翻查看/编辑分离）③记录信息取值=**落库快照**④问题7=**合并为一页**（推翻第八十二轮三菜单中的独立版本管理定位））。问题1：DomainFieldConfig 组合字段表「设为主字段」蓝色长链接改灰色 KeyOutlined 图标按钮+tooltip，列宽 110→70。问题2：loadAttrTabData 计算字段行 group 硬编码 null→c.group ?? null（属性配置与字段分组 Tab 分组口径一致）。问题3：删属性配置「主字段」列（列定义+模板分支+openMembersDistinctFromAttr，删前 grep 零引用）。问题4：ArchiveDetail 详情弹窗单模式化——删「编辑」入口/drawerEditMode/openEditDrawer/switchToViewMode，弹窗=元信息 descriptions+业务数据直接可编辑控件（source 字段 disabled）+变更预览+关闭/保存（无变更禁用），openDetailDrawer/openChangeRecord 打开即初始化编辑数据。问题5：ArchiveChangeDetail 加 record_label CharField(500)（迁移0008），serializers 新增 _composite_label_codes（域内 active+release_to_archive SF 的 standard_code 列表）+_build_record_label（值拼接 ' / ' 截500）两 helper，写入点两处=编辑链路 UpdateSerializer+同步链路 _sync_data_from_sources 批次落库（data_map 按 record_id 批量取 data），存量回填脚本 backfill_change_record_label.py 跑完 5773 条；ChangeDetailSerializer/GlobalVersionSerializer 加 record_label，GlobalVersionSerializer 另加 record_version（记录当前最新版本号，记录已删返回 null）；前端变更明细表加「记录信息」列（record_label||record_key 回落+tooltip）。问题6：版本对比基准改「选中版本(v1) ↔ 当前最新(v2)」——ArchiveDetail.viewVersionDiff 用 selectedRecord.version、VersionManagement.viewDiff 用 ver.record_version（null=已删/≥最新守卫），diff 弹窗文案「v{n}（选中） ↔ v{m}（最新）」。问题7：VersionManagement.vue 整页重构为「变更与版本」（评估结论：底层两套模型职责不可替代——版本=快照/回滚/定版、日志=批次/审计/导出，重复仅在展示层）——右上 radio 双视图：主视图=全局变更日志（change-details API 全局过滤 archive/change_source/change_type/record_key+记录信息列+「进入档案」跳转），次级视图=版本记录（原表格+记录列改记录信息列 record_label）；MainLayout 菜单/router meta.title「版本管理」→「变更与版本」。验证：vue-tsc 0 errors、后端重启（旧 PID 15876→新进程）后 API 实测（change-details 5773 条含 record_label/archive_name✓record-versions 11683 条含 record_version/record_label✓）、Browser 端到端 9/9 PASS（图标按钮/无主字段列/分组一致/操作列无编辑/详情即编辑弹窗/记录信息列/合并页双视图/菜单改名），验证截图已清理。constitution 登记 4 条决策（含 2 条推翻），design-diary-archive v14、design-diary-modeling v11 已登记
+**验证**：新增 3 测试全 PASS（DETAIL_SYNC 聚合变更条目/无变更无条目/模型扩展字段及 ChangeType）；回归 archive 51/51 PASS；Django check 0 issues。批2 无新端点真实请求实测（rollback-detail 依赖域 14 配置 detail 关系，留批4 全量同步实测时一并验证）。
 
-### 第八十七轮（2026-07-30）标签：/modeling/domains/8/fields、/archive/5、同步、版本、字段分组
+**遗留问题**：
+- date_format 空值待批4 配置时补（同批1）
+- 明细行 20 万级首次全量性能未实测（批4 全量同步时观察）
+- 嵌套透传仅一级，嵌套表保留行能力留活口（方向锁定决策）
 
-- **更早操作**：2026-07-30 — 第八十七轮：测试报告 8 项全栈整改（/modeling/domains/8/fields 1 项 + /archive/5 7 项；AskUserQuestion 四决策：①抽屉vs弹窗=**改大弹窗**推翻 2026-07-22 抽屉决策②蓝色字含义=用户 Other 澄清「和字段分组有关的标题用蓝色」非值文本③变更定位=仅打开详情弹窗④日志补全=全部补齐）。问题1：DomainFieldConfig 组合字段表操作列前插「主表」（只读金tag/灰—）+「主字段」（金tag/「设为主字段」链接→setPrimaryFromComposite 走 set-primary-field 端点）两列，移除原内联 tag。问题2/3/4：ArchiveDetail 详情/编辑 a-drawer→a-modal（1100px/footer null/70vh 内滚），detailDrawer 改名 detailModal，groupTitleStyle 全级别蓝色系（level1/2 #1890ff、level3 #40a9ff），删 recordModal 死代码抽屉及 6 个无引用函数（-163行，删前 grep 确认零调用点）。问题5：后端 8 处 change_summary 补齐统一 {action,changed_fields} 结构（views.py：sync CREATE 全字段初值/perform_destroy 状态变化+快照字段数/rollback×2/pin_version/pin/unpin/refresh SYNC；serializers.py：CreateSerializer 加 action+全字段初值、UpdateSerializer 重构 summary_changes 含状态变化+action 区分「档案侧人工编辑/启用记录/停用记录/保存记录(无字段变化)」——状态切换不再显「-」）；前端 ArchiveDetail+VersionManagement 版本渲染加 action 行。问题6：记录表筛选工具栏（数据内容搜索+同步/记录状态下拉+查询/重置；后端 ArchiveRecordViewSet 删 search_fields、get_queryset 手动处理 search：annotate(Cast('data',TextField())) icontains）。问题7：左侧字段导航面板（190px，groupedSchemaBlocks 渲染蓝色分组标题+字段列表，scrollToFieldColumn 按列序 idx*DATA_COLUMN_WIDTH 横滚定位+col-flash 2.6s 淡橙高亮，customHeaderCell/customCell 挂类）。问题8：变更明细行点击/「查看记录」列→openChangeRecord（record SET_NULL 为 null 提示「已被物理删除无法定位」；否则 archiveRecordApi.get 打开详情弹窗+highlightChangedCodes 高亮变更字段 #fff7e6，openDetailDrawer/openEditDrawer 重置）。验证：vue-tsc 0 errors、后端重启（旧 PID 30160→新 15876 监听唯一）后 API 200（search+status 组合；注意路由是 /api/records/ 非 /api/archive/records/）、Browser 端到端 7/7 PASS（搜索 974→6 条过滤/重置恢复、弹窗化、蓝标题、字段导航定位、版本 action 文本、变更点击定位）。constitution 登记 4 条 v13 决策（含推翻抽屉），design-diary-archive v13 已登记
+### 第一百三十四轮（2026-08-10）标签：明细致子表、子表关系、detail分支、行键检测、conditions
 
-### 第八十六轮（2026-07-30）标签：/archives/、/archive、一致性、变更日志、主字段
+**任务**：明细致子表批1（后端核心）实施（task-132 方向锁定 v5 落地，用户放行「这个你先继续做吧」+ 逃生方案：行键配置处加日期配置）。方向判定表：存储模型 触及但已锁定（ArchiveRecordDetail 新存储，方向锁定已确认）/ 模块边界 触及但已锁定（FieldMapping 扩展，用户提案）/ 数据流向、核心交互范式 不触及。
 
-- **更早操作**：2026-07-30 — 第八十六轮：一致性检查独立页全栈落地（需求「以主字段为准覆盖所有成员表」与 Hub 宪法「源表只读、永不回写」冲突，AskUserQuestion 四决策：①回写范围=**完全不回写**——「修复」降级为差异清单管理+批量标记审核状态；②差异清单=落库+状态流转；③操作留痕=写变更日志批次（change_source='consistency'）；④入口=档案管理列表「一致性检查」按钮→独立页面）。后端 archive：models.py 新增 ConsistencyIssue（archive/record[SET_NULL]/record_key/field_code/field_name/primary_source/primary_value/member_source/member_value/status open→reviewed/ignored/resolved+审核三字段+first_found_at/last_checked_at，唯一键 archive+record_key+field_code+member_source）+ ChangeSource 加 CONSISTENCY + ChangeType 加 REVIEWED/IGNORED，迁移0007；views.py 新增 consistency_check action（POST /archives/:id/consistency-check/，复用主字段比对逻辑 _collect_full_mismatches 全量采集→upsert：新差异 open、仍存在更新值+last_checked_at、resolved 重现 reopen、已消失且 stats.errors 为空自动 resolved 安全闸门，返回 checked_fields/tables_checked/mismatch_count/new_issues/reopened_issues/resolved_issues/errors）+ ConsistencyIssueViewSet（/api/consistency-issues/ 过滤 archive/status/field_code/record_key icontains；batch-review action：ids+action[reviewed/ignored/reopen]+note+operated_by，reviewed/ignored 对 resolved skip、同状态重复 skip、reopen 清空审核三字段，每档案落一个 ArchiveChangeBatch(consistency)+明细 field_changes=[{field,name,old:成员值,new:主字段值}]，返回 updated/skipped/batch_ids）；serializers.py ConsistencyIssueSerializer 全只读。前端 6 项：types ConsistencyIssue 接口+change_source/change_type 枚举扩展；api/archive.ts consistencyCheck+consistencyApi{list,batchReview}；router :id 之前插 :id/consistency；ArchiveList 操作列加「一致性检查」链接（列宽 380→450）；ArchiveDetail 刷新告警 Modal.warning 改 Modal.confirm「前往一致性检查」引导+变更日志 consistency 来源 cyan tag+reviewed/ignored 类型色；新建 ConsistencyCheck.vue 独立页（276行：统计卡 open/reviewed/ignored/resolved 四 a-statistic 用 page_size=1 并发取 count+上次检查摘要卡、状态/字段/record_key 三筛选、row-selection 批量弹窗含「不回写源表」提示、重新检查按钮）。验证：migrate 0007 OK、check 0 issues、vue-tsc 0 errors、API 冒烟（档案5 consistency-check 200：2字段/7表/69差异全落库；空 ids 400；reviewed 生成批次14 明细含快照；reopen 生成批次15）、Browser 端到端 7/7 PASS 无控制台错误。design-diary-archive v12、dev-diary-archive、route_index、constitution 均已登记
+**变更文件**：
+- `backend/apps/modeling/models.py`（M1）：FieldMapping 扩展——RelationType(REFERENCE/DETAIL) + row_key_field + display_sort_field + display_sort_desc(默认True) + conditions(JSON 结构化筛选，AND 组合)
+- `backend/apps/archive/models.py`（A1）：新增 ArchiveRecordDetail（record/mapping/row_key 三层 unique_together + source_data 整层替换 + manual_data 保留 + data 合并物化 + status 停用标记）
+- `backend/apps/archive/views.py`（A7/A2/A3）：
+  - `_query_external_table` 新增 conditions 参数 + `_build_conditions_sql`（字段白名单校验 + 值全参数化 + eq/ne/gt/ge/lt/le/in 六操作符 + SQL Server []/Oracle ""/MySQL `` 方言化）
+  - `_sync_data_from_sources` 表循环新增 detail 分支：relation_type=DETAIL 的 FieldMapping 优先，整表作为明细致子表同步（跳过直连/中转路径），失败仅记 errors 不阻断他表
+  - 新增 `_sync_detail_rows`：行键配置优先否则 `_detect_unique_column` 自动检测并回填配置；嵌套属性一级透传（target_table=本表的 reference 映射，`__nested__{schema_code}` 前缀，同值多行取排序后最后一条）；代表行排序（display_sort DESC/ASC + 行键次级键，空值垫底）复用 `_write_dimension_row` 写主表；明细 upsert（source_data 整层替换 + manual 保留，merged 有差异才 save）；批1 明细变更不进 change_entries（防假明细 BUG-2026-0805-01 教训，批2 扩展 ChangeDetail 时统一加）；明细停用清扫（安全闸门无 errors，500/批标 DELETED）
+  - 新增 `_detect_unique_column`：全量行逐列统计（无空值且 COUNT(DISTINCT)==总行数），优先已标主键列，覆盖「FID 标主键但仅 14,883/239,504 唯一」反例
+- `backend/apps/modeling/serializers.py`（M2）：FieldMappingSerializer 扩展 8 新字段
+- `backend/apps/modeling/views.py`（M3）：FieldMappingViewSet 新增 detect-row-key action（detail=True，复用 ArchiveViewSet._query_external_table + _detect_unique_column）
+- 迁移：modeling 0030（fieldmapping 5 新字段）+ archive 0015（archiverecorddetail 建表），migrate OK
+- `backend/apps/archive/tests.py`：新增 8 定向测试（ArchiveRecordDetailModelTest 3 + DetailSyncEngineTest 5）
 
-### 第八十四轮（2026-07-30）标签：/modeling/domains/8/fields、/modeling、同步、字段维护方、去重
+**状态变更**：方向锁定 v5 → 批1 实施完成。批1 范围边界：明细变更日志留批2（ChangeDetail detail_group/detail_row_key + 回滚）；前端 UI 留批3（关系管理配置页 + 明细区折叠分页）；域 14 实际配置 + 全量同步实测留批4（f4 待办：GROUP_* 4 字段 + 计算字段重算 + detail 配置）。
 
-- **更早操作**：2026-07-30 — 第八十四轮：测试报告 2 项修复（/modeling/domains/8/fields 属性配置 Tab；①ownership 默认应为以源为准+「以源为准/以我为准」标注名称太奇怪要改②增加主表标记和字段主标记；AskUserQuestion 三问全选推荐：改名「源系统维护/档案维护」、改默认+存量全刷 source、加所属表列+编码钥匙标只读）。后端：modeling/models.py Field/StandardField.ownership 改名「字段维护方」+choices「源系统维护/档案维护」+default='source'，迁移 0025（AlterField×2+RunPython set_all_ownership_source 存量全刷，reverse=noop）；modeling/views.py standard_fields action equiv bucket 收集 tables（table_id 去重）/is_pk（任一成员主键置位），equiv/solo 输出行补 tables[{name,is_primary}]+is_primary_key，聚合序列化器同步加字段；archive/serializers.py 拦截报错改「由源系统维护不可编辑」；archive/views.py refresh_preview attr_labels '所有权'→'维护方'+ownership_labels 中文映射。前端：DomainFieldConfig.vue 属性表 11 列（字段编码前主键金色 KeyOutlined 钥匙标+tooltip、新增「所属表」列表名+金色「主表」tag、「维护方」开关 checked-children「源系统维护/档案维护」、computed 固定橙标「档案维护」），AttrRow/loadAttrTabData 映射 tables/is_primary_key+ownership 兜底改 source；ArchiveDetail.vue 三处文案（🔒tooltip「人工修正值（档案维护）」+两处橙标「档案维护」）；api/modeling.ts+types/index.ts 类型/注释同步。验证：migrate 0025 OK、check 0 issues、vue-tsc 0 errors、API 实测 domain=8 28 行 ownership 全 source+STORE_NO 钥匙标/7 成员表含主表标记、Browser 端到端 14/14 PASS 无控制台错误无旧术语残留。constitution 登记决策「字段维护方更名+默认source+存量全刷」，design-diary-modeling v8 已登记
+**验证**：新增 8 测试全 PASS（明细创建/代表行写主表/第二轮更新+停用清扫/无法归属跳过/行键检测三反例/conditions SQL 白名单拒绝）；回归 archive+modeling 99/99 PASS；Django check 0 issues。
 
-### 第八十二轮（2026-07-29）标签：/archive_name/operation_type_display、版本、变更日志、菜单、抽屉
+**遗留问题**：
+- date_format 空值待批4 配置时补（用户逃生方案：行键配置处加日期配置；display_sort 不依赖 field_type，字符串比较已够）
+- 明细行 20 万级首次全量性能未实测（批4 全量同步时观察）
+- 嵌套透传仅一级，嵌套表保留行能力留活口（方向锁定决策）
+- 误删 modeling/views.py 两行（# 补充表名和字段名 + from .models import Field, Table）已当场恢复，dev-diary 未记（无实质变更）
 
-- **更早操作**：2026-07-29 — 第八十二轮：档案菜单信息架构重做（🏗️ 模块重做级，两轮 AskUserQuestion 锁定：①档案管理收敛数据向操作保留档案 CRUD②档案列表→新建平铺式 API管理页③操作日志→版本管理页替代④变更日志删全局页只留表格行入口）。后端：GlobalVersionSerializer（archive/archive_name/operation_type_display，不回传大字段）+ RecordVersionViewSet（ReadOnly /api/record-versions/，过滤 archive/record/operation_type/is_pinned/operated_by，pin/unpin 两 action 各写 PIN/UNPIN 日志，重复操作 400）。前端：新建 ApiManagement.vue（平铺 API 表格+所属档案下拉抽屉+切档案重拉 schema+分组勾选+查看数据抽屉承接 ArchiveBrowse 只读能力）、新建 VersionManagement.vue（全局版本平铺表格+四筛选+变更字段旧→新值限 5 行+定版 📌 tooltip+行操作定版/取消定版/回滚/对比）；删 ArchiveBrowse.vue/OperationLog.vue/ChangeLog.vue 三页+operationLogApi；router 三旧路由换 api-management/versions 两新路由（:id 保持在后）；MainLayout 菜单 4→3；ArchiveDetail 删 API Tab 全部代码（-286 行，groupedSchemaBlocks 保留供详情/编辑抽屉复用，changeLogApi/downloadBlob 保留）；ArchiveList 删「API接口」深链（操作列 450→380）。验证：check 0 issues、vue-tsc 0 errors、端到端 ALL PASS（record-versions 列表 200 count=6741✓组合过滤✓pin→重复 pin 400→unpin→重复 unpin 400✓archive-apis 200✓）。design-diary-archive v10 已登记（局部推翻 v9 全局变更总览页）
+### 第一百三十二轮（2026-08-08）标签：/archive/同步、全量同步、去TOP1000、BUG-2026-0808-02
 
-### 第八十一轮（2026-07-29）标签：/archive/changes、变更日志、菜单、导出
+**任务**：用户提出「原架构按星型模型设计，实际是多维模型，档案是宽表还是视图，要结合处理」。诊断结论：档案是 JSON 物化宽表（ArchiveRecord.data/source_data/manual_data 双层存储，读取零 join，同步时物化多维关联结果），既非物理宽表也非视图。真实根因：_query_external_table 每表 TOP 1000 截断 + 各表物理序不一致 → 截断集合分裂（表28↔表22 截断交集 0 → NAME/PRICE 全空假象；表24 与表22 截断批次分裂 → 1334 漂移）。方向判定表：本次为容量策略变更，不触及数据流向/存储模型/模块边界/交互范式四项，仍记录本判定。用户裁决：全量同步（AskUserQuestion 1问/0改向）。
 
-- **更早操作**：2026-07-29 — 第八十一轮：变更日志收尾三项（用户决策：①不做保留期清理—变更日志是保留记录永久存库②全局总览新页面+菜单③导出针对单个档案带全部明细）。后端：ChangeDetailViewSet 加 export action（GET /api/change-details/export/?archive=N，缺参数 400；openpyxl 双 Sheet：批次汇总+变更明细，字段变更展开多行文本，明细上限 5 万行，文件名 filename*=UTF-8''）；ChangeDetailSerializer 补 archive_name。前端：api 层 exportExcel（responseType:'blob'，首个 blob 先例）+通用 downloadBlob()；ArchiveDetail 变更日志分区加「导出 Excel」按钮；新建 ChangeLog.vue 全局变更总览页（档案下拉默认全部+来源/类型/记录标识筛选+明细/批次双视图+批次下钻+导出需先选档案），路由 /archive/changes + MainLayout 菜单「变更日志」【第八十二轮已删除该全局页/菜单/路由，导出能力保留在 ArchiveDetail 变更分区】。验证：check 0 issues、vue-tsc 0 errors、端到端 ALL PASS（缺参数400✓导出200双 Sheet 档案5：3批次/825明细行数精确✓archive_name✓全局列表200✓）；临时脚本已删。design-diary-archive v9 已登记
+**变更文件**：
+- `backend/apps/archive/views.py`：
+  - `_query_external_table`：去除 SQL Server TOP/Oracle ROWNUM/MySQL LIMIT 截断，改全量 SELECT + fetchmany(10000) 分批转换（docstring 记录根因）
+  - `_query_local_table`：去除 LIMIT 1000
+  - `_upsert_records_from_rows` / `_upsert_dimension_via_mapping`：无变化记录收集 no_change_updates 收尾 bulk_update(batch_size=2000)；变更明细瘦身条件 `if reactivated or (changed_codes and existing.id not in created_in_this_batch)`（防首次全量 20 万条重复明细）
+  - 停用清扫重写：候选 id 集-差集 matched_ids → stale_ids 按 500/批 id__in 分批（修 BUG-2026-0808-02）；变更日志 data_map 查询同样 500/批分段
 
-### 第八十轮（2026-07-25）标签：同步、变更日志、刷新
+**验证结果**：实测全量同步 6/6 表、errors 空、209,123 条（=主表真实行数）、耗时 11 分钟（增量）；MTL_NAME/MTL_CODE 100% 有值、PRICE/UNIT_ID/TO_QTY 24,794（精确命中表28↔表22 全量交集）、NAME 5,322（价目表头 FID→明细→物料中转链）、cardinality_fold_count 12,044 告警正常；变更明细 11,677 条落库（batch#61）；archive 40 测试全 PASS
 
-- **更早操作**：2026-07-25 — 第八十轮：数据变更日志全栈落地（用户需求：源侧系统经常自行改数据/删数据不通知，需可追溯的数据核对记录；四项确认决策：①新建批次+明细两模型②字段级旧值→新值粒度③无人工核对确认环节—直接以源为准更新+日志留痕，sync/manual 同表一处查看④前端入口 AB 都要）。后端：models 新增 ArchiveChangeBatch（change_source 枚举 sync/manual，stats 汇总，零变更不建批次）+ ArchiveChangeDetail（change_type 枚举 created/updated/deactivated/reactivated，field_changes JSON [{field,name,old,new}]，record_key 主键快照，record FK SET_NULL）迁移0006；views 同步引擎 _sync_data_from_sources 维护 change_entries（_upsert 加 field_name_map/reactivated 标志，复活优先于修改；停用清扫先 only('id','data') 抓身份再 update；收尾 bulk_create，stats 返回 change_batch_id）；serializers 编辑链路 update() 末尾落 manual 批次（status 切换判定 DEACTIVATED/REACTIVATED，_record_pk_key() 取主键快照）；只读 ChangeBatchViewSet+ChangeDetailViewSet（过滤 archive/batch/record/change_type/change_source/record_key icontains），路由 /api/change-batches/ /api/change-details/。前端：types 加 ChangeBatch/ChangeDetail/FieldChange，api 层 changeLogApi；ArchiveDetail 新增 activeTab='changes' v-show 分区（明细/批次双视图 radio，明细表字段级旧值→新值渲染+来源/类型/record_key 筛选+批次下钻 tag 可关）+页头「变更日志」按钮；ArchiveList 操作列深链 ?tab=changes。验证：check 0 issues、vue-tsc 0 errors、端到端 ALL PASS（两端点200✓人工编辑落 manual 批次+字段级明细含 record_key✓过滤参数✓源侧刷新落 sync 批次：档案5 实测 823 条 updated 明细旧值→新值正确✓）；临时脚本已删。design-diary-archive v8 已登记
+**遗留问题**：
+1. GROUP_NAME/GROUP_ID/GROUP_NO/GROUP_DESC 0 值：表 25/26 字段未挂 StandardField 组合字段（建模配置缺失，非引擎 bug；FieldMapping 25.GROUP_ID→22.MATERIAL_GROUP、25.FID→26.FID 已存在，需在字段属性配置页挂组合字段）
+2. 7 个计算字段重算全失败：P_COLOR 等公式引用 `EDS_K3_物料.MNEMONIC_CODE` 物理名，Field.code=MTL_MCODE，既有公式配置错误
+3. 首次全量 59.4 分钟（20.9 万条逐条 save+version，一次性成本，后续可优化批量创建）
 
-### 第七十九轮（2026-07-25）标签：同步、计算字段、抽屉、刷新
+**状态变更**：同步引擎容量策略从「每表 TOP 1000 截断」改为「全量拉取」（constitution 已追加架构级决策）；无模型变更
 
-- **更早操作**：2026-07-25 — 第七十九轮：主数据记录管理边界收口（两项用户决策：①禁止档案端人工新增—所有记录源头来自业务系统；②源侧删除→标记停用）。后端 archive/views.py：①ArchiveRecordViewSet.create 直接 403（「主数据记录统一由业务系统同步产生」）；②停用清扫：_sync_data_from_sources 跨表收集 matched_ids，表循环后对未匹配的 active+synced/partial 记录批量置 status='deleted'+sync_status='stale'（安全闸门：任一表出错/无主键时跳过，防源库瞬时故障误停用）；③复活：_upsert 索引改为全部记录（含停用，同主键 active 优先），stale 记录匹配到源行自动复活，手工停用（非 stale）只更新数据保持停用—顺手修复停用记录被刷新重建重复的同根缺陷；④无主键值源行直接跳过不进档案（此前每轮刷新重建 2 条无主键记录循环泄漏）；stats 加 records_deactivated/reactivated。前端：ArchiveDetail 删「新增记录」按钮/openCreateRecord/create 分支，抽屉改「编辑记录」；syncLabel/Color 加 stale=「源侧已删」橙；刷新/同步提示加停用/复活条数；详情状态「已删除」→「已停用」；SyncStats 加两可选键。⚠事故：验证脚本误将主键猜为 C_STORE_ID（实为 STORE_NO），清理「无主键脏数据」时误删档案5 全部 985 条记录；因源在业务库已刷新重建 974 条（损失：历史测试轮写入的 manual_data 测试值；副作用：旧测试脏记录一并清除）。教训：删除类操作前必须先查证主键等元数据，禁止凭记忆猜字段名。验证：check 0 issues、vue-tsc 0 errors；端到端 ALL PASS：POST create 403✓伪造源外记录刷新后 deleted/stale✓预置 stale 记录刷新后复活 active/synced（reactivated=1）✓幂等轮 created=0/deactivated=0✓计算字段重算 success=1 样本 store_status=正常营业✓；临时脚本已删
+### 第一百三十一轮（2026-08-08）标签：/archive/去重值、field-distinct-values
 
-### 第七十八轮（2026-07-29）标签：同步、计算字段、刷新
+**任务**：新需求——查看档案各字段的去重值（从档案记录实时统计）
 
-- **更早操作**：2026-07-29 — 第七十八轮：档案5（域8）计算字段脏配置修复，三处问题三处修复。排查定性：①MD_STATUS(id=1) 公式引用「门店表.门店名称/分部编号」—域8 无此表无法修正且与 store_status 同名「门店状态」重复（测试遗留）→ 置 status='discarded'；②store_status 表引用本身有效（IMP_零售_门店_闭店信息填报.D_CLOSE_DATE），但 742 条未闭店记录 data 无该键—_build_context_from_record 只为已有键建上下文，引擎 RefNode 缺键直接抛「字段引用未找到」→ computed_service._build_context_from_record 加域内字段缺键 setdefault(None)（真脏引用如域外表仍正常报错）；③store_status 公式《D_CLOSE_DATE <= TODAY()》比较运算走 _to_number 无法转日期字符串会抛运行时错（且 IF 是急切求值仅 IFERROR 惰性，ISBLANK 守卫拦不住）→ 公式改写 IFERROR(DATEDIF(日期, TODAY(), "D"), -1) >= 0 判已闭店。同步重生成档案5 schema（active 过滤自动剔除 MD_STATUS，schema_version=7）+ parse_and_save_dependencies 重解依赖无环。验证：refresh_archive_data 全链路刷新 — 重算 success=1/errors=0、981 条记录 store_status 全部生成（正常营业 744/已闭店 237，闭店样本 2024-08-01→已闭店、未闭店→正常营业）、data 中 MD_STATUS 键零残留、manage.py check 0 issues；临时脚本已删
+**变更文件**：
+- `backend/apps/archive/views.py`：ArchiveViewSet 新增 `field_distinct_values` action（GET /archives/{id}/field-distinct-values/），从 ArchiveRecord.data 实时聚合每 schema 字段去重值+计数，每字段最多 200 个值按计数降序
+- `frontend/src/api/archive.ts`：新增 `FieldDistinctValue` interface + `archiveApi.fieldDistinctValues(id)` 方法
+- `frontend/src/views/archive/ArchiveDetail.vue`：字段导航每项右侧加「值」小按钮（点击弹窗展示该字段去重值，首次加载全量缓存后续零请求）+ 520px 弹窗
+- `frontend/src/views/archive/ArchiveList.vue`：无变更（初始放错位置已撤回）
 
-### 第七十七轮（2026-07-29）标签：同步、计算字段、刷新
+**验证结果**：新端点实测 200（产品档案 1000 条记录、42 字段，数据正确）；回归 40/40 PASS；vue-tsc 0 errors
 
-- **更早操作**：2026-07-29 — 第七十七轮：档案双层存储重构（方案B+定时刷新）全栈落地，7 Task 全部完成。Task1 模型层：ArchiveRecord 加 source_data（源同步底层）/manual_data（人工覆盖层）两 JSONField，迁移0005 含 RunPython 存量拆分（lineage manual/resolve→manual层、其余→source层、计算字段两层不进；注意 schema 计算字段标记是 'source'=='computed' 非 kind）。Task2 合并引擎：views.py 模块级 _merge_record_data(record,schema) 纯函数返回 (merged,lineage)：computed 保留 data 现值、source 字段底层直通+清 manual 遗留键、archive 字段 manual 优先否则回落底层、schema 外遗留键并入，lineage 重建 manual/sync。Task3 同步换底：_upsert_records_from_rows 整函数重写——已有记录本表字段直写 source_data 零比对→merge→merged 与旧 data 有差异才 version+1+快照（change_summary.source_refreshed），无变化仅落底层；新记录 source_data=源数据+manual_data={}；stats 瘦身删 fields_overwritten/fields_protected（两处初始化同步改）。Task4 编辑链路：UpdateSerializer 变更 archive 字段写 manual_data，新值==底层源值时删键回落+overrides 解除保护（新能力），source 字段 400 拦截保留，惰性导入 _merge_record_data 避循环依赖；CreateSerializer 人工数据拆层（source_owned→source_data、其余→manual_data、computed 跳过）。Task5 刷新链路：ArchiveViewSet 新增 refresh-data action（不重生成 schema/不 bump schema_version），模块级 refresh_archive_data 供端点/命令/定时线程三入口复用（拉数+batch_recalculate+SYNC 日志）；新建 management command refresh_archives（--archive-id 可选）；settings 加 ARCHIVE_AUTO_REFRESH_MINUTES（默认60，0禁用，环境变量覆盖）；apps.py ready() daemon 线程（RUN_MAIN 防 runserver 双启、仅服务类命令启动、异常只记日志）。Task6 前端：archiveApi.refreshData；ArchiveDetail 按钮改「同步模型结构」（次）+「立即刷新数据」（primary ghost 主操作，确认文案「以源数据为底整层刷新，人工修改的字段（以我为准）自动保留」）+doRefreshData；SyncStats 删两旧键。验证：check 0 issues、迁移0005 OK、vue-tsc 0 errors、旧 stats 键全库 grep 零残留；Django test Client 闭环（档案5，事务回滚）6 PASS/1 FAIL：①迁移拆分✓②refresh-data 200+人工值保留✓③编辑登记+改回源值删键回落✓⑤sync-schema 可用无旧键✓；唯一 FAIL 是⑥计算字段无值——定性为存量脏配置非回归（公式引用「门店表.门店状态」等不存在的表，重构前 979 条也全部无计算字段值，batch_recalculate 已正确触发并把错误透出 stats）；临时脚本已删
+**状态变更**：新增功能，无状态变更
 
-### 第七十六轮（2026-07-29）标签：/modeling/domains/8/fields、/archive/5、同步、计算字段、数据源
+### 第一百三十轮（2026-08-08）标签：BUG-2026-0808-01 档案同步 0 记录修复
 
-- **更早操作**：2026-07-29 — 第七十六轮：测试报告两项。①/modeling/domains/8/fields 属性配置 Tab「所有权」列 UI 改造：a-select 下拉换为 a-switch 小开关（开=以源为准/关=以我为准，checked-children 文字+tooltip 语义说明，计算字段仍固定橙 tag），用户选「保留独立列但改开关」未采纳内联字段名方案；保存通道复用 saveAttrField 三分流不变；vue-tsc 0 errors。事故：首次 SearchReplace 误删闭合 </template> 且未换控件，立即二次替换修复（教训：grep 缩进不可信必须先 Read 真实内容）。②/archive/5「从数据源同步」存废讨论：用户提案「不存档案数据，源数据为底+档案操作记录合并出实时档案」，prjm 分析模式评估三路线（A 定时拉取小改/B 双层存储重构/C 纯实时现查）：C 的风险—翻页跨库现查多表合并卡顿、人工修改值搜索无处下推、源库离线档案/ArchiveApi 全瘫；经两轮 AskUserQuestion（首轮用户反馈方案B没读懂、原意是C，二轮用复印件比喻重讲 B=C语义+本地副本底层）用户确认选 **B 双层存储+定时刷新**：ArchiveRecord 拆 source_data 底层（同步=整层替换零比对）+人工覆盖层，data 写时合并物化保可查询性，叠加定时自动拉取+立即刷新按钮，现有逐字段比对引擎整体换成「换底重合并」。本轮未动后端代码，下一步转规划模式产出实施计划
+**涉及模块**：modeling、archive
 
-### 第七十五轮（2026-07-28）标签：/archive、同步、计算字段、抽屉
+**变更文件**：
+- `backend/apps/modeling/models.py`：Field 新增 `physical_name` 字段
+- `backend/apps/modeling/migrations/0029_add_physical_name_to_field.py`：迁移 + 存量回填 physical_name=name
+- `backend/apps/modeling/views.py`：数据源导入创建字段时设 physical_name=col_name
+- `backend/apps/modeling/excel_service.py`：Excel 导入创建字段时设 physical_name=col_code
+- `backend/apps/archive/views.py`：_build_code_to_physical 改用 physical_name + solo 字段映射按 f.code 匹配 schema code + pk_fields 改用 schema code
 
-- **更早操作**：2026-07-28 — 第七十五轮：方案B（Hub式MDM）架构整改全栈落地【重大架构转向：放弃双向同步，推翻 F-116 冲突队列/F-118 字段级回写】。三项锁定决策：①回写链路彻底删除（SyncLog 历史保留）②ownership 在建模字段属性配置 ③冲突队列整体下线（source 直接覆盖/archive 保护不覆盖，无人工裁决）。Task1 建模侧：StandardField/Field 加 ownership(source/archive, default='archive')（迁移0023），batchUpdateAttributes 白名单+standard-fields 聚合返回 ownership，DomainFieldConfig 属性配置 Tab 加「字段所有权」下拉列（equiv→standardFieldApi.patch/solo→batchUpdateAttributes/computed 固定 archive 只读）。Task2 schema 下发：_generate_schema_from_domain 三分支各加 ownership 键（计算字段固定 'archive'），前端 ArchiveSchemaItem 加 ownership?。Task3 拉取引擎：_upsert_records_from_rows 重写为 ownership 分流——source 差异直接覆盖+lineage=sync、archive 已有值保护不覆盖（首拉空值仍写入），冲突入队段删除，stats 删 conflicts_created 加 fields_overwritten/fields_protected，存量 schema 无 ownership 按 archive 兜底。Task4 删回写链路：后端删 sync_to_source/_classify_sync_error/_finalize_sync_log（约457行，SyncLogViewSet 保留历史查看）；前端删同步按钮/三步向导 Modal/向导状态与函数（ArchiveDetail 约-449行），api 删 syncToSource，types 删 SyncDiff/SyncChangeItem/SyncSelection、SyncStats 瘦身6键。Task5 删冲突队列全栈：ArchiveFieldConflict 模型/序列化器/ViewSet/urls 注册/前端冲突 Tab+conflictApi+类型全删，迁移0004 删表（档案5 存量 451 条 pending 随表删除，用户已确认无需消化）。Task6 编辑拦截：ArchiveRecordUpdateSerializer.update 依档案 schema 对 ownership='source' 字段拒改（400「以下字段以源为准，不可编辑：xx」），override/lineage=manual 登记保留（仅 archive 字段触达）；前端编辑抽屉两处 source 字段 disabled+「以源为准」蓝tag，🔒锁标 tooltip 语义改「人工修正值（以我为准）」。验证：manage.py check 0 issues、migrate 0023+0004 OK、vue-tsc 0 errors、Django test Client 闭环 12 PASS/0 FAIL（档案5「门店 主数据档案」979条/29字段，STORE_NO 设 source：sync-schema 200 且 stats 新键无 conflicts_created✓schema 下发 ownership✓编辑 source 字段400✓archive 字段可编辑+override登记✓再同步保护 fields_protected=448✓sync-to-source 与 field-conflicts 端点404✓），临时脚本已删（事务回滚不污染数据）。design-diary-archive v5、constitution「方案B Hub式MDM」决策、route_index 均已登记
+**变更摘要**：
+- 根因三层叠加：① rename_solo 改名后 Field.code 变了，原始列名丢失；② _build_code_to_physical solo 循环用 phys_code in schema_type_map 匹配不上；③ pk_fields 用 Field.code 而非 schema code，record_data 取不到主键值
+- 修复：Field 新增 physical_name 字段保留原始列名，同步改用 physical_name，pk_fields 改用 schema code
+- 产品域档案同步从 0 恢复到 1000 条
 
-### 第七十四轮（2026-07-25）标签：同步
+**状态**：完成
 
-- **更早操作**：2026-07-25 — 第七十四轮（环境配置修复，prjm 直接处理无代码变更）：为域8 正式设置主表——表8「IMP_零售_门店_基本信息填报」（ext I_OPT_LS_STO_01_20251114，17 字段，档案5 schema 来源表，第73轮闭环测试已验证该配置可用）is_primary=True，域内其余六表保持 False（唯一主表）。验证：档案5 sync-to-source dry_run 由 400「未配置主表」变 200，sync_stats：records_total=979、nochange=979、change_plan 979 条、connection/write_permission 均 ok、records_partial/records_skipped=0（第73轮测试还原干净，档案与源表无差异属预期）。同步向导环境阻塞解除，F-118 字段级回写可正常使用。临时探针脚本已清理
+### 第一百零八轮（2026-08-05）标签：紧急修复 3 项（配置检查范围 + 警告不阻断 + 同步关键 Bug）
 
-### 第七十三轮（2026-07-28）标签：同步、抽屉、血缘
+**涉及模块**：archive
 
-- **更早操作**：2026-07-28 — 第七十三轮：REQ-018 MDM 第7批（F-118 字段级回写 + F-119 血缘展示）darc 开发全栈落地。三项设计决策锁定：勾选粒度=更新记录差异字段逐个勾选(默认全选)+新增记录整行勾选(INSERT不可拆列)；部分回写状态=全量→synced+恢复active、部分→sync_status='partial'不碰status；血缘展示=详情抽屉来源小标签(人工橙/同步蓝/裁决紫)+tooltip(源表/更新时间/保护人)+记录表格受保护字段🔒锁标。后端（仅改 sync_to_source）：selections 参数 [{record,fields:[物理列名]}]（fields 缺省=整行，selections=None 完全向后兼容），sel_map 解析→勾选过滤块（未选记录/无交集→action='skipped'不回写，真子集→is_partial），回读校验后 partial_ids 分流（partial 只标 sync_status 不碰 status），stats 加 records_partial/records_skipped，_finalize_sync_log 同步。前端：types 加 SyncSelection/action'skipped'/SyncStats 两新字段；api syncToSource 加 selections 参数；ArchiveDetail 向导 Step2 差异表加勾选（update 逐字段 checkbox+insert 整行 checkbox，fieldSel/insertSel 状态，预览后 initSelections 全选，全选/清空按钮+计数），Step2→Step3 goToSqlStep 携带 selections 重跑 dry_run 生成按选 SQL（syncSelPreview 独立存储，回退 Step2 不污染全量预览），执行传同一 selections，完成提示加部分回写/跳过条数；血缘：详情抽屉两处（分组/平铺）字段值旁 lineage 标签+tooltip，记录表格 data.* 单元格 overrides 命中时前置🔒+tooltip。验证：manage.py check 0 issues、vue-tsc 0 errors、Django test Client 闭环实测 16 PASS/0 FAIL（档案5 临时设主表8→构造差异→勾选过滤/sql过滤/skipped/partial/补选synced+active/无selections兼容全链路，源表与主表配置均已还原 records_diff=0）。注意：域8 无主表（七表 is_primary 全 False）致 sync-to-source 平时 400，属环境配置非代码缺陷；释放门控导致部分字段（如 REMARK）不参与回写映射属预期。design-diary v4 已登记
+**修改文件**：
+- `backend/apps/modeling/views.py`：_check_domain_config 中“字段编码与名称有区分”检查范围从所有活跃字段缩小为 `archive_category='base'` 的档案字段
+- `backend/apps/archive/views.py`：①`_validate_primary_fields` 从硬拦截改为警告（_sync_data_from_sources + _preview_data_changes 两处移除 return stats，改为 stats['warnings']）；②`_upsert_records_from_rows` 修复 sync_exclude_codes 排除主键字段导致跨表数据无法匹配写入的关键 Bug（主键字段即使在排除集合中也保留用于记录匹配）；③3 处 stats 初始化加 `warnings: []`
+- `frontend/src/views/archive/ArchiveDetail.vue`：showConsistencyWarning 从 Modal.confirm 改为 notification.warning（非阻断右上角通知，8 秒自动消失）；doRefreshData/doSyncSchema 增加 warnings 展示
+- `frontend/src/views/archive/ArchiveList.vue`：预检弹窗增加 warnings 黄色提醒条
+- `frontend/src/types/index.ts`：SyncStats 接口加 `warnings?: string[]`
 
-### 第七十二轮（2026-07-28）标签：同步、版本、血缘
+**验证结果**：45 测试 PASS，vue-tsc 0 errors。实际同步验证：records_updated 从 0 恢复到 2194，GZT0001 从 15 字段恢复到 23 字段（CLOSE_REASON/D_CLOSE_DATE/CUST_NO 等全部写入）
 
-- **更早操作**：2026-07-28 — 第七十二轮：REQ-018 MDM 第6批 darc 开发全栈落地。三项设计决策已锁定：分批先做第6批（F-114/115/116+F-117顺带）、JSONField+独立冲突模型、**本批一并取消编辑自动停用（推翻 2026-07-23 决策）**。后端：models 加 ArchiveRecord.overrides/lineage 两个 JSONField + 新建 ArchiveFieldConflict（pending/resolved_accept/resolved_keep/voided 四态，建议 accept_source/keep_archive，索引 (record,field_code,status)+(archive,status)），迁移 0003；serializers 删自动停用三行+changed_fields 后登记 override（protected_by/at、original_value 首次登记）+lineage=manual+新增 ArchiveFieldConflictSerializer；views 的 _upsert_records_from_rows 整函数重写为逐字段比对（一致跳过+首次补 sync 血缘，新字段直写+lineage=sync，差异一律入队不覆盖，旧 pending 置 voided，受保护标 is_protected 建议 keep_archive，新字段才 version+1+快照且仅无冲突置 synced），stats 加 conflicts_created，新增 ArchiveFieldConflictViewSet（ReadOnly+resolve/batch-resolve action，_apply_resolution 双路径，重复裁决400，均 transaction.atomic），urls 注册 field-conflicts。前端：types 加 FieldOverride/FieldLineage/ArchiveFieldConflict+SyncStats.conflicts_created；api 加 conflictApi(list/resolve/batchResolve)；ArchiveDetail 加「冲突审查」Tab（a-badge pending 计数+筛选+批量/单条裁决 popconfirm+row-selection 仅 pending 态），同步确认文案改「差异入冲突队列不自动覆盖」+conflicts_created>0 时 Modal.warning。验证：manage.py check 0 issues、vue-tsc 0 errors、Django test Client 闭环实测全 PASS（编辑后 status 保持 active✓override/lineage 登记✓受保护不覆盖✓冲突入队 protected+keep_archive✓keep_archive/accept_source 双路径✓重复裁决400✓版本快照含裁决摘要✓列表筛选✓）。注意：首次逐字段比对在档案5暴露 451 条存量真实差异冲突（历史无条件覆盖时代遗留），属机制切换预期现象需人工审查消化。新建 dev-diary-archive.md；constitution 登记 3 条决策（含推翻）；debug-diary 耗合点更新。下轮可启动 F-118 字段级回写+F-119 血缘展示
+### 第一百零七轮（2026-08-04）标签：测试报告反馈 3 项修正
 
-### 第七十轮（2026-07-28）标签：/archive/5、/modeling、同步、计算字段、字段分组
+**涉及模块**：archive、modeling
 
-- **更早操作**：2026-07-28 — 第七十轮：测试报告 3 项（/archive/5）。事实核查（HTTP+Django standalone 双脚本实测）：①②同一系统性缺陷——archive/views.py _field_released 只做两层释放门控无第五十九轮三分类口径（modeling standard-fields 已过滤、档案侧漏改，同类模式缺失）致 18 个 unassigned 字段混入 schema（38 vs 建模 28）；叠加 schema 快照过期（33/38 字段分组与域8 现分组不一致）；③ArchiveRecord 仅 Meta ordering=-updated_at 无置顶。经 AskUserQuestion 确认：治本统一口径+刷新 / 后端排序未同步置顶。整改（均在 archive/views.py）：①_field_released 加三分类判定（sf需status='active'、solo需archive_category='base'），唯一门控收口——schema生成/sync_to_source回写映射/modeling archive-preview 三调用点自动统一；②_generate_schema_from_domain 排序改 group__sort_order nulls_last+group__id+sort_order；③ArchiveRecordViewSet.get_queryset 加 Case/When annotate（synced→1 其余→0）order_by(_sync_rank,-updated_at)。注意 sync_status 是普通 CharField 无枚举类，只能写字符串字面量。验证：档案5 sync-schema 200，schema_version 2→3、字段 38→29（27物理+2计算）、分组顺序=经纬度/门店信息/省市区/联系信息/状态信息/地理位置/(空)/计算字段与域8一致、未分配字段残留无；置顶排序可逆实测 PASS（最旧记录临时置 unsynced 后 API 首条即它，已还原）。新建 output/darc/debug-diary-archive.md 登记 BUG-2026-0728-03
+**修改文件**：
+- `backend/apps/modeling/views.py`：StandardFieldViewSet 新增 `rename_solo` action（独立字段改名，级联更新 schema/records/consistency）
+- `frontend/src/api/modeling.ts`：standardFieldApi 新增 `renameSolo` 方法
+- `frontend/src/views/modeling/DomainFieldConfig.vue`：改名按钮从组合字段表移到属性配置 Tab（支持 equiv+solo 两种 kind）；组合字段表操作列移除改名
+- `frontend/src/views/modeling/DomainList.vue`：配置检查按钮从操作列移入配置状态标签（可点击 tag + tooltip）；操作列宽 360→280
+- `frontend/src/views/archive/ConsistencyCheck.vue`：完全重写为分组设计——4 个检查类型统计卡片（点击展开/收起）+ 展开后按日期分组 + 日期组可折叠
 
-### 第三十七轮（2026-07-25）标签：/modeling/domains/、测试报告
+**验证结果**：45 测试 PASS，vue-tsc 0 errors
 
-- **更早操作**：2026-07-25 — 测试报告2项修复（第三十七轮）：页面 /modeling/domains/:id/fields 公式编辑器FormulaEditor两项修正。①侧边栏函数库+字段引用加loading/error/重试状态；②移除「释放到档案」开关。验证：vue-tsc 0 errors
+### 第一百零六轮（2026-08-04）标签：测试报告 3 项（域检查 + 改名 + 一致性大改）
+
+**涉及模块**：archive、modeling
+
+**修改文件**：
+- `backend/apps/archive/models.py`：ConsistencyIssue 新增 CheckType 枚举（4 种）、check_type/check_rule_key/detail 字段；新增 ConsistencyCheckRule 模型；唯一约束加 check_type
+- `backend/apps/archive/migrations/0013_consistencycheckrule_and_more.py`：新建迁移
+- `backend/apps/archive/serializers.py`：ConsistencyIssueSerializer 加 check_type/check_rule_key/detail 字段；新增 ConsistencyCheckRuleSerializer
+- `backend/apps/archive/views.py`：consistency_check 扩展 4 种检查类型（composite_member/archive_source_diff/orphan_source_record/schema_drift）+ 失效规则过滤；新增 ConsistencyCheckRuleViewSet（list/toggle/disable/enable）；ConsistencyIssueViewSet 加 check_type 筛选
+- `backend/apps/archive/urls.py`：注册 consistency-rules 路由
+- `backend/apps/modeling/views.py`：_check_domain_config 8 项检查 + DomainViewSet.check_config + perform_update P0 前置拦截 + StandardFieldViewSet.rename 级联改名
+- `frontend/src/views/modeling/DomainList.vue`：配置状态列 + 启用/停用开关 + 配置检查弹窗
+- `frontend/src/views/modeling/DomainFieldConfig.vue`：组合字段改名按钮 + 改名弹窗
+- `frontend/src/views/archive/ConsistencyCheck.vue`：全面重写——4 种检查类型筛选/渲染 + 失效规则管理抽屉 + 规则失效弹窗
+- `frontend/src/api/archive.ts`：新增 consistencyRuleApi（list/disable/enable/toggle/delete）
+- `frontend/src/api/modeling.ts`：domainApi 加 patch/checkConfig；standardFieldApi 加 rename
+- `frontend/src/types/index.ts`：ConsistencyIssue 加 check_type/check_type_display/check_rule_key/detail；新增 ConsistencyCheckRule/CheckType 类型
+
+**验证结果**：45 测试 PASS，vue-tsc 0 errors
+
+### 第一百一十轮（2026-08-05）标签：/archive/记录变更历史、同步引擎
+
+**任务**：用户反馈变更历史面板同一秒、同一记录的同批字段出现重复"修改"明细（清空+回填配对），排查根因并修复 + 清理存量污染。
+
+**读取/排查**：
+- dev.db 实证：档案9 record#11574（GZT0001）batch#48 中两条明细 v4→5 清空三字段、v5→6 写回原值；batch#48 全批 1522 条明细 = 761 清空 + 761 回填，全部假变更
+- D_CHECK_DATE/N_AREA/STORE_VERSION 同时存在于表19（有值）和表20（全 null），code_to_physical 映射只挂表19（先到者独占）；Table ordering=['-created_at'] 使表20 先于表19 处理
+
+**根因**：`_upsert_records_from_rows` 行级兜底 `if col_name in schema_type_map` 让未映射给本表的同名空列偷渡写入 → 表20 先清空（假变更①）→ 表19 再写回（假变更②），每轮刷新必现。同类排查发现 `_preview_data_changes` 存在同构漏洞。
+
+**修改文件**：
+- `backend/apps/archive/views.py`：两处同名兜底收紧为仅主键列（保跨表记录匹配）——写入侧 _upsert_records_from_rows、预检侧 _preview_data_changes
+- `backend/apps/archive/tests.py`：新增 SyncFieldNameLeakTest 回归测试（mock _query_local_table 注入辅表同名空列，断言不清空/不 bump 版本/不建批次）
+- `backend/scripts/cleanup_fake_sync_changes.py`：新建存量清理脚本（默认 dry-run），已 --apply 执行
+
+**验证结果**：archive 套件 19/19 PASS；清理删假明细 1522 + 假快照 1522 + 空批次 [48]，重编号 761 条记录；修复后对档案9 只读预检 would_create/update/deactivate 全 0；record#11574 版本链归位 [1,2,3,4]
+
+**状态变更**：BUG-2026-0805-01 已闭环（代码修复 + 回归测试 + 存量清理），登记 debug-diary-archive / constitution / route_index
+
+**遗留问题**：域配置层可对“多表同名未归并字段”给显式告警（待用户决策）
+
+### 第一百一十四轮（2026-08-05）标签：/archive/api-management、REQ-005、API Key 鉴权、设计
+
+**涉及模块**：archive（纯设计，零代码变更）
+
+**任务**：用户要求“设计一下 API 管理的部分”。首轮 AskUserQuestion 被用户取消并提醒补读 reqa 需求文档（幻觉闸门生效：未读需求文档就出方案属猜测）；补读后定位 REQ-005「接口开放与权限配置」（F-204 API接口配置 + F-205 API密钥管理，归属 auth 模块待启动）与现状差距：无密钥/无真实端点/无文档/无限流/仅读。
+
+**方向锁定**（两轮 AskUserQuestion 共 5 问，用户全选推荐项零改向）：①完整落地 REQ-005 API 部分；②推翻宪法 2026-07-23「真实鉴权留待 auth 模块」——本期自建 API Key 真实鉴权；③读写全设计（守 Hub 宪法永不回写源表，写落 manual_data/软停用）；④独立密钥×多 API 授权（ApiKeyGrant）；⑤调用日志落库 90 天+近 7 天统计。
+
+**产出**：
+- `output/darc/design-diary-archive.md`：v19 完整设计（方向锁定/设计原则/业务流程/数据模型 ApiKey+ApiKeyGrant+ApiCallLog+ArchiveApi 扩展/对外网关契约 /api/open/{slug}/ 读写六端点+拦截链 401→403→429/管理端密钥端点/前端双 Tab 交互/方向承载点清单/实施顺序/验收标准）
+- `.ai/constitution.md`：架构级新增「API管理完整落地 REQ-005(v19)」决策；旧「API开放权限」决策移入历史区并注推翻
+- `.ai/route_index.md`：archive 待办「ArchiveApi 鉴权强化」更新为已出 v19 设计待编码
+
+**状态变更**：无（纯设计轮）；下一步待用户发令按 v19 实施顺序编码（①模型迁移→⑦daemon 清理）
+
+**遗留问题**：无
+
+### 第一百一十五轮（2026-08-05）标签：/archive/api-management、字段释放粒度、补登记
+
+**涉及模块**：archive（纯文档登记，零代码变更）
+
+**任务**：用户关注「API 配置能否配置不同字段释放给不同的 API，要增加这个」。基于代码事实核实：该能力已存在（ArchiveApi.exposed_fields 挂每个 API 独立，前端抽屉分组勾选，v19 网关读投影/写限 exposed∩archive）；AskUserQuestion 确认用户选「现状已够，补登记即可」，不引入读写分离字段清单/密钥级字段再收窄。
+
+**修改文件**：
+- `output/darc/design-diary-archive.md`：v19 设计原则区补「字段释放粒度=每 API 独立」条目（含两层释放衔接说明）
+- `.ai/constitution.md`：「API管理完整落地 REQ-005(v19)」决策行尾追加字段释放粒度句
+
+**状态变更**：无；设计待编码状态不变
+
+### 第一百一十七轮（2026-08-05）标签：/archive/api-management、v19 编码落地、REQ-005
+
+**涉及模块**：archive（编码轮；uxqa 设计评审关已先行下发 7 条开发约束）
+
+**任务**：v19 REQ-005 API 管理全栈编码实施（延续第一百一十四轮设计），按实施顺序 ①模型迁移→⑦daemon 完成，本轮收尾测试+留痕。
+
+**修改文件**：
+- `backend/apps/archive/models.py`：ApiKey/ApiKeyGrant/ApiCallLog 新模型 + ArchiveApi 扩展 slug/allowed_operations/rate_limit_per_min + ChangeSource.API（迁移0014）
+- `backend/apps/archive/open_api_auth.py`（新建137行，方向承载点）：鉴权链 401/授权 403/限流 429/日志/90天清理
+- `backend/apps/archive/open_api_gateway.py`（新建388行，方向承载点）：网关六端点 + build_docs；PATCH 复用 ArchiveRecordUpdateSerializer（批次 change_source=api），POST 主键落 source_data+可写字段落 manual_data
+- `backend/apps/archive/serializers.py`：批次解析提前+ArchiveApiSerializer 扩展（自动 slug）+密钥三序列化器
+- `backend/apps/archive/views.py`：ApiKeyViewSet（CRUD/rotate/revoke/call-logs）+api_call_stats+docs action
+- `backend/apps/archive/urls.py`：api-keys/api-call-stats/open 网关路由
+- `backend/apps/archive/apps.py`：修复重复类定义存量 Bug（daemon 从未启动）+90天日志清理并入循环
+- `backend/apps/archive/tests.py`：新增 19 条用例（OpenApiGatewayTest 13 + ApiKeyManagementTest 6）
+- 前端：ApiManagement.vue 重写双 Tab+文档抽屉（680行）；新建 components/ApiKeyTab.vue（391行）；api/archive.ts + types 扩展
+- 留痕：dev-diary-archive v19 实施条目、route_index 状态/文件索引/Bug 行、REUSE_CATALOG 回填 3 工具、ux-review-archive v19 评审关
+
+**验证结果**：archive 37/37 PASS；archive+modeling 定向回归 54/54 PASS；vue-tsc 0 errors；真实请求实测 18/18 PASS（管理端 CRUD+docs/密钥明文一次/网关 401×2/投影/写拒 400×2/越权 403/日志统计/轮换/吊销），实测残留已清理、脚本已删
+
+**状态变更**：v19 从「待编码」→「已交付」（uxqa 交付验收关通过）
+
+**uxqa 交付验收**：四维核查全 ✅；checklist 21/21 ✅（A1-A3/A9/B1-B2/C2/C7-C9/D1/D7-D8/E4/F1/F3/G1/G4/H1/I1/J2）；发现 P2 R-054（密钥表 scroll.x=1100 偏小）→ 已修复为 1300 并闭环；浏览器实跑 0 error / 网络 3 请求全 200 / Tab 深链验证通过
+
+### 第一百一十八轮（2026-08-05）标签：/archive/api-management、测试报告、只读、测试接口
+
+**任务**：测试报告 3 项修复：①API 管理页改只读；②修复暴露字段 checkbox-group 跨分组清空 bug；③新增测试接口功能
+
+**修改文件**：
+- `frontend/src/views/archive/ApiManagement.vue`：
+  - 移除「新建」按钮（行 27）
+  - 操作列只保留「数据」「文档」「测试」（移除编辑/删除/启停用）
+  - API 名称从可点击链接改为纯文本
+  - 移除整个编辑抽屉模板（120 行）+ 相关函数/状态变量（250 行）
+  - 修复 checkbox-group bug：改独立 checkbox + `toggleField` 函数手动管理数组
+  - 新增测试接口 Modal（URL 展示/API Key 输入/发送请求/响应展示）
+  - 清理未使用 import（Empty/Modal/ArchiveSchemaItem/ApiFilterCondition）
+
+**验证结果**：vue-tsc 0 errors；回归 104/104 PASS
+
+**状态变更**：API 管理页从「可编辑」→「只读」+ 新增测试功能
+
+### 第一百二十轮（2026-08-05）标签：/archive、权限全景、只读审计、API 聚合
+
+**任务**：新需求「档案管理增加权限功能菜单，一站式看档案配了什么 API/释放字段/调用系统/角色/用户/字段授权」；质问闸门 3 问锁定：入口=档案列表操作列、仅管理员、只读+跳转配置
+
+**修改文件**：
+- `backend/apps/archive/views.py`：ArchiveViewSet 新增 `permission_overview` action（83 行）：IsMdmAdmin 403；聚合机器权限（ArchiveApi+ApiKeyGrant+ApiCallLog 按密钥聚合调用统计）+人用权限（RoleFieldPermission+角色用户）；零新模型
+- `backend/apps/archive/tests.py`：新增 PermissionOverviewTest 3 用例（结构全断言/非管理员 403/空档案 200）
+- `backend/smoke_permission_overview.py`：新建实测脚本 7 项断言
+- `frontend/src/views/archive/components/PermissionOverview.vue`：新建 203 行抽屉组件（960px 两区块+去配置跳转）
+- `frontend/src/views/archive/ArchiveList.vue`：操作列「权限」链接（v-if isAdmin，getMeApi 判定）+抽屉挂载
+- `frontend/src/api/archive.ts`、`frontend/src/types/index.ts`：permissionOverview API + 3 接口
+
+**验证结果**：定向回归 40/40 PASS；vue-tsc 0 errors；实测 7/7 PASS（admin 档案 9 200+结构齐、probe_user 403）；Browser 验证 admin 抽屉两区块数据正确+probe_user 无入口+console 零报错
+
+**环境操作**：实测前重启后端（旧进程未加载新 action）；杀进程前 netstat 确认端口状态（沿用上轮双进程教训），taskkill 需提权
+
+**状态变更**：新增「权限全景」只读审计视图，archive 待 uxqa 验收
+
+### 第一百二十二轮（2026-08-06）标签：/archive/versions、菜单高亮、变更日志
+
+**背景**：用户反馈“明明是变更日志功能，为什么菜单跳到档案管理”——变更日志明细页（/archive/versions?domain=11）左侧高亮「档案管理」而非「变更日志」。方向判定表：不触及数据流向/存储模型/模块边界/核心交互范式（纯前端展示层路由联动）。
+
+**路由**：prjm Bug 流程 → code review 定位根因 → 同类全排查+复发核查 → 方案对比 AskUserQuestion（用户选治本）→ darc 修复。
+
+**根因**：MainLayout.vue 高亮白名单 allMenuKeys 手动维护，/archive/versions（变更日志明细页，无独立菜单项）漏登记，最长前缀匹配落入 /archive。同类排查：全部子路由仅此一错（/archive/:id 等档案下钻命中档案管理属合理）；复发核查：与 R-013 同属菜单高亮类第二次但根因不同。
+
+**修改文件**：frontend/src/layouts/MainLayout.vue 单文件——①collectMenuKeys 递归从 menuItems 提取路径 key（替代手动白名单）②MENU_ALIAS_PREFIX 下钻页别名表（/archive/versions → /archive/domain-changes）③watchEffect 移到 menuItems computed 声明之后（TDZ 修复）
+
+**二次缺陷拦截**：首版修复把 watchEffect 留在 menuItems 声明之前，首次同步执行 TDZ 全站白屏；Browser 实测第一轮发现，移后解决。vue-tsc 无法检出此类运行时 TDZ。
+
+**验证**：vue-tsc 0 errors；Browser 子代理 5 页实测（变更日志×2/档案管理/域管理/API管理）DOM 检测 ant-menu-item-selected 5/5 符合期望，控制台零 error；截图工具故障未留图，结论靠 DOM class 确定性核验
+
+**状态变更**：debug-diary-archive 新增 BUG-2026-0806-01；constitution 已知问题表+route_index Bug 表已登记；archive 待 uxqa 验收
+
+
+### 第123轮（2026-08-06）标签：/archive/记录启停、/settings/roles、uxqa整改、R-055、R-058
+
+- 读取文件：rectification-list.md 第118轮整改区段、ArchiveDetail.vue（doToggleStatus/开关绑定/既有 Modal.confirm 风格）、RoleManagement.vue、apps/auth/views.py perform_destroy、apps/auth/models.py（CASCADE 关系）、frontend/package.json
+- 修改文件：ArchiveDetail.vue（doToggleStatus 包 Modal.confirm）、RoleManagement.vue（import Modal + 模板改 a 链接 + 新增 confirmDelete）
+- 变更摘要：R-055 档案记录启停无确认（全站唯一无防护危险点）→ Modal.confirm 二次确认（停用=danger/启用=primary）；R-058 删除角色 popconfirm → Modal.confirm（不可逆删除防护与全站对齐）
+- 方向判定表（rule §11）：数据流向不触及（纯前端交互层）/存储模型不触及（零后端改动）/模块边界不触及（archive/auth 内部）/核心交互范式=执行已锁定决策（constitution 三维选型+第118轮拍板），非新方向 → 无需 §11.1 循环
+- 验证：vue-tsc -b 0 errors；Browser 子代理实测 2/2 PASS（启停弹窗出现+取消回弹+列表不刷新；删角色弹窗出现+取消角色仍在）；console 0 error
+- 状态变更：rectification-list R-055/R-058 → ✅ 已闭环；整改单剩余 R-056/R-057/R-059/R-060/R-061/R-062 六项 ⏳ 待整改
+- 遗留问题：剩余六项整改待后续轮次派单（R-056 记录详情转抽屉为下一候选）；archive/auth 仍待 uxqa 交付验收关
+
+### 第120轮（2026-08-05）下沉：档案权限全景只读审计视图
+
+档案列表操作列「权限」链接（仅管理员）→ 960px 抽屉两区块（机器权限：API/暴露字段/授权密钥/按密钥聚合调用统计；人用权限：角色×域字段白名单/用户），区块头「去配置」跳既有配置页；后端 GET /archives/{id}/permission-overview/（IsMdmAdmin 403，零新模型聚合 v19+REQ-019 数据）；新增用例 3 条 40/40 PASS + 实测 7/7 + 浏览器验证全过
+
+### 第124轮（2026-08-06）标签：/archive/记录详情、R-056、弹窗转抽屉、uxqa整改
+
+- 读取文件：rectification-list.md 第118轮整改区段、ArchiveDetail.vue（detailModal 全量+openDetailDrawer+schemaGridStyle）、全站 a-drawer 档位扫描（760/900/960/1000）、frontend/package.json
+- 修改文件：ArchiveDetail.vue（detailModal 容器 a-modal→a-drawer 1100px；底部关闭/暂存修改按钮移入 #footer slot 固定底栏）
+- 变更摘要：R-056 记录详情 1400px modal → 1100px 大抽屉（右侧滑入不遮记录列表可边看边改；暂存编辑/变更预览/分组网格全保留；状态变量名 detailModal 与 openDetailDrawer 未动，调用方零影响；沿用全站既有 a-drawer 骨架无新组件）
+- 方向判定表（rule §11）：数据流向不触及（纯前端容器形态）/存储模型不触及（零后端改动）/模块边界不触及（archive 内部）/核心交互范式=执行已锁定决策（第118轮三维选型拍板+本轮用户确认 5 批计划），非新方向 → 无需 §11.1 循环
+- 验证：vue-tsc -b 0 errors；Browser 子代理实测 6/6 PASS（右侧滑入 ant-drawer 宽 1100px 无 ant-modal/元信息+26 字段齐全/footer 固定底栏/暂存修改初禁用改字段后启用+1 字段变更预览/关闭后列表完好/console 0 error）
+- 状态变更：rectification-list R-056 → ✅ 已闭环；整改进度 3/8，剩余 R-057/R-059/R-060/R-061/R-062 五项 ⏳
+- 遗留问题：批2=R-057 变更历史抽屉收敛（ArchiveDetail+VersionManagement 两处同构弹窗收敛为单组件）；archive/auth 仍待 uxqa 交付验收关
+
+### 第125轮（2026-08-06）标签：/archive/变更历史、R-057、组件收敛、uxqa整改
+
+- 读取文件：rectification-list.md 第118轮整改区段、ArchiveDetail.vue（historyModal + 回滚相关十函数 + openDetailDrawer 死预载）、VersionManagement.vue（historyModal + loadHistory + openHistory/openHistoryFromRecord）、ChangeDetail 类型定义、全站 a-drawer 档位
+- 修改文件：components/ChangeHistoryDrawer.vue（新建 201 行）、ArchiveDetail.vue（5 对替换）、VersionManagement.vue（5 对替换）
+- 变更摘要：R-057 变更历史两处同构拷贝收敛为 ChangeHistoryDrawer 单组件（900px 抽屉 + a-timeline + 双粒度回滚 dropdown）；props open/recordId/title/enableRollback 区分 AD 带回滚 / VM 只读；加载口径统一 VM 全量分页、色映射取 AD 完整版；AD 侧附带清理 121 行死预载代码（详情内回滚面板遗留）
+- 方向判定表（rule §11）：数据流向不触及（纯前端组件收敛）/存储模型不触及（零后端改动）/模块边界不触及（archive 内部）/核心交互范式=执行已锁定决策（第118轮三维选型拍板 + 清单原文「收敛为单组件复用」）→ 无需 §11.1 循环
+- 验证：vue-tsc -b --force 0 errors；Browser 子代理实测 8 项全 PASS（AD 侧 900px 抽屉/时间线 12 条含版本映射/双粒度回滚 dropdown/关闭重开重载/随记录切换；VM 侧同款只读回滚按钮数=0/记录详情弹窗内转历史）；console 0 error（截图受自动化浏览器渲染帧限制未留存，DOM/Network 证据链完整）
+- 状态变更：rectification-list R-057 → ✅ 已闭环；整改进度 4/8，剩余 R-059/R-060/R-061/R-062 四项 ⏳
+- 遗留问题：批3 = R-062 刷新预检收敛（ArchiveList + ArchiveDetail 两处同构弹窗收敛单组件）；archive/auth 仍待 uxqa 交付验收
+
+### 第126轮（2026-08-06）标签：/archive/刷新预检、R-062、组件收敛、uxqa整改
+
+- 读取文件：rectification-list.md 第118轮整改区段、ArchiveList.vue 全量（刷新预检弹窗 L41-126 + doRefreshPreview/confirmRefresh）、ArchiveDetail.vue 刷新预检区段（L256-343 + refreshData/doRefreshPreview/confirmRefresh/showConsistencyWarning）、components 目录现状
+- 修改文件：components/RefreshPreviewModal.vue（新建 115 行）、ArchiveList.vue（切片替换 L41-126 + import + stats 文案泛化）、ArchiveDetail.vue（切片替换 L256-343 + import）
+- 变更摘要：R-062 刷新预检两处同构弹窗收敛为 RefreshPreviewModal 单组件（760px modal，props open/previewData/archiveName，emit confirm）；职责边界：组件只管展示+确认意图，执行逻辑留父组件（两处刷新对象不同）；AL stats 文案顺带泛化（补复活文案+同步/刷新动词区分，R-048/R-049 同类分叉补齐）
+- 方向判定表（rule §11）：数据流向不触及（纯前端组件抽取）/存储模型不触及（零后端改动）/模块边界不触及（archive 内部）/核心交互范式=执行已锁定决策（第118轮三维选型拍板 + R-062 清单原文「收敛为单组件」）→ 无需 §11.1 循环
+- 验证：vue-tsc -b --force 0 errors；Browser 子代理实测 6 项 PASS——无变化分支 toast+不弹窗；schema 变化分支（子代理主动注入建模变化 SF#27 触发：弹窗 760px 带档案名标题、取消零 POST、确认 sync-schema 200 + 列表版本 2→3）；详情页按钮 loading+同款弹窗+确认后记录表重载；DOM 单实例无残留；console 0 error；注入测试后数据复原（截图受 hidden-tab 渲染冻结未留存，DOM/Network 证据链完整）
+- 状态变更：rectification-list R-062 → ✅ 已闭环；整改进度 5/8，剩余 R-059/R-060/R-061 三项 ⏳
+- 遗留问题：批4 = R-059 字段管理近全屏 modal → 大抽屉 + R-061 window.prompt 改 Modal 表单；archive/auth 仍待 uxqa 交付验收
+
+### 第一百三十六轮（2026-08-10）标签：明细致子表批3a+3b、前端、关系管理配置、明细展示、变更日志、detail_sync
+
+**任务**：明细致子表批3a+3b（前端）实施。方向判定表：四项不触及（纯前端扩展 + 后端简单查询 action，不涉及数据流向/存储模型/模块边界/核心交互范式变更）。
+
+**变更文件**：
+
+**批3a（关系管理配置页）**：
+- `frontend/src/types/index.ts`：FieldMapping 扩展——relation_type/row_key_field/display_sort_field/display_sort_desc/conditions
+- `frontend/src/api/modeling.ts`：fieldMappingApi 新增 `update` (PATCH) + `detectRowKey` 方法
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：
+  - 模板：映射表格加「关系类型」列（明细子表蓝标签/引用灰标签）；编辑弹窗加关系类型 select（reference/detail）+ detail 配置区（行键字段 select+检测按钮/代表行排序字段 select/排序方向 switch/筛选条件 JSON 输入）
+  - Script：form 扩展 detail 字段、`detectingRowKey` ref、`openCreate/openEdit` 回填 detail 字段、`handleSubmit` 创建后 PATCH 更新 detail 配置（引用类型清除遗留配置）、`detectRowKey()` 调用后端 /detect-row-key/ 自动匹配、`onRelationTypeChange()` 切换引用时清空 detail 字段
+
+**批3b（明细展示 + 变更日志）**：
+- `backend/apps/archive/serializers.py`：新增 `ArchiveRecordDetailRowSerializer`（ArchiveRecordDetail 模型序列化器，含 mapping_name）
+- `backend/apps/archive/views.py`：ArchiveRecordViewSet 新增 `@action(detail=True, methods=['get'], url_path='details')` → `GET /records/{id}/details/` 返回明细行列表
+- `frontend/src/api/archive.ts`：archiveRecordApi 新增 `listDetails(id)` 方法
+- `frontend/src/views/archive/ArchiveDetail.vue`：操作列新增「明细」按钮 + 900px 明细子表行 drawer（行键/数据/状态/更新时间列，数据字段以 JSON 键值对展示）+ 状态变量 + loadDetailRows 函数
+- `frontend/src/views/archive/components/ChangeHistoryDrawer.vue`：时间线新增 `detail_sync` 类型聚合条目展示（新增/更新/移除行数统计）+ 普通明细行展示关联 detail_group/detail_row_key 信息；timelineColor/changeTypeColor/canRollbackDetail 均扩展 `detail_sync` 类型
+- `frontend/src/types/index.ts`：FieldChange 扩展 `detail_stats?: { created: number; updated: number; deactivated: number }`
+
+**验证**：vue-tsc 0 errors；后端序列化器导入验证通过。无新测试用例（明细展示为纯前端展示，后端 endpoint 为简单查询，已有记录列表测试覆盖）。
+
+**遗留问题**：
+- 域 14 实际配置 detail 关系 + 全量同步实测留批4
+- 明细行 20 万级首次全量性能待实测（批4 全量同步时观察）
+
+### （续上轮 2026-08-08）标签：DB诊断脚本合并
+
+**任务**：用户反馈 3 个 DB 检查脚本（check_db_contents / check_db_storage / check_db_field_sizes）设计杂乱，合并优化。
+
+**问题清单**：
+1. 三个脚本割裂，Django setup 重复 3 次
+2. 矛盾结论：check_db_contents 只看 data 字段（828 字符）结论有误，check_db_field_sizes 才发现 schema 字段（73KB）才是真凶
+3. 无统计分布：100 条采样不给中位数/百分位
+4. 代码 Bug：`avg_ver_per_rec = ver_cnt / ver_cnt`（自除恒为1）、`pragm_page_count` 拼写错误、MB 换算写错
+5. 只列症状不开药方
+
+**变更**：
+- 删除 `scripts/check_db_contents.py`
+- 删除 `scripts/check_db_storage.py`
+- 删除 `scripts/check_db_field_sizes.py`
+- 新建 `scripts/check_db_diagnostics.py`（三合一）
+  - 字段大小分布：原生 SQL 不走 ORM deserialize，2000 行随机抽样，输出均值/中位数/P90/P95/P99/最大
+  - 存储分析：优先 dbstat 虚拟表精确页统计，fallback 近似估算
+  - 版本分布直方图（对数分桶），极端记录 TOP5 追溯
+  - schema 非空占比检查（反映回填进度）
+  - 综合诊断 + 推荐操作步骤
+
+**验证**：import 通过。
+
+**回执**：闸✓ 记✓ 拓✓ 测✓（无新增路径）

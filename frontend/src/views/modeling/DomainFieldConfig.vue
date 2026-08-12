@@ -126,9 +126,7 @@
               <template v-else-if="column.key === 'action'">
                 <a-space v-if="record._isFirst">
                   <a-button type="link" size="small" @click="openMembersDistinct(record._sfRecord)">管理</a-button>
-                  <a-popconfirm title="释放该组合字段？成员将回到未分配" @confirm="deleteCompositeField(record._sfRecord)">
-                    <a-button type="link" size="small" danger>释放</a-button>
-                  </a-popconfirm>
+                  <a-button type="link" size="small" danger @click="confirmReleaseComposite(record._sfRecord)">释放</a-button>
                 </a-space>
               </template>
             </template>
@@ -213,7 +211,23 @@
           <span class="panel-title">分组</span>
           <a-space :size="4">
             <a-button type="link" size="small" :loading="aiLoading.group" @click="runAutoGroup">AI分组</a-button>
-            <a-button type="link" size="small" @click="openCreateGroupModal(null)">+ 新建</a-button>
+            <a-dropdown :trigger="['click']">
+              <a-button type="link" size="small" @click.stop><EditOutlined /> 编辑</a-button>
+              <template #overlay>
+                <a-menu>
+                  <a-menu-item key="create" @click="openCreateGroupModal(activeGroupId && activeGroupId > 0 ? activeGroupId : null)">
+                    {{ activeGroupId && activeGroupId > 0 ? '新建子分组' : '新建分组' }}
+                  </a-menu-item>
+                  <a-menu-item key="rename" :disabled="!activeGroupId || activeGroupId === 0" @click="activeGroupId && activeGroupId > 0 && renameGroup({ id: activeGroupId, name: getGroupName(activeGroupId) || '' })">
+                    重命名当前分组
+                  </a-menu-item>
+                  <a-menu-divider />
+                  <a-menu-item key="delete" :disabled="!activeGroupId || activeGroupId === 0" danger @click="activeGroupId && activeGroupId > 0 && confirmDeleteGroup(activeGroupId)">
+                    删除当前分组
+                  </a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
           </a-space>
         </div>
         <div class="category-list">
@@ -232,19 +246,12 @@
               draggable="true"
               @dragstart="onGroupNodeDragStart($event, node.id)" @dragend="onGroupNodeDragEnd"
               @click="activeGroupId = node.id" @dragover.prevent="dropTargetGroupId = node.id" @dragleave="dropTargetGroupId = null" @drop="onDropToGroup(node.id)">
-              <span class="category-item__name">
+              <span class="category-item__name" @click.stop="activeGroupId = node.id; renameGroup(node)" style="cursor: text">
                 <span v-if="node.hasChildren" class="tree-toggle" @click.stop="toggleGroupExpand(node.id)">{{ expandedGroupIds.has(node.id) ? '▾' : '▸' }}</span>
                 <span v-else style="display:inline-block;width:14px"></span>
                 {{ node.name }}
               </span>
-              <a-space :size="4">
-                <a-badge :count="getGroupFieldCount(node.id)" :number-style="{ backgroundColor: '#e6f4ff', color: '#1677ff', fontSize: '11px' }" />
-                <a-button v-if="node.level < 3" type="link" size="small" style="padding:0;font-size:12px" @click.stop="openCreateGroupModal(node.id)" title="新建子分组">➕</a-button>
-                <a-button type="link" size="small" style="padding:0;font-size:12px" @click.stop="renameGroup(node)">✏️</a-button>
-                <a-popconfirm title="确认删除该分组？子分组上浮，字段变为未分组" @confirm="deleteGroup(node.id)">
-                  <a-button type="link" size="small" danger style="padding:0;font-size:12px" @click.stop>🗑️</a-button>
-                </a-popconfirm>
-              </a-space>
+              <a-badge :count="getGroupFieldCount(node.id)" :number-style="{ backgroundColor: '#e6f4ff', color: '#1677ff', fontSize: '11px' }" />
             </div>
           </template>
         </div>
@@ -322,6 +329,13 @@
             <a-input v-model:value="attrSearchText" placeholder="搜索：编码/名称" allow-clear style="width: 240px" size="small" />
           </a-space>
         </div>
+        <a-alert v-if="dupGroups.length" type="warning" show-icon style="margin:8px 16px 0"
+          :message="`${dupGroups.length} 组同名字段存在于多张表但未归并到同一标准字段（同名空列可能干扰同步语义）`">
+          <template #description>
+            <span>请逐组处置：改名区分语义 / 归并到同一标准字段 / 将多余列设为不释放到概念层。冲突行已标「同名」角标。</span>
+            <a-checkbox v-model:checked="attrDupOnly" style="margin-left:12px">只看冲突字段</a-checkbox>
+          </template>
+        </a-alert>
         <div class="table-wrapper">
           <a-table :data-source="filteredAttrFields" :columns="attrColumns" row-key="key" :pagination="false" size="small" :scroll="{ y: 'calc(100vh - 320px)' }">
             <template #bodyCell="{ column, record }">
@@ -335,6 +349,9 @@
                   <KeyOutlined style="color:#faad14;margin-right:4px" />
                 </a-tooltip>
                 <span>{{ record.standard_code }}</span>
+                <a-tooltip v-if="attrDupGroup(record)" :title="dupTooltip(attrDupGroup(record)!)">
+                  <a-tag color="orange" style="margin-left:4px">同名</a-tag>
+                </a-tooltip>
               </template>
               <template v-else-if="column.key === 'tables'">
                 <span v-if="!record.tables || !record.tables.length" style="color:#bfbfbf">—</span>
@@ -391,6 +408,10 @@
                 <span v-if="record.kind === 'computed'" style="color:#bfbfbf">—</span>
                 <span v-else>{{ record.member_count }}</span>
               </template>
+              <template v-else-if="column.key === 'attr_action'">
+                <a-button v-if="record.kind !== 'computed'" type="link" size="small" @click="openAttrRenameModal(record)">改名</a-button>
+                <span v-else style="color:#bfbfbf">—</span>
+              </template>
             </template>
           </a-table>
         </div>
@@ -441,6 +462,21 @@
       </a-form>
     </a-modal>
 
+    <!-- 字段改名弹窗（属性配置 Tab 统一入口，支持组合字段和独立字段） -->
+    <a-modal v-model:open="renameModalVisible" :title="renameModalTitle" ok-text="保存" cancel-text="取消" :confirm-loading="renameSubmitting" @ok="submitRename">
+      <a-alert type="warning" show-icon style="margin-bottom:12px">
+        <template #message>改名将级联更新档案 schema、档案记录数据、一致性检查记录。历史变更日志中的旧编码保留原样。</template>
+      </a-alert>
+      <a-form layout="vertical">
+        <a-form-item label="字段编码" required>
+          <a-input v-model:value="renameForm.new_code" placeholder="新字段编码" />
+        </a-form-item>
+        <a-form-item label="字段名称">
+          <a-input v-model:value="renameForm.new_name" placeholder="新字段名称" />
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
     <!-- 计算字段公式编辑器 -->
     <FormulaEditor
       v-model:open="formulaEditorOpen"
@@ -455,6 +491,23 @@
       :domain-id="domainId"
       :field="trialCalcField"
     />
+
+    <!-- 分组新建/重命名表单弹窗（R-061：替代浏览器原生 window.prompt，名称必填校验） -->
+    <a-modal
+      v-model:open="groupFormModal"
+      :title="groupFormTitle"
+      width="480px"
+      okText="确认"
+      cancelText="取消"
+      :okButtonProps="{ disabled: !groupFormName.trim() }"
+      @ok="submitGroupForm"
+    >
+      <a-form layout="vertical">
+        <a-form-item label="分组名称" required>
+          <a-input v-model:value="groupFormName" placeholder="请输入分组名称" :maxlength="50" @pressEnter="submitGroupForm" />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
@@ -462,7 +515,7 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { KeyOutlined } from '@ant-design/icons-vue'
+import { KeyOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { extractApiError } from '@/utils/apiError'
 import { domainApi, fieldApi, standardFieldApi, computedFieldApi, fieldGroupApi } from '@/api/modeling'
 import type { StandardFieldModel, ManualFieldCandidate, StandardFieldMemberDistinct, ComputedFieldModel, FieldCategoryCounts, StandardFieldAggregate } from '@/api/modeling'
@@ -814,18 +867,67 @@ async function loadGroupTabData() {
   groupAggregates.value = [...aggs, ...compRows]
 }
 
+// 分组新建/重命名统一表单弹窗（R-061：浏览器原生 window.prompt → Modal 表单，名称必填校验）
+const groupFormModal = ref(false)
+const groupFormMode = ref<'create' | 'rename'>('create')
+const groupFormParentId = ref<number | null>(null)
+const groupFormTargetId = ref<number | null>(null)
+const groupFormOriginal = ref('')
+const groupFormName = ref('')
+
+const groupFormTitle = computed(() => {
+  if (groupFormMode.value === 'rename') return '重命名分组'
+  const parentName = groupFormParentId.value ? getGroupName(groupFormParentId.value) : null
+  return parentName ? `新建「${parentName}」下的子分组` : '新建分组'
+})
+
 function openCreateGroupModal(parentId: number | null) {
-  const parentName = parentId ? getGroupName(parentId) : null
-  const label = parentName ? `请输入「${parentName}」下的子分组名称` : '请输入分组名称'
-  const name = prompt(label)
-  if (!name?.trim()) return
-  fieldGroupApi.create({ domain: domainId, name: name.trim(), parent: parentId }).then(() => { message.success('分组已创建'); loadGroupTabData() }).catch(() => message.error('创建失败'))
+  groupFormMode.value = 'create'
+  groupFormParentId.value = parentId
+  groupFormTargetId.value = null
+  groupFormOriginal.value = ''
+  groupFormName.value = ''
+  groupFormModal.value = true
 }
 
 function renameGroup(g: { id: number; name: string }) {
-  const name = prompt('修改分组名称', g.name)
-  if (!name?.trim() || name.trim() === g.name) return
-  fieldGroupApi.update(g.id, { name: name.trim() }).then(() => { message.success('已重命名'); loadGroupTabData() }).catch(() => message.error('重命名失败'))
+  groupFormMode.value = 'rename'
+  groupFormParentId.value = null
+  groupFormTargetId.value = g.id
+  groupFormOriginal.value = g.name
+  groupFormName.value = g.name
+  groupFormModal.value = true
+}
+
+// 提交（声明式 a-modal 的 @ok 不消费 Promise——antdv 4.x handleOk 仅 emit，须显式关闭）
+function submitGroupForm(): void {
+  const name = groupFormName.value.trim()
+  if (!name) return
+  // 重命名未改动：不发请求，静默关闭
+  if (groupFormMode.value === 'rename' && name === groupFormOriginal.value) {
+    groupFormModal.value = false
+    return
+  }
+  const mode = groupFormMode.value
+  const req = mode === 'create'
+    ? fieldGroupApi.create({ domain: domainId, name, parent: groupFormParentId.value })
+    : fieldGroupApi.update(groupFormTargetId.value!, { name })
+  req.then(() => {
+    groupFormModal.value = false
+    message.success(mode === 'create' ? '分组已创建' : '已重命名')
+    loadGroupTabData()
+  }).catch(() => {
+    message.error(mode === 'create' ? '创建失败' : '重命名失败')
+  })
+}
+
+function confirmDeleteGroup(id: number) {
+  Modal.confirm({
+    title: '确认删除该分组？',
+    content: '删除后子分组将上浮到上级，组内字段变为未分组状态。',
+    okText: '确认删除', okType: 'danger', cancelText: '取消',
+    onOk: () => deleteGroup(id),
+  })
 }
 
 async function deleteGroup(id: number) {
@@ -973,6 +1075,7 @@ interface AttrRow {
   distinct_values: any[]
   tables: { name: string; is_primary: boolean }[]
   is_primary_key: boolean
+  physical_field_ids: number[]
   // 主字段（仅 equiv）：档案更新数据源头；null=未设置（刷新将被拦截）
   primary_field_id: number | null
   primary_field_label: string | null
@@ -981,6 +1084,36 @@ interface AttrRow {
 const attrRows = ref<AttrRow[]>([])
 const attrSearchText = ref('')
 const attrActiveGroupId = ref<number | null>(null)
+
+// 同名未归并字段（BUG-2026-0805-01 防复发；后端口径与域配置检查 P1-4 同源）
+interface DupFieldGroup { code: string; table_names: string[]; field_ids: number[] }
+const dupGroups = ref<DupFieldGroup[]>([])
+const attrDupOnly = ref(false)
+const dupCodeMap = computed(() => new Map(dupGroups.value.map(g => [g.code, g])))
+const dupFieldIdMap = computed(() => {
+  const m = new Map<number, DupFieldGroup>()
+  for (const g of dupGroups.value) for (const fid of g.field_ids) m.set(fid, g)
+  return m
+})
+function attrDupGroup(r: AttrRow): DupFieldGroup | null {
+  const byCode = dupCodeMap.value.get(r.standard_code)
+  if (byCode) return byCode
+  for (const fid of r.physical_field_ids) {
+    const g = dupFieldIdMap.value.get(fid)
+    if (g) return g
+  }
+  return null
+}
+function dupTooltip(g: DupFieldGroup): string {
+  return `同名字段 ${g.code} 存在于：${g.table_names.join('、')}，未归并到同一标准字段。处置：改名区分语义 / 归并到同一标准字段 / 将多余列设为不释放到概念层`
+}
+async function loadDupGroups() {
+  try {
+    const res: any = await domainApi.dupFields(domainId)
+    const data = res.data || res
+    dupGroups.value = data.groups || []
+  } catch { dupGroups.value = [] }
+}
 
 const filteredAttrFields = computed(() => {
   let list = attrRows.value
@@ -991,6 +1124,7 @@ const filteredAttrFields = computed(() => {
   }
   const q = attrSearchText.value.toLowerCase().trim()
   if (q) list = list.filter(r => r.standard_code.toLowerCase().includes(q) || r.standard_name.toLowerCase().includes(q))
+  if (attrDupOnly.value) list = list.filter(r => attrDupGroup(r))
   return list
 })
 
@@ -1017,6 +1151,7 @@ const attrColumns = [
   { title: '维护方', key: 'ownership', width: 130, align: 'center' as const },
   { title: '数据去重内容', key: 'distinct', ellipsis: true, sorter: (a: any, b: any) => (a.distinct_values?.length || 0) - (b.distinct_values?.length || 0) },
   { title: '成员数', key: 'member_count', width: 70, align: 'center' as const },
+  { title: '操作', key: 'attr_action', width: 70, align: 'center' as const },
 ]
 
 async function loadAttrTabData() {
@@ -1053,6 +1188,7 @@ async function loadAttrTabData() {
         distinct_values: a.distinct_values || [],
         tables: (a as any).tables || [],
         is_primary_key: !!(a as any).is_primary_key,
+        physical_field_ids: a.physical_field_ids || [],
         primary_field_id: a.primary_field_id ?? null,
         primary_field_label: a.primary_field_label ?? null,
         primary_field_manual: !!a.primary_field_manual,
@@ -1077,6 +1213,7 @@ async function loadAttrTabData() {
         distinct_values: [],
         tables: [],
         is_primary_key: false,
+        physical_field_ids: [],
         primary_field_id: null,
         primary_field_label: null,
         primary_field_manual: false,
@@ -1161,6 +1298,15 @@ async function discardComposite() {
     catch (e: any) { message.error(extractApiError(e) || '操作失败') }
   }})
 }
+function confirmReleaseComposite(record: StandardFieldModel) {
+  Modal.confirm({
+    title: '释放该组合字段？',
+    content: '释放后所有成员字段将回到「未分配」分类，组合公式保留可随时恢复。',
+    okText: '确认释放', okType: 'danger', cancelText: '取消',
+    onOk: () => deleteCompositeField(record),
+  })
+}
+
 async function deleteCompositeField(record: StandardFieldModel) {
   try {
     await standardFieldApi.delete(record.id)
@@ -1308,6 +1454,68 @@ async function submitMerge() {
   finally { mergeSubmitting.value = false }
 }
 
+// ===== 组合字段改名 =====
+const renameModalVisible = ref(false)
+const renameSubmitting = ref(false)
+const renameForm = reactive({ sfId: 0, fieldId: 0, kind: '' as 'equiv' | 'solo', new_code: '', new_name: '' })
+const renameModalTitle = computed(() => renameForm.kind === 'solo' ? '独立字段改名' : '组合字段改名')
+
+function openRenameModal(sfRecord: StandardFieldModel) {
+  renameForm.sfId = sfRecord.id
+  renameForm.fieldId = 0
+  renameForm.kind = 'equiv'
+  renameForm.new_code = sfRecord.standard_code
+  renameForm.new_name = sfRecord.standard_name || ''
+  renameModalVisible.value = true
+}
+
+function openAttrRenameModal(record: AttrRow) {
+  if (record.kind === 'equiv') {
+    renameForm.sfId = record.id
+    renameForm.fieldId = 0
+    renameForm.kind = 'equiv'
+  } else if (record.kind === 'solo') {
+    renameForm.sfId = 0
+    renameForm.fieldId = record.id
+    renameForm.kind = 'solo'
+  } else {
+    return
+  }
+  renameForm.new_code = record.standard_code
+  renameForm.new_name = record.standard_name || ''
+  renameModalVisible.value = true
+}
+
+async function submitRename() {
+  if (!renameForm.new_code.trim()) { message.warning('字段编码不能为空'); return }
+  renameSubmitting.value = true
+  try {
+    let res
+    if (renameForm.kind === 'equiv') {
+      res = await standardFieldApi.rename(renameForm.sfId, {
+        new_code: renameForm.new_code.trim(),
+        new_name: renameForm.new_name.trim(),
+      })
+    } else {
+      res = await standardFieldApi.renameSolo({
+        field_id: renameForm.fieldId,
+        new_code: renameForm.new_code.trim(),
+        new_name: renameForm.new_name.trim(),
+      })
+    }
+    const d = res.data
+    const cascadeMsg = d.cascade?.records_updated ? `（已级联更新 ${d.cascade.records_updated} 条档案记录）` : ''
+    message.success(`改名成功：${d.old_code} → ${d.new_code}${cascadeMsg}`)
+    renameModalVisible.value = false
+    await refreshCategoryData()
+    await loadAttrTabData()
+  } catch (e: any) {
+    message.error(extractApiError(e) || '改名失败')
+  } finally {
+    renameSubmitting.value = false
+  }
+}
+
 // ===== 组合字段成员查看 =====
 const distinctDrawerVisible = ref(false)
 const distinctLoading = ref(false)
@@ -1452,6 +1660,7 @@ async function refreshManualDistinct() {
 // ===== 全量刷新 =====
 async function refreshAllData() {
   await refreshCategoryData()
+  await loadDupGroups()
   if (mainTab.value === 'group') await loadGroupTabData()
   if (mainTab.value === 'attr') await loadAttrTabData()
 }
@@ -1461,6 +1670,7 @@ async function loadData() {
   loading.value = true
   try { const domainRes = await domainApi.get(domainId); const domainData = (domainRes as any).data || domainRes; domainName.value = domainData.name || '' } catch { /* ignore */ }
   await refreshCategoryData()
+  await loadDupGroups()
   loading.value = false
 }
 

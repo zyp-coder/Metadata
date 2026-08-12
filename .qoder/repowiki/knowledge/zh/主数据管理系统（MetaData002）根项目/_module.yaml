@@ -1,0 +1,49 @@
+schema_version: 1
+module_path: ""
+title: 主数据管理系统（MetaData002）根项目
+scope:
+    - .ai/
+    - scripts/
+    - .gitignore
+    - 1b_refresh_preview_dialog.png
+    - 1c_operation_column.png
+    - 1d_version_management_table.png
+    - 1e_detail_drawer.png
+    - 1f_edit_drawer.png
+    - 2a_field_grouping_tab.png
+    - archive_page_screenshot.png
+    - detail_attempt_screenshot.png
+    - domain_fields_config_final_screenshot.png
+    - domain_fields_config_verification.png
+    - error_output.html
+    - formula_editor_dialog.png
+    - formula_editor_dialog_verification.png
+    - formula_editor_preview_table.png
+    - key_icon_verification.png
+    - page_initial_state.png
+    - primary_table_tag_verification.png
+    - step1_archive_list.png
+    - step1_field_management_page.png
+    - step2_combined_fields_view.png
+    - step2_consistency_page.png
+    - step3_member_drawer_opened.png
+    - step4_primary_field_changed.png
+    - step5_attribute_config_tab.png
+    - step5b_attribute_config_detail.png
+    - step6_final_member_drawer_state.png
+    - step6_reviewed_list_after_reopen.png
+    - step7_final_pending_list.png
+    - trial_calculation_modal.png
+    - trial_modal_final_screenshot.png
+    - trial_round67_screenshot.png
+    - verification_1_attr_tab_header.png
+    - verification_3_combined_field_primary_key_button.png
+    - verification_4_operation_column.png
+    - verification_5_record_detail_dialog.png
+    - verification_6_changelog_view.png
+    - verification_7_8_changelog_and_version_page.png
+    - verification_9_version_record_view.png
+    - verification_item3_combined_field_check.png
+source_files: []
+depends_on: []
+related_to: []

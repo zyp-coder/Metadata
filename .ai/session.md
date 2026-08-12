@@ -1,23 +1,62 @@
 # 会话接力 — 主文件（当前状态 + 功能索引）
-
 > 启动只读本文件（rule §3）。历史详情按模块存于 `.ai/session-details/<模块>.md`（archive / modeling / uxqa / project / early-logs），确认需求后按「模块+功能标签/第N轮」grep 加载，禁止全量读。
-
 ## 当前会话状态
-
-- **当前阶段：**第九十九轮 变更日志 v18.1 已落地（测试报告 2 项）：仅按时间一层折叠（批次降为明细行字段）+字段变化直看（旧值→新值+日行主要变化摘要）+撤销本日全部；顺手修复验证发现的缺陷（明细级回滚自建批无 source_batch_id 导致纯回滚日未禁用）。vue-tsc 0 errors、浏览器两轮验证通过。待办：R-024 待用户确认删除 legacy/ 目录、ArchiveApi 鉴权强化、源优先级配置(BR-018-1)、血缘历史时间线、AI建立关系后端 API
-- **活跃模块**：archive
-
-
+- **当前阶段**：第一百四十六轮完成——Docker Compose 内网部署方案实施（nginx.conf + docker-compose.yml + .env + Dokerfile gunicorn CMD + 数据导出 138 条记录）；遗留：服务器上 Docker 安装、.env 参数修改、前端 build、docker compose up、验证
+- **活跃模块**：project 部署配置（deploy/ docker-compose + Nginx + Gunicorn + 数据迁移）
 ### 最近 3 轮详情（满 3 轮后最旧一轮下沉到详情文件）
-
-- **上次操作**：2026-08-04 — 第九十九轮：测试报告 2 项修复（v18.1，推翻 v18 两层折叠）：①仅按时间一层折叠——批次行层移除，同档案同日全部批次合并为日期行，展开直出当日全部明细，批次号 #N 作为字段显示在明细行时间列；②字段变化直看——明细行旧值→新值彩色展示，新增/停用显示「记录级变更」提示，日行加载完明细后显示「主要变化」top3 摘要（如备注×1298）；③撤销本日全部（用户选定粒度）取代批次级整批撤销，串行逐批撤销汇总结果。验证中发现并修复缺陷：明细级回滚自建批无 source_batch_id 标记导致纯回滚日撤销链接未禁用，判定改「含正向变更且非整批回滚产物」；另修翻页拉全计数 bug。vue-tsc 0 errors，浏览器两轮验证（含 1439 条大日、纯回滚日禁用态复验）通过。
-- **更早操作**：2026-08-03 — 第九十八轮：变更日志批次视图交互调整（用户：「把明细也放到列表里面」，AskUserQ 选定「点批次行展开子行」）。VersionManagement.vue 纯前端改造：下钻抽屉移除，批次行预挂占位子行保展开箭头可见，@expand 首次展开拉取该批明细（page_size=500）替换占位；明细子行存响应式 Map batchDetails（不可直接改 computed 返回对象）；列合并双义（版本列批次行显示明细数提示、明细行显示 vN→vM）；移除抽屉内变更类型/记录搜索筛选。验证：vue-tsc 0 errors、浏览器两级展开（日行→批次→299 条明细批）正常无 JS 错误；顺手修 3 处 AStatistic value-style 警告。
-- **更早操作**：2026-08-03 — 第九十七轮：v18 回滚体系统一落地（四任务按序 ③回滚收口→④预检告警→①批次视图→②攒批保存），详见 session-details/archive.md。
-
+- **上次操作**：2026-08-11 — 第一百四十五轮：局域网开放测试——用户问「能否把本机 IP 放出去给别人测试」；查现状（前后端只监听 localhost、ALLOWED_HOSTS 默认 * 无需改、两个网卡 IP 10.0.16.56/192.168.80.9）+AskUserQuestion 确认（同一局域网+自定义两账号）；实施：vite.config.ts server.host:true（带注释）+ dev.ps1 stop 后手工后台起 runserver 0.0.0.0:8000 --noreload 与 npm run dev（不动 dev.ps1，测试完 stop+start 恢复本机模式）+ 建 tester（密码 qQLdeaCIu1）/manager（密码 i5IdOs5taN）两管理员账号（幂等脚本，发现 UserProfile 无自动创建机制需手工 get_or_create+挂管理员角色）+ 防火墙 netsh 需管理员权限未加成（已给用户提权命令）；实测：netstat 0.0.0.0:3000/8000 监听 ✓、curl 10.0.16.56:3000→200、192.168.80.9:3000→200、10.0.16.56:8000/api/domains→401（服务正常）；遗留：防火墙放行待用户管理员跑命令、测试完 dev.ps1 stop+start 恢复本机监听、vite host:true 保留（无害）
+- **更早操作**：2026-08-11 — 第一百四十四轮：关系管理列表直观性改进——用户反馈「明细表和主表、普通表的关系不直观」；现状分析（detail 行只显示明细表名预组合丢失、主表地位无体现、普通关联裸灰字）+AskUserQuestion 确认方案A；后端 FieldMappingSerializer 新增 detail_config_combo（头表名+明细表名，旧注册无头表只返明细表名）+前端源表列预组合全名+蓝色小标「明细子表（预组合）」、目标表=域主表金色「主表」tag（primaryTableId computed）、普通关联升级灰色 tag、detail 行浅蓝底（rowClassName+:deep 样式）；实测：后端 6 条映射 combo 全对（id=3/8/9 组合名、id=4 旧范式如实 None）+vue-tsc 0+django check 0+浏览器 DOM 验证（4 行浅蓝底 rgb(240,247,255)/预组合名/3 个主表 tag/普通关联 tag，首次抓取未见 tag 为 HMR 时序二次确认）；数据现状核对：用户新增 id=7/8/9 映射、域主表已切为「EDS_K3_物料信息主表」；遗留 id=4 无组合名如实显示
+- **更早操作**：2026-08-11 — 第一百四十三轮：字段映射唯一性报错修复——用户建「物料主表和明细表的关系」（普通关联 物料.MATERIAL_ID→物料信息.MATERIAL_ID）报「字段 source_table... 必须能构成唯一集合」；四元组与存量 id=5 重复（上轮已登记同类待办，AskUserQuestion 确认场景=普通字段关联+方案A+只修字段映射）；后端 FieldMappingUniqueValidator（UniqueTogetherValidator 子类化同 DetailTableUniqueValidator 模式，Meta.validators 追加，友好错误指明占用关系 ID+类型+指引）+前端 handleSubmit 前 checkMappingDuplicates 预检（composite 展开逐对、排除编辑自身、命中 message.warning 拦截）；实测：后端 6 项全过（重复 id=5→400 友好、重复 id=3 detail 挂载→400 友好、全新→201+204、编辑自身→200、编辑撞他人→400 友好）+vue-tsc 0+django check 0+浏览器实测预检拦截（warning 指明 ID=5、弹窗保持打开）；遗留：其余 7 处同类 unique 默认模板待分批、存量 id=4 detail_config 为空待处理
+- **更早操作**：2026-08-11 — 第一百四十二轮：子表注册唯一性报错修复——用户新建注册选已占用明细表报「字段 domain, table 必须能构成唯一集合」；Bug 六步定位（unique_together=(domain,table)+前端无已注册提示+注册管理无列表/编辑入口），用户确认方案A；后端 DetailTableUniqueValidator（Meta.validators 追加，友好错误指明占用组合与 ID）+前端明细表下拉禁选标记（dcRegisteredMap）+「管理注册」/「子表注册」统一开列表管理弹窗（复活 dcListModalVisible：预组合/关联字段/行键/排序/挂载/编辑/删除）；实测：后端 5 项全过（重复×2→400 友好、全新→201+204、编辑自身→200、归属校验→400）+vue-tsc 0+django check 0+浏览器 4 项（列表弹窗/禁选标记×2/编辑回填 4 select 禁用/挂载弹窗入口）；遗留：FieldMapping 唯一性同类待办
+- **更早操作**：2026-08-11 — 第一百四十一轮：明细致子表交互改造第三轮实施——预组合（头表+明细表先组合再关联主表）全栈落地：DetailTableConfig 三字段扩展（header_table/header_link_field/detail_link_field，迁移0032）+detect-header-link 自动检测+同步引擎 _join_header_rows 平铺（__hdr__ 前缀并入）+归属链路三处配套（physical_to_schema/pk_physical_to_schema 纳入头表、_record_key_for_row __hdr__ 回退）+挂载弹窗预组合形态（字段池=头字段+明细字段平铺）+注册弹窗双表形态；浏览器实测发现并修复 3 缺陷（字段池缺头表字段/pk_physical_to_schema 只收明细表/_record_key_for_row 不认 __hdr__ 前缀）+1 UI 问题（placeholder [object Object]）；实测：保存 201×2+删除×2+持久化刷新保留+平铺行实测（价格组合 239,504 行 35 明细键+6 头字段命中 3/3、分组组合 __hdr__GROUP_ID 归属取前缀值）；django check 0 issues + vue-tsc 0 errors；存量数据 DetailTableConfig id=2/3，FieldMapping 2 条 detail 挂载；遗留 P2（FID 重名显示歧义）
 ## 功能索引（倒序，每轮一行；完整性/确认点自本次迁移后开始记录）
-
 | 轮次 | 日期 | 模块 | 功能标签 | 一句话摘要 | 完整性 | 确认点 |
 |------|------|------|----------|------------|--------|--------|
+| 第一百四十六轮 | 2026-08-11~12 | project、deploy | Docker Compose 内网部署、Nginx、Gunicorn、数据迁移 | 局域网开放失败（对方 ping 不通=VLAN 隔离），用户决定部署到内网 Linux 服务器。前置确认：Linux 服务器 + 内网 IP 访问 + 迁移现有数据。实施：frontend/nginx.conf（前端静态+API 反向代理+SPA fallback）+ deploy/docker-compose.yml（nginx+backend gemicorn+postgres15+redis7，启动链 migrate→loaddata→init_admin→collectstatic→gunicorn）+ deploy/.env（DEBUG=0 模板）+ backend/Dockerfile 补 CMD gunicorn + 导出 data_dump.json（138 条全业务数据）+ .gitignore 加 data_dump.json。验证：138 条记录覆盖全模型 | 闸✓记✓拓✓测✓ | 2问/0改向 |
+| 第一百四十五轮 | 2026-08-11 | project、auth、frontend | 局域网开放、0.0.0.0监听、测试账号、防火墙放行 | 局域网开放测试：现状=前后端只监听 localhost+ALLOWED_HOSTS 默认 *；vite.config.ts server.host:true + 手工后台起 runserver 0.0.0.0:8000 --noreload（不动 dev.ps1，测试完 stop+start 恢复）+建 tester（qQLdeaCIu1）/manager（i5IdOs5taN）两管理员账号（UserProfile 无自动创建需手工补挂角色）+防火墙 netsh 需管理员权限未加成（命令已给用户）；实测：netstat 0.0.0.0 监听 ✓+两网卡 IP curl 200/401；遗留：防火墙待用户提权放行、测试完恢复本机监听 | 闸✓记✓拓✓测✓ | 2问/0改向 |
+| 第一百四十三轮 | 2026-08-11 | modeling | FieldMapping 唯一性报错、关系重复创建、预检拦截、FieldMappingUniqueValidator | Bug 六步修复：用户建「物料主表和明细表的关系」（普通关联 物料.MATERIAL_ID→物料信息.MATERIAL_ID）报「字段 source_table... 必须能构成唯一集合」；根因=四元组 unique_together 与存量 id=5 重复+DRF 默认模板+前端无预检；方案A 实施——后端 FieldMappingUniqueValidator（友好错误指明占用关系+ID+类型，编辑排除自身）+前端 checkMappingDuplicates 预检（composite 展开逐对、命中 message.warning 拦截不发请求）；后端实测 6 项全过+vue-tsc 0+django check 0+浏览器实测预检拦截；遗留 7 处同类默认模板待分批 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百四十二轮 | 2026-08-11 | modeling | 子表注册唯一性报错、预组合、列表管理入口、DetailTableUniqueValidator | Bug 六步修复：用户新建子表注册选已占用明细表报「字段 domain, table 必须能构成唯一集合」；根因=unique_together=(domain,table)+前端无已注册提示+注册管理无列表/编辑入口；方案A 实施——后端 DetailTableUniqueValidator（友好错误指明占用组合+ID，编辑排除自身）+前端明细表下拉禁选标记（dcRegisteredMap）+「管理注册」/「子表注册」统一开列表管理弹窗（编辑回填/删除 popconfirm 挂载提示）；后端实测 5 项全过+vue-tsc 0+django check 0+浏览器实测 4 项；遗留同类点 FieldMapping 唯一性待确认 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百四十一轮 | 2026-08-11 | modeling、archive | 预组合、头表+明细表、平铺宽表、detect-header-link、_join_header_rows、多挂载 | 明细致子表交互改造第三轮实施：预组合全栈落地（DetailTableConfig 三字段扩展+迁移0032+detect-header-link+_join_header_rows 平铺 __hdr__ 前缀+归属链路三处配套+挂载/注册弹窗双表形态）；浏览器实测发现并修复 3 缺陷+1 UI（字段池缺头表字段/pk_physical_to_schema 只收明细表/_record_key_for_row 不认 __hdr__/placeholder [object Object]）；实测 201×2+删除×2+持久化+平铺行实测（价格组合 239,504 行命中 3/3、分组 __hdr__GROUP_ID）；django check 0+vue-tsc 0；遗留 P2 FID 重名显示 | 闸✓记✓拓✓测✓ | 3问/0改向 |
+| 第一百四十轮 | 2026-08-11 | modeling | 数据源测试连接、SQL Server 18456、密码错误、编码修复 | SQL Server 测试连接失败诊断：根因=MB_READ 密码错误（18456 认证被拒），「无效的连接字符串属性」经实验+权威来源证实为伴随噪音非根因；顺带修复 modeling.md/rule-hits.md 混合编码损坏（GBK 段无损转 UTF-8） | N-A | 1问/0改向 |
+| （续上轮） | 2026-08-08 | archive | 分析脚本合并 | 3个杂乱的DB检查脚本（check_db_contents/check_db_storage/check_db_field_sizes）合并为单个 check_db_diagnostics.py，统一统计口径（均值/中位数/P90/P95/P99/最大），修复代码bug（自除/拼写/换算），新增版本分布直方图+dbstat精确页分析+综合诊断与推荐方案 | 闸✓记✓拓✓测✓ | 0问/0改向 |
+| 第一百三十九轮 | 2026-08-11 | project | scripts/dev.ps1、一键启动、后台运行、幂等 | 新增 scripts/dev.ps1（start/stop/status）：后台拉起前后端不随终端退出+日志 output/logs/+PID 落盘+端口占用幂等跳过+stop 兑底杀子进程；踩坑修复 $pid 只读变量/$Port: PSDrive 解析/npm父子进程链；实测生命周期全通过+登录 200 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百三十八轮 | 2026-08-11 | modeling、project | /modeling/data-sources、网络错误、服务重启 | 新增数据源提示网络错误诊断：根因=后端 runserver 随终端关闭终止（8000 无监听）+重建库后 admin 未初始化；处置=init_admin 重建账号+重启前后端+全链路实测（登录 200/新增数据源 201/清理） | N-A | 0问 |
+| 第一百三十七轮 | 2026-08-11 | modeling、archive | 方向锁定、子表交互改造、先注册后挂载、探针验证、adqa质疑关、详情表注册、多挂载同步 | 明细致子表交互改造「先注册后挂载」完整实施：方向锁定（§11.1 全流程）+ 编码——DetailTableConfig 模型+迁移+ViewSet+同步引擎多挂载+前端改造（子表注册弹窗/映射下拉选/detail-check）+ API 层扩展；vue-tsc 0 errors + django 0 issues | 闸✓记✓拓✓测⚠️（无新增路径） | 4问/0改向 |
+| 第一百三十六轮 | 2026-08-10 | modeling、archive | 明细致子表批3a+3b、前端、关系管理配置、明细展示、变更日志 | 明细致子表批3a+3b（前端）：批3a 关系管理配置页——FieldMapping 前端扩展（relation_type 列/编辑弹窗 detail 配置区/detectRowKey/handleSubmit PATCH 更新 detail 配置）+批3b 明细展示+变更日志——后端 ArchiveRecordDetailRowSerializer + GET /records/{id}/details/ + 前端 ArchiveDetail 明细抽屉 + ChangeHistoryDrawer detail_sync 展示；vue-tsc 0 errors + 后端验证通过 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百三十五轮 | 2026-08-10 | archive | 明细致子表批2、审计扩展、ChangeDetail扩展、DETAIL_SYNC、聚合变更日志、回滚 | 明细致子表批2（审计扩展）：ArchiveChangeDetail 扩展 detail_group/detail_row_key + ChangeType.DETAIL_SYNC（迁移0016）+ ChangeDetailSerializer 扩展 + _sync_detail_rows 追加聚合 change_entries（统计级不逐行）+ bulk_create 补充 detail_group/detail_row_key + rollback-detail action（POST /archives/{id}/rollback-detail/，复用 _sync_detail_rows 全量覆盖）；3 条新测试全 PASS + 回归 51/51 PASS；批1 明细不进 change_entries 限制解除 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百三十四轮 | 2026-08-10 | modeling、archive | 明细致子表、子表关系、detail分支、行键检测、conditions | 明细致子表批1（后端核心）实施：FieldMapping 扩展 relation_type/row_key_field/display_sort_field/display_sort_desc/conditions（迁移0030）+ ArchiveRecordDetail 明细行模型（迁移0015）+ 同步引擎 detail 分支（_sync_detail_rows：行键自动检测回填/嵌套属性一级透传/代表行写主表/明细upsert/明细停用清扫，批1明细变更不进change_entries）+ _build_conditions_sql 结构化条件（白名单+参数化）+ FieldMappingSerializer 扩展 + detect-row-key action；新增 8 定向测试全 PASS + 回归 99/99 PASS + check 0 issues | 闸✓记✓拓✓测✓ | 0问/0改向 |
+| 第一百三十三轮 | 2026-08-08 | modeling、archive | 方向锁定、子表关系、明细致子表、默认价、adqa质疑关 | 档案明细致子表方向锁定完成（§11.1 全流程）：用户提出「子表关系」概念（FieldMapping 加 relation_type=detail，先建子表再嵌套）替代独立 DetailGroup 配置；默认价取数规则锁定（EFFECTIVE_DATE DESC+自动补行键 DESC）；adqa 质疑关收口 5 条全裁决（代表行次级键/主表35字段保留/编辑独立不联动/折叠+分页/25-26不标detail）；源库4探针+配置4探针实证（PRICE_PLAN全空/FID非行唯一/ENTRY_ID唯一/35字段全release/EFFECTIVE_DATE已配date类型）；锁定结论已记 constitution | N-A | 6问/1改向 |
+| 第一百三十二轮 | 2026-08-08 | archive | /archive/同步、全量同步、去TOP1000、BUG-2026-0808-02、SQLite分批 | 同步引擎维度模型适配收尾：档案=JSON 物化宽表（非物理宽表非视图）；去 TOP 1000 全量同步（fetchmany 分批+无变化 bulk_update+明细瘦身）+BUG-2026-0808-02 SQLite 999 变量上限修复（差集+500/批）；实测 6/6 表 209,123 条 11 分钟 PRICE 24,794 精确命中交集+变更明细 11,677；40 测试全 PASS；遗留 GROUP_NAME 配置缺失+7 计算字段公式错误 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百三十一轮 | 2026-08-08 | archive | /archive/去重值、field-distinct-values | 档案字段去重值统计：后端新端点 field-distinct-values（实时聚合）+ ArchiveDetail 字段导航「值」按钮+弹窗；40 测试全 PASS + vue-tsc 0 errors | 闸✓记✓拓✓测✓ | 1问/1改向 |
+| 第一百三十轮 | 2026-08-08 | modeling、archive | /archive/同步、physical_name、改名映射、BUG-2026-0808-01 | BUG修复：Field 新增 physical_name 字段保留原始列名（迁移0029）+ _build_code_to_physical 用 physical_name 同步 + pk_fields 改用 schema code；产品域档案同步从 0 恢复到 1000 条；91 测试全 PASS | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百二十九轮 | 2026-08-08 | modeling | /modeling/config-tables、数据源同步、MAP_ORDER多位置、自动调度 | 配置表数据源同步全栈：模型扩展（data_source/sync_sql/last_synced_at）+ execute-query 只读 SQL 预览 + sync action + _sync_config_table 复用函数 + 前端同步配置 UI + MAP_ORDER 多位置模式（"5,6,7" 依次取段查表）+ 管理命令 sync_config_tables + daemon 自动调度；Bug修复（TIME_ZONE 连接配置+PATCH 保存）；4 新测试 10/10 PASS | 闸✓记✓拓✓测✓ | 2问/0改向 |
+| 第一百二十八轮 | 2026-08-07 | modeling | /modeling/config-tables、MAP_VALUE配置表驱动、MAP_ORDER级联查找、ConfigTable | 配置表驱动全栈：ConfigTable 模型（迁移0027）+ MAP_VALUE 配置表查表 + MAP_ORDER 级联查多表新函数 + ConfigTables.vue Key-Value 单页体验 + FormulaEditor 侧栏「配置表」Tab + Bug修复（4处__domain_id__注入+DomainStageNav+服务器重启）；9 新测试 44/44 PASS + vue-tsc 0 errors | 闸✓记✓拓✓测✓ | 6问/1改向 |
+| 第一百二十七轮 | 2026-08-06 | modeling、uxqa | /modeling/tables、字段管理大抽屉、R-059、/modeling/domains、分组弹窗、R-061 | 第118轮整改单 5 批计划批4：R-059 字段管理近全屏 modal→65vw 大抽屉（双 Tab+主键标识区+预览表全保留，footer 固定关闭底栏，两入口不动）+R-061 window.prompt→480px Modal 表单（空名禁用确认、重命名预填未改动零请求）；踩坑：antdv 4.x 声明式 a-modal @ok 不消费返回值，v2 改请求 .then 内显式关闭+catch 不重抛；方向判定表四项不触及/执行已锁定决策；vue-tsc -b --force 0 errors+Browser 实测 R-059 6/6+R-061 v2 7/7 全 PASS+console 0 error；剩 R-060 一项待整改 | 闸✓记✓拓✓测✓ | 0问/0改向 |
+| 第一百二十六轮 | 2026-08-06 | archive、uxqa | /archive/刷新预检、R-062、组件收敛 | 第118轮整改单 5 批计划批3：R-062 刷新预检两处同构弹窗收敛为 RefreshPreviewModal 单组件（760px modal，组件管展示+确认意图，执行逻辑留父组件；AL stats 文案顺带泛化补复活文案+同步/刷新区分，防 R-016/R-048 式再分叉）；方向判定表四项不触及/执行已锁定决策；vue-tsc -b --force 0 errors+Browser 实测 6 项 PASS（含注入建模变化触发 schema 弹窗验证）+console 0 error；剩余 R-059/R-060/R-061 三项待整改 | 闸✓记✓拓✓测✓ | 0问/0改向 |
+| 第一百二十五轮 | 2026-08-06 | archive、uxqa | /archive/变更历史、R-057、组件收敛 | 第118轮整改单 5 批计划批2：R-057 变更历史两处同构弹窗收敛为 ChangeHistoryDrawer 单组件（900px 抽屉+时间线+双粒度回滚 dropdown，AD 带回滚/VM 只读；AD 附带清理 121 行死预载；加载口径统一 VM 全量分页）；方向判定表四项不触及/执行已锁定决策；vue-tsc -b --force 0 errors+Browser 实测 8 项全 PASS+console 0 error；剩余 R-059~R-062 四项待整改 | 闸✓记✓拓✓测✓ | 0问/0改向 |
+| 第一百二十四轮 | 2026-08-06 | archive、uxqa | /archive/记录详情、R-056、弹窗转抽屉 | 第118轮整改单 5 批计划批1：R-056 记录详情 1400 modal→1100 大抽屉（footer 固定底栏，暂存修改/变更预览/分组网格全保留，沿用全站 a-drawer 骨架）；方向判定表四项不触及/执行已锁定决策；vue-tsc -b 0 errors+Browser 实测 6/6 PASS+console 0 error；剩余 R-057/R-059~R-062 五项待整改 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百二十三轮 | 2026-08-06 | archive、auth、uxqa | /archive/记录启停、/settings/roles、uxqa整改 | uxqa 第118轮整改单落地 2 项：R-055 记录启停无确认→Modal.confirm 二次确认（停用=danger，开关受控绑定取消自动回弹）+R-058 删角色 popconfirm→Modal.confirm（与全站删除防护对齐，文案依据后端 perform_destroy 事实）；方向判定表四项不触及/执行已锁定决策；vue-tsc -b 0 errors+Browser 实测 2/2 PASS+console 0 error；剩余 R-056~R-062 六项待整改 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百二十二轮 | 2026-08-06 | frontend、archive | /archive/versions、菜单高亮、变更日志 | Bug：变更日志明细页菜单误高亮档案管理；根因 MainLayout 高亮白名单手动维护漏登记 /archive/versions（同类排查全部子路由仅此一错）；用户选治本：白名单从 menuItems 递归自动推导+下钻页别名表；修复中引入 TDZ 白屏被浏览器实测当场拦截（watchEffect 移后）；vue-tsc 0 errors+5 页 DOM 实测全对 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百二十一轮 | 2026-08-06 | auth | admin 密码统一、冒烟测试账号、存量清理 | 用户反馈密码多处不一致+系统里有测试垃圾数据；admin 密码全项目统一 admin123456（init_admin 默认值+三 smoke 脚本+dev.db 重置）；新增 init_test_account 命令建冒烟专用 smoke_test（test23456 挂管理员角色），三脚本切换；存量清理 probe_user/实测角色（敏彤角色未动）；docker-compose 启动链补 init_admin+init_test_account；smoke_auth 19/19+smoke_src_owned 9/9+permission_overview 7 passed | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百二十轮 | 2026-08-05 | archive | /archive、权限全景、只读审计、API 聚合 | 新需求「一站式看档案的 API/暴露字段/调用系统/角色/用户/字段授权」；质问闸门 3 问锁定：入口=档案列表操作列（不新建菜单页）、仅管理员、只读+跳转配置；后端 permission_overview action（IsMdmAdmin 403，零新模型聚合 v19+REQ-019 数据，调用按密钥维度聚合）；前端 PermissionOverview.vue 960px 抽屉两区块+去配置跳转；新增用例 3 条 40/40 PASS+实测 7/7+浏览器验证全过 | 闸✓记✓拓✓测✓ | 3问/0改向 |
+| 第一百一十九轮 | 2026-08-05 | auth | /settings/roles、测试反馈、可编辑限制、ownership | 测试报告 1 项：角色权限「可编辑」仅档案侧维护字段可配（ownership='archive'）——前端 source 字段复选框置灰+tooltip+提示行+加载剔除误存项；后端 PUT permissions 校验 editable_codes 含 source 字段返 400（与记录更新 ownership 拦截同口径）；新增用例 1 条 33/33 PASS+实测 smoke_src_owned 9/9+浏览器验证 24/25 置灰正确；过程中发现并清理 8000 端口双进程监听（旧进程致实测假 200） | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百一十八轮 | 2026-08-05 | archive | /archive/api-management、测试报告、测试接口、UI 精简 | 测试报告 9 项：①修复测试接口认证头（Authorization→X-API-Key）；②恢复新建接口功能；③操作范围只保留查询（新增/修改/删除禁用灰色）；④移除角色/部门授权字段（遗留配置）；⑤对外标识改系统自动生成；⑥修复文档可写列（只有 API 开放写操作时才显示）；⑦修复暴露字段 checkbox-group bug；⑧新增测试接口 Modal；⑨移除授权列；vue-tsc 0 errors+回归 104/104 PASS | 闸✓记✓拓✓测✓ | 2问/0改向 |
+| 第一百一十七轮 | 2026-08-05 | archive | /archive/api-management、v19 编码落地、REQ-005、API Key 鉴权 | v19 API 管理全栈落地+uxqa 交付验收通过：迁移0014+鉴权单点+网关六端点+密钥管理+docs+前端双 Tab；新用例 19 条（37/37）+定向回归 54/54+真实请求实测 18/18 PASS；checklist 21/21 ✅，P2 R-054 已闭环，浏览器实跑 0 error | 闸✓记✓拓✓测✓ | 2问/0改向 |
+| 第一百十六轮 | 2026-08-05 | auth | 系统管理、角色配置、字段可见可编辑、REQ-019 | 用户提「角色配置：不同角色看档案列表不同字段」；质问闸门锁定方案A 一次性完整 auth+内置账号密码登录；澄清锁定角色×档案域粒度/白名单制/列表+详情+编辑生效（用户追加可编辑性）/完整用户管理；产出 REQ-019（5场景+8规则）+F-209/F-210+故事线+流程六+概念架构更新；续：uxqa 评审 C1-C15→darc 全栈编码（apps/auth 新模块+全局鉴权+archive 三处投影+前端登录/管理页/权限抽屉），编码中修复 6 项（含开放网关写回归）；新用例 32 条 104/104+实测 19/19+浏览器两轮全过，待 uxqa 验收 | 闸✓记✓拓✓测✓ | 5问/0改向 |
+| 第一百一十五轮 | 2026-08-05 | archive | /archive/api-management、字段释放粒度、补登记 | 用户关注「不同 API 释放不同字段」：核实该能力已存在（exposed_fields 每 API 独立+前端分组勾选+网关读写投影），用户确认现状已够；补登记 v19 设计原则+宪法决策行，不引入读写分离字段清单/密钥级再收窄 | N-A | 1问/0改向 |
+| 第一百一十四轮 | 2026-08-05 | archive | /archive/api-management、REQ-005、API Key 鉴权、设计 | API 管理完整设计（v19）：用户提醒补读 reqa 定位 REQ-005（F-204/F-205）；锁定 5 项方向（本期自建 API Key 真实鉴权推翻旧决策/读写全设计守 Hub 宪法/独立密钥×多 API 授权/调用日志 90 天）；产出数据模型+网关六端点+拦截链 401→403→429+双 Tab 交互；纯设计零代码 | N-A | 2问/0改向 |
+| 第一百一十三轮 | 2026-08-05 | modeling | /modeling/fields、属性配置、同名字段标记 | 字段属性配置页同名未归并字段标记+检查：后端口径单点化（_find_dup_unmerged_field_groups）+dup-fields 接口；前端告警条+同名角标+tooltip 处置指引+只看冲突过滤，基础/未分配表格同标记；回归 52/52+真实请求实测+浏览器 4/4；同日用户纠正：口径收敛为仅档案字段（base 过滤+分类表角标移除，54/54） | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百一十二轮 | 2026-08-05 | modeling | /modeling/domains、配置检查、同名字段归并 | BUG-2026-0805-01 遗留建议落地：_check_domain_config 新增第 9 项 P1 级「多表同名未归并字段」告警（豁免主键/未释放字段）；新增 5 用例+回归 51/51 PASS；真实域#11 实测命中 4 组 warn | 闸✓记✓拓✓测✓ | 2问/1改向 |
+| 第一百一十一轮 | 2026-08-05 | modeling、archive、uxqa | /modeling/domains、/archive、操作列、换行、命名精简 | 测试报告 2 项：①DomainList 操作列换行根治（a-space 补 size4+nowrap、列宽 280→320，同类防御 DataSourceList/DomainFieldMapping）②ArchiveList 按钮名精简（检查/同步）；uxqa 漏检复盘+两条方法论补强落盘（B2 硬约束+A9 操作列文案专项，用户改向确认）；浏览器实测两页无折行 | 闸✓记✓拓✓测✓ | 3问/1改向 |
+| 第一百一十轮 | 2026-08-05 | archive | /archive/记录变更历史、同步引擎 | Bug：同一时间同字段被处理两次——同名未映射列写入越权（他表同名空列偷渡清空→归属表写回，batch#48 全批1522条假明细）；兜底收紧为仅主键列（写入+预检两处）+回归测试+存量清理脚本删假明细1522/假快照1522/空批次#48，预检复验零变更 | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百零九轮 | 2026-08-05 | uxqa | 全站巡检、warnings展示、scroll.x、popconfirm | UXQA 全站 16 页巡检，发现 6 项 P2（R-048~R-053）并全部闭环：预检弹窗 warnings 补全、confirmRefresh 路径补 warnings/一致性提醒、2 表补 scroll.x、失效规则删除改 Modal.confirm、插件卸载改 Modal.confirm | 闸✓记✓拓✓测✓ | 1问/0改向 |
+| 第一百零八轮 | 2026-08-05 | archive | /archive/consistency、同步引擎 | 紧急修复 3 项：①配置检查范围缩小为档案字段；②主字段检查+一致性检查改警告不阻断；③修复 sync_exclude_codes 排除主键致跨表数据无法写入的关键 Bug | 闸✓记✓拓✓测✓ | 3问/2改向 |
+| 第一百零七轮 | 2026-08-04 | archive、modeling | /archive/consistency、/modeling/domains、/modeling/fields | 测试报告反馈 3 项修正：①改名移到属性配置 Tab 支持所有字段（rename_solo）；②配置检查按钮移入配置状态标签；③一致性检查按类型+日期分组展示 | 闸✓记✓拓✓测✓ | 3问/3改向 |
+| 第一百零六轮 | 2026-08-04 | archive、modeling | /archive/consistency、/modeling/domains、/modeling/fields | 测试报告 3 项：①域启用配置完整性检查（8项 P0/P1/P2）+配置状态列+启用前置拦截；②组合字段改名+级联更新；③一致性检查大改（4 种检查类型+规则失效机制） | 闸✓记✓拓✓测✓ | 3问/0改向 |
+| 系统简介 | 2026-08-04 | project | 系统简介、整体架构 | 基于 constitution/session/route_index 撰写系统整体简介（三大模块+技术架构+数据源+特色+状态），纯文档输出 | N-A | 0问 |
+| 第一百零三轮 | 2026-08-04 | archive | /archive/versions、同步统计、组合字段 | 档案同步统计修复：①同一批次内多表同步时刚创建的记录不计入「修改」（created_in_this_batch）；②组合字段非主字段成员不写入档案（_build_sync_exclude_codes）。统计从 3187 降至 974 | 闸✓记✓拓✓ | 1问/0改向 |
+| 第一百零二轮 | 2026-08-04 | modeling | /modeling/tables、/modeling/mappings、AI建立关系、引导提示 | 管理表引导提示（顶部 Alert+表格内空状态引导）+ AI建立关系全栈实现（后端 infer_mappings 启发式+LLM双层推断+前端弹窗勾选确认+批量创建） | 闸✓记✓拓✓ | 1问/0改向 |
+| 第一百零一轮 | 2026-08-04 | archive | /archive/versions、变更日志、术语、记录详情弹窗、变更历史弹窗 | v18.2 体验 3 项：术语改文案（停用（源侧已删）/复活（源侧恢复），迁移0012）；明细行「进入档案」移除改只读详情弹窗+历史时间线弹窗（套用档案页同款 UI）；排查 4 个 runserver 旧进程并存致重启不生效（BUG-2026-0804-01） | 闸✓记✓拓✓ | 3问/0改向 |
 | 第一百轮 | 2026-08-04 | modeling、archive | 测试扩展、CI、better-harness | 测试覆盖从 12 扩展到 45（modeling 27 + archive 18），覆盖 CRUD/唯一约束/主表切换/双层存储/版本追踪/变更日志/数据服务 API；45 测试全 PASS，vue-tsc 0 errors | 闸✓记✓拓✓ | 1问 |
 | 第九十九轮 | 2026-08-04 | archive | /archive/versions、变更日志、时间折叠、字段变化 | 测试报告 2 项（v18.1 推翻两层折叠）：仅按时间一层折叠（批次降为明细行 #N 字段）；字段变化直看（旧值→新值+记录级变更提示+日行主要变化 top3 摘要）；撤销本日全部取代批次级撤销；修复验证发现缺陷（明细级回滚自建批无 source_batch_id 致纯回滚日未禁用）+翻页计数 bug | 闸✓记✓拓✓ | 2问/0改向 |
 | 第九十八轮 | 2026-08-03 | archive | /archive/versions、变更日志、批次视图、明细展示 | 变更日志明细内联展开：下钻抽屉改为点批次行展开明细子行（占位行保箭头可见+@expand 按需加载+响应式 Map 存子行），抽屉及其筛选移除；vue-tsc 0 errors+浏览器两级展开验证正常 | 闸✓记✓拓✓ | 1问/0改向 |
@@ -152,26 +191,19 @@
 | - | 2026-07-20 | uxqa | - | UXQA 交付验收关（早期日志，见 early-logs.md） | - | - |
 | - | 2026-07-20 | project | - | prjm 项目检查（早期日志，见 early-logs.md） | - | - |
 | - | 2026-07-17 | modeling | - | 第二轮增强（域管理功能增强）（早期日志，见 early-logs.md） | - | - |
-
 ## 未完成事项
-
 ### UXQA 整改项（第九十轮全站交付验收，全部已闭环）
-
 | 编号 | 严重度 | 问题摘要 | 状态 |
 |------|--------|---------|------|
 | R-011~R-031 | P1×14+P2×7 | 全站 17 页巡检（21 项整改含菜单高亮/命名链/scroll.x/弹窗规范/死代码/R-024隔离等） | ✅ 全部闭环（R-024 已隔离待确认删） |
-
 ### UXQA 整改项（第三轮新发现，待闭环）
-
 | 编号 | 严重度 | 问题摘要 | 状态 |
 |------|--------|---------|------|
 | R-007 | P2 | FieldMapping.vue 创建时间未用 formatDateTime | ✅ 已闭环 |
 | R-008 | P3 | FieldMapping.vue 新建映射按钮未做 <2 表禁用 | ✅ 已闭环 |
 | R-009 | P3 | TableList.vue 展开行与弹窗注释编辑双入口 | ✅ 已闭环 |
 | R-010 | P2 | FieldClassification.vue 分组重命名未持久化 | ✅ 已闭环 |
-
 ### UXQA 整改项（第一轮全部已闭环）
-
 | 编号 | 严重度 | 问题摘要 | 状态 |
 |------|--------|---------|------|
 | R-001 | P1 | 域列表创建时间格式统一 | ✅ 已闭环 |
@@ -180,7 +212,5 @@
 | R-003 | P2 | 表列表提示文字调整 | ✅ 已闭环 |
 | R-005 | P2 | Excel 上传后自动预览 | ✅ 已闭环 |
 | R-006 | P2 | 左栏滚动条样式 | ✅ 已闭环 |
-
 ### 其他
-
-- auth 和 quality 模块尚未启动设计
+- quality 模块尚未启动设计；auth 编码完成待 uxqa 交付验收

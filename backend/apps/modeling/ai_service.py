@@ -745,3 +745,172 @@ def generate_formula(domain_id: int, description: str, selected_refs: list[str] 
         'name': (data.get('name') or '').strip(),
         'output_type': (data.get('output_type') or '').strip(),
     }
+
+
+# ============================================================
+# AI 推断表间字段映射关系
+# ============================================================
+
+def infer_mappings(domain_id: int) -> list[dict]:
+    """推断域内表间的字段映射关系。
+
+    收集域内所有活跃表和字段，调用 AI 分析表间可能的字段映射关系（外键/业务关联）。
+    返回建议列表：[{source_table_id, source_field_id, target_table_id, target_field_id,
+                    confidence: 0.0-1.0, reason: str}]。
+    无 LLM 配置时降级为启发式匹配（按字段编码精确匹配）。
+    """
+    from .models import Field, Table, FieldMapping
+
+    # 收集域内所有活跃表和字段
+    tables = Table.objects.filter(domain_id=domain_id, status='active').order_by('name')
+    if tables.count() < 2:
+        return []
+
+    table_fields = {}
+    for t in tables:
+        fields = Field.objects.filter(table=t, status='active').order_by('sort_order')
+        if fields.exists():
+            table_fields[t.id] = {
+                'table': t,
+                'fields': list(fields),
+            }
+
+    if len(table_fields) < 2:
+        return []
+
+    # 获取已存在的映射（避免重复建议）
+    existing_mappings = set()
+    for m in FieldMapping.objects.filter(
+        source_table__domain_id=domain_id
+    ).values_list('source_table_id', 'source_field_id', 'target_table_id', 'target_field_id'):
+        existing_mappings.add((m[0], m[1], m[2], m[3]))
+        existing_mappings.add((m[2], m[3], m[0], m[1]))  # 双向去重
+
+    # 启发式匹配：按字段编码精确匹配（不同表间同名字段）
+    heuristic_suggestions = []
+    table_ids = list(table_fields.keys())
+    for i, tid1 in enumerate(table_ids):
+        for tid2 in table_ids[i+1:]:
+            fields1 = table_fields[tid1]['fields']
+            fields2 = table_fields[tid2]['fields']
+            for f1 in fields1:
+                for f2 in fields2:
+                    # 编码完全相同且不是主键（主键通常是自身标识，不是关系）
+                    if f1.code == f2.code and not (f1.is_primary_key and f2.is_primary_key):
+                        # 检查是否已存在映射
+                        if (tid1, f1.id, tid2, f2.id) not in existing_mappings:
+                            heuristic_suggestions.append({
+                                'source_table_id': tid1,
+                                'source_field_id': f1.id,
+                                'target_table_id': tid2,
+                                'target_field_id': f2.id,
+                                'confidence': 0.6,
+                                'reason': f'字段编码相同：{f1.code}',
+                            })
+
+    # 如果有 LLM，调用 AI 做更智能的分析
+    if _has_llm():
+        try:
+            ai_suggestions = _infer_mappings_llm(table_fields, existing_mappings)
+            # 合并 AI 建议和启发式建议（AI 优先，去重）
+            seen = set()
+            merged = []
+            for s in ai_suggestions:
+                key = (s['source_table_id'], s['source_field_id'],
+                       s['target_table_id'], s['target_field_id'])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(s)
+            # 补充启发式建议（不重复的）
+            for s in heuristic_suggestions:
+                key = (s['source_table_id'], s['source_field_id'],
+                       s['target_table_id'], s['target_field_id'])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(s)
+            return merged
+        except Exception:
+            # AI 调用失败，降级到启发式结果
+            pass
+
+    return heuristic_suggestions
+
+
+def _infer_mappings_llm(table_fields: dict, existing_mappings: set) -> list[dict]:
+    """调用 LLM 分析表间字段映射关系。"""
+    from .models import Field
+
+    # 构建表信息摘要
+    table_summaries = []
+    field_id_to_info = {}  # field_id -> {table_id, table_name, field_code, field_name}
+    for tid, info in table_fields.items():
+        t = info['table']
+        fields = info['fields']
+        field_lines = []
+        for f in fields:
+            field_lines.append(f"  - 字段ID={f.id}: 编码={f.code}, 名称={f.name or f.comment or f.code}, "
+                             f"类型={f.field_type}, {'主键' if f.is_primary_key else '普通字段'}")
+            field_id_to_info[f.id] = {
+                'table_id': tid,
+                'table_name': t.name,
+                'field_code': f.code,
+            }
+        table_summaries.append(
+            f"表ID={tid}: {t.name}（{t.code}）\n" + "\n".join(field_lines)
+        )
+
+    tables_desc = "\n\n".join(table_summaries)
+
+    system_prompt = (
+        '你是主数据平台的表关系分析助手。根据提供的表结构和字段信息，分析表间可能的字段映射关系。\n'
+        '映射关系通常是：\n'
+        '- 外键关系（如 A表的store_id 关联 B表的id）\n'
+        '- 业务关联（如 A表的store_code 关联 B表的store_code）\n'
+        '- 相同业务实体的标识字段\n\n'
+        '请分析所有可能的映射关系，返回 JSON 格式：\n'
+        '{"mappings": [{"source_field_id": 数字, "target_field_id": 数字, '
+        '"confidence": 0.0-1.0, "reason": "简短说明"}]}\n\n'
+        '规则：\n'
+        '- 只建议不同表之间的映射（同表字段不映射）\n'
+        '- confidence 表示确信度：0.9+ 是非常确定的关系，0.7-0.9 是较可能，0.5-0.7 是可能\n'
+        '- 优先建议主键到外键的映射\n'
+        '- 字段编码相同且语义一致的建议 confidence 0.8+\n'
+        '- 最多返回 20 条建议\n'
+        '- 不要输出其他内容，只输出 JSON'
+    )
+
+    user_prompt = f"请分析以下表之间的字段映射关系：\n\n{tables_desc}"
+
+    cfg = _resolve_ai_config()
+    content = _chat([
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': user_prompt},
+    ], cfg=cfg)
+
+    data = _parse_json(content)
+    suggestions = []
+    for m in data.get('mappings', [])[:20]:
+        src_id = m.get('source_field_id')
+        tgt_id = m.get('target_field_id')
+        if not src_id or not tgt_id:
+            continue
+        src_info = field_id_to_info.get(src_id)
+        tgt_info = field_id_to_info.get(tgt_id)
+        if not src_info or not tgt_info:
+            continue
+        # 确保不同表
+        if src_info['table_id'] == tgt_info['table_id']:
+            continue
+        # 检查是否已存在
+        key = (src_info['table_id'], src_id, tgt_info['table_id'], tgt_id)
+        if key in existing_mappings:
+            continue
+        suggestions.append({
+            'source_table_id': src_info['table_id'],
+            'source_field_id': src_id,
+            'target_table_id': tgt_info['table_id'],
+            'target_field_id': tgt_id,
+            'confidence': float(m.get('confidence', 0.7)),
+            'reason': m.get('reason', 'AI 推荐'),
+        })
+    return suggestions

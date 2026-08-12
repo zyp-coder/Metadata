@@ -395,7 +395,7 @@ def trial_calculate(computed_field_id: int, params: dict | None = None,
     if not refs:
         # 无依赖字段，直接计算一次
         try:
-            result = evaluate(cf.expression, {})
+            result = evaluate(cf.expression, {'__domain_id__': cf.domain_id})
             return {"combinations": [{"inputs": {}, "output": result, "error": None}],
                     "total_possible": 1, "truncated": False}
         except FormulaError as e:
@@ -426,6 +426,7 @@ def trial_calculate(computed_field_id: int, params: dict | None = None,
     results = []
     for combo in combinations_iter:
         context = {keys[i]: combo[i] for i in range(len(keys))}
+        context['__domain_id__'] = cf.domain_id
         try:
             output = evaluate(cf.expression, context)
             results.append({"inputs": context, "output": output, "error": None})
@@ -548,7 +549,7 @@ def preview_expression(domain_id: int, expression: str, max_combinations: int = 
     if not refs:
         # 无依赖字段，直接计算一次
         try:
-            result = evaluate(expression, {})
+            result = evaluate(expression, {'__domain_id__': domain_id})
             return {"valid": True, "errors": [], "columns": [],
                     "rows": [{"inputs": {}, "output": result, "error": None}],
                     "total_possible": 1, "truncated": False}
@@ -573,6 +574,7 @@ def preview_expression(domain_id: int, expression: str, max_combinations: int = 
     rows = []
     for combo in combinations_iter:
         context = {keys[i]: combo[i] for i in range(len(keys))}
+        context['__domain_id__'] = domain_id
         try:
             output = evaluate(expression, context)
             rows.append({"inputs": context, "output": output, "error": None})
@@ -625,5 +627,8 @@ def _build_context_from_record(record_data: dict, domain_id: int) -> dict:
     # 视为空值参与计算；引用域外不存在的表/字段仍会正常抛「字段引用未找到」
     for code, table_name in code_to_table.items():
         context.setdefault(f"{table_name}.{code}", None)
+
+    # 注入域 ID 供 MAP_VALUE 等函数查找配置表
+    context['__domain_id__'] = domain_id
 
     return context
