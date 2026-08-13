@@ -1,5 +1,21 @@
 # 操作详情 — modeling 模块（倒序，最新在前）
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
+## 第一百五十六轮（2026-08-13）标签：测试报告1问题、预组合关系表单、左右分栏、左源右目标、匹配字段点选
+**任务**：用户新测试报告1个问题：新建/编辑映射弹窗选「预组合关系」时界面没有匹配字段可选功能，且不是左源右目标设计（XPath 指向 body/div[6] 弹窗容器）。
+**读取文件**：
+- `frontend/src/views/modeling/DomainFieldMapping.vue`（核心修改）
+
+**变更摘要**：
+- detail 分支表单（原 a-select 下拉：主表/预组合/关联字段）改为左右分栏（与 reference 分支同构）：
+  - 左侧（span=12，内 8|16）：预组合列表（点击选择，名称+编码+行键小字，header 带「管理注册」入口）+ 关联字段列表（点选，⚿ 主键标 + 推荐 tag，空态「请先选择预组合」）
+  - 中间（span=1）：→ 箭头（padding-top 200px）
+  - 右侧（span=11，内 8|16）：主表列表（点击选择，targetTableOptions 排除预组合明细表）+ 主表字段列表（点选但仅主键可选，非主键 field-item--disabled——挂载目标固定为主表单一主键）
+- 配置摘要（含条件/挂载数）+ 主键警告 alert 保留在分栏下方
+- 新增函数：selectDetailSourceField（置 sourceFieldTouched 防自动推荐覆盖）、selectDetailTargetField（非主键点击拦截）
+- 复用：onDetailConfigChange（预组合点选→加载关联字段池+清主表冲突）、selectTargetTable/loadTargetFields（主表点选→自动选单一主键）、onDetailSourceFieldChange（避免死代码）
+**验证**：vue-tsc --noEmit 0 errors；已 commit+push（ab4c32c）
+**遗留**：无（form 结构不变，handleSubmit/openEdit/openCreate 零改动）。
+
 ## 第一百五十五轮（2026-08-13）标签：测试报告3问题、dcModal左右分栏、JOIN类型、dcList搜索、条件构建器头表字段、UXQA巡检
 **任务**：用户新测试报告3个问题修复，全部在 /modeling/domains/2/mappings 页面，按4批处理。
 **读取文件**：

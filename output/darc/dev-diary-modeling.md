@@ -1,6 +1,22 @@
 # 开发日记 - 主数据建模引擎（modeling）
 > 记录 modeling 模块开发过程中的关键实现决策和技术细节。
 ---
+## 2026-08-13 测试报告1问题：预组合关系表单改左右分栏（第一百五十六轮）
+### 变更背景
+用户测试报告：新建映射弹窗选「预组合关系」时没有匹配字段可选功能，且不是左源右目标设计。根因：detail 分支仍是 a-select 下拉表单，而 reference 分支已是左右分栏点选。
+### 关键实现
+- **左右分栏布局**（与 reference 分支同构）：
+  - 左侧（span=12，内 8|16）：预组合列表（点选，名称+编码+行键小字，header 右侧「管理注册」链接）+ 关联字段列表（点选，主键 ⚿ 标 + 推荐 tag）
+  - 中间（span=1）：→ 箭头
+  - 右侧（span=11，内 8|16）：主表列表（点选）+ 主表字段列表（仅主键可选，非主键 field-item--disabled）
+- **挂载语义保持**：源=预组合体（onDetailConfigChange 加载关联字段池=明细表字段+头表字段平铺，自动推荐可改）；目标=主表单一主键（loadTargetFields 自动选中，联合主键不支持挂载）；targetTableOptions 自动排除预组合明细表
+- **新函数**：selectDetailSourceField（置 sourceFieldTouched 防自动推荐覆盖）、selectDetailTargetField（非主键点击拦截）
+- **清理**：删除原 3 个 a-select（主表/预组合/关联字段）及无调用方的冗余 form-item；onDetailSourceFieldChange 保留被 selectDetailSourceField 复用
+### 变更文件清单
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：detail 模板重写 + 2 新函数
+### 验证
+vue-tsc --noEmit 0 errors；已 commit+push（ab4c32c）
+
 ## 2026-08-13 测试报告3问题4批修复（第一百五十五轮）
 ### 变更背景
 用户新测试报告3个问题：①编辑预组合弹窗改为左右分栏+JOIN类型 ②预组合管理列表搜索筛选+条件构建器支持头表字段 ③全页UXQA。按4批处理。
