@@ -340,6 +340,7 @@ class FieldMappingSerializer(serializers.ModelSerializer):
     target_table_name = serializers.CharField(source='target_table.name', read_only=True)
     target_field_name = serializers.CharField(source='target_field.name', read_only=True)
     relation_type_label = serializers.CharField(source='get_relation_type_display', read_only=True)
+    join_type_label = serializers.CharField(source='get_join_type_display', read_only=True)
     row_key_field_name = serializers.CharField(source='row_key_field.name', read_only=True, allow_null=True)
     display_sort_field_name = serializers.CharField(source='display_sort_field.name', read_only=True, allow_null=True)
     detail_config_id = serializers.IntegerField(read_only=True)
@@ -350,7 +351,7 @@ class FieldMappingSerializer(serializers.ModelSerializer):
         model = FieldMapping
         fields = ['id', 'source_table', 'source_table_name', 'source_field', 'source_field_name',
                   'target_table', 'target_table_name', 'target_field', 'target_field_name',
-                  'relation_type', 'relation_type_label', 'row_key_field', 'row_key_field_name',
+                  'relation_type', 'relation_type_label', 'join_type', 'join_type_label', 'row_key_field', 'row_key_field_name',
                   'display_sort_field', 'display_sort_field_name', 'display_sort_desc', 'conditions',
                   'created_at', 'detail_config', 'detail_config_id', 'detail_config_name', 'detail_config_combo']
         read_only_fields = ['id', 'created_at']

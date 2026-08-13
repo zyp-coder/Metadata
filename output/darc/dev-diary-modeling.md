@@ -1,6 +1,41 @@
 # 开发日记 - 主数据建模引擎（modeling）
 > 记录 modeling 模块开发过程中的关键实现决策和技术细节。
 ---
+## 2026-08-13 测试报告4问题修复批1（第一百五十一轮续）
+### 变更背景
+测试报告4个问题，分批处理。批1（本次）：Issue 1 明细检查按钮无异常时不显示 + Issue 2 ER图全屏改用浏览器 Fullscreen API。
+### 关键实现
+- **Issue 1 明细检查按钮**：页面加载时自动调用 loadDetailCheck()；新增 `hasDetailCheckIssues` computed 判断是否有已注册/未注册/方向可疑数据，仅当有结果时才显示按钮；无异常时按钮隐藏，减少认知负担
+- **Issue 2 ER 图全屏**：`toggleErFullScreen` 改为调用 `erContainer.requestFullscreen()`（浏览器 Fullscreen API），退出全屏时通过 `fullscreenchange` 事件同步 erFullScreen 状态；Fullscreen API 不可用时回退原逻辑。映射列表 v-show 隐藏逻辑保留（全屏时复用）
+### 变更文件清单
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：模板（badge v-if hasDetailCheckIssues）+ script（hasDetailCheckIssues computed、onFullscreenChange handler、toggleErFullScreen Fullscreen API 版、onMounted 注册监听、onBeforeUnmount 移除监听）
+### 验证
+vue-tsc 0 errors + django check 0 issues + 102 tests PASS
+
+## 2026-08-13 测试报告4问题修复批2+3（JOIN类型+左右分栏）
+### 变更背景
+批2（Issue 3）：映射关系增加 LEFT JOIN / INNER JOIN 配置；批3（Issue 4）：新建映射弹窗左右分栏布局（960px）。
+### 关键实现
+- **后端模型**：FieldMapping 新增 `join_type` 字段（JoinType.LEFT/INNER，默认 LEFT，迁移 0033）
+- **后端序列化器**：FieldMappingSerializer 暴露 `join_type` + `join_type_label`（get_join_type_display）
+- **后端同步引擎**：
+  - `_join_header_rows`（场景 A 预组合）：新增 `join_type` 参数，`'inner'` 时跳过无匹配头表的明细行
+  - 调用处（line ~1333）：传 `first_fm.join_type`
+  - `_upsert_dimension_via_mapping`（场景 B+D 维度表中转）：`fm.join_type=='inner'` 时跳过无匹配目标行的源行（LEFT 时保留）
+  - `_sync_detail_rows` nested_sources（场景 C+D 嵌套属性）：各 nested_source 携带 FM join_type，`'inner'` 时无匹配嵌套属性则跳过明细行
+- **前端 JOIN 类型选择器**：模态框顶栏「关系类型」右侧并列「JOIN 类型」下拉（LEFT JOIN / INNER JOIN）
+- **前端列表列**：mappingColumns 新增 `join_type` 列，LEFT JOIN 灰色 tag，INNER JOIN 蓝色 tag
+- **前端左右分栏（Issue 4）**：弹窗宽度 640px→960px；引用类型表单改为 `a-row` 左右分栏——左侧源表 select + 字段可点选列表，中间箭头，右侧目标表 select + 字段可点选列表；联合主键展示为特殊行；新增 field-panel/field-item CSS 样式
+- **TypeScript 类型**：`FieldMapping` 接口新增 `join_type` / `join_type_label`
+### 变更文件清单
+- `backend/apps/modeling/models.py`：FieldMapping 新增 `JoinType` + `join_type` 字段
+- `backend/apps/modeling/migrations/0033_fieldmapping_join_type.py`（新增）
+- `backend/apps/modeling/serializers.py`：FieldMappingSerializer 加入 `join_type` / `join_type_label`
+- `backend/apps/archive/views.py`：_join_header_rows 参数 + 调用处 + _upsert_dimension_via_mapping 逻辑 + _sync_detail_rows nested_sources join_type 支持
+- `frontend/src/types/index.ts`：FieldMapping 接口加 join_type/join_type_label
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：模板(JOIN选择器+左右分栏)+脚本(form初始值+create/update payload+mappingColumns+mappingRows)+样式(field-panel/field-item)
+### 验证
+vue-tsc 0 errors + django check 0 issues + 102 tests 0.716s PASS
 ## 2026-08-11~12 内网 Docker Compose 部署（第一百四十六轮）
 ### 变更背景
 局域网开放测试失败——对方 ping 不通用户电脑（公司网络 VLAN 隔离）。用户决定部署到公司内网 Linux 服务器。

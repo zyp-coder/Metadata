@@ -1330,7 +1330,7 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     # 预组合平铺（2026-08-11 第三轮）：注册配了头表时，头表全量 JOIN 进明细行
                     # （头表字段以 __hdr__ 前缀并入，一行=一条明细+头字段重复）
                     if cfg and cfg.header_table_id and cfg.header_link_field_id and cfg.detail_link_field_id:
-                        rows = self._join_header_rows(table, cfg, rows)
+                        rows = self._join_header_rows(table, cfg, rows, first_fm.join_type)
                     for detail_fm in detail_fms:
                         try:
                             self._sync_detail_rows(
@@ -1790,17 +1790,23 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     raise ValueError(f'条件 {col} 的 in 操作符 value 必须是数组')
                 placeholders = ', '.join(['%s'] * len(val))
                 clauses.append(f'{quoted} IN ({placeholders})'); params.extend(val)
+            elif op == 'starts_with':
+                clauses.append(f'{quoted} LIKE %s'); params.append(f'{val}%')
+            elif op == 'contains':
+                clauses.append(f'{quoted} LIKE %s'); params.append(f'%{val}%')
             else:
-                raise ValueError(f'不支持的条件操作符 {op}（支持 eq/ne/gt/ge/lt/le/in）')
+                raise ValueError(f'不支持的条件操作符 {op}（支持 eq/ne/gt/ge/lt/le/in/starts_with/contains）')
         if not clauses:
             return '', []
         return ' WHERE ' + ' AND '.join(clauses), params
 
-    def _join_header_rows(self, table, cfg, rows):
+    def _join_header_rows(self, table, cfg, rows, join_type='left'):
         """预组合平铺（2026-08-11 第三轮）：头表全量拉取，按 header_link_field↔detail_link_field
         JOIN 进明细行。头表字段以 `__hdr__{物理列名}` 前缀并入（与明细字段重名不冲突）；
         头表查询失败或未命中时降级保留纯明细行（不阻断同步）。
-        同值多行取排序后最后一条（确定性，与 nested_sources 一致）。"""
+        同值多行取排序后最后一条（确定性，与 nested_sources 一致）。
+
+        2026-08-13 Issue 3：join_type='inner' 时无匹配头表的明细行不保留。"""
         from apps.modeling.models import Field as MField
         header_table = cfg.header_table
         h_link = cfg.header_link_field
@@ -1828,8 +1834,9 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 for k, v in hr.items():
                     merged[f'__hdr__{k}'] = v
                 out.append(merged)
-            else:
+            elif join_type == 'left':
                 out.append(row)
+            # join_type='inner' 时不保留未匹配头表的行
         return out
 
     def _sync_detail_rows(self, archive, table, rows, detail_fm, code_to_physical, pk_fields,
@@ -1942,7 +1949,7 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 if val is None:
                     continue
                 tindex[str(val)] = srow  # 同值多行取排序后最后一条（确定性）
-            nested_sources.append((tgt_phys, tindex, src_physical_to_schema, src.id))
+            nested_sources.append((tgt_phys, tindex, src_physical_to_schema, src.id, fm.join_type))
 
         def _rk(v):
             return '' if v is None else str(v)
@@ -2014,12 +2021,17 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 if (table.id, base_col) in sync_exclude_codes and schema_code not in pk_fields:
                     continue
                 detail_data[schema_code] = value
-            for tgt_phys, tindex, src_phys_to_schema, src_id in nested_sources:
+            skip_row = False
+            for tgt_phys, tindex, src_phys_to_schema, src_id, nested_join_type in nested_sources:
                 tgt_val = row.get(tgt_phys)
                 if tgt_val is None:
+                    if nested_join_type == 'inner':
+                        skip_row = True
                     continue
                 srow = tindex.get(str(tgt_val))
                 if not srow:
+                    if nested_join_type == 'inner':
+                        skip_row = True
                     continue
                 for sc, sv in srow.items():
                     sc_code = src_phys_to_schema.get(sc)
@@ -2028,6 +2040,8 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     if (src_id, sc) in sync_exclude_codes:
                         continue
                     detail_data[f'__nested__{sc_code}'] = sv
+            if skip_row:
+                continue
             if not detail_data:
                 continue  # 无任何档案字段的明细行不落库
 
@@ -2510,7 +2524,10 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     continue
                 trows_match = tindex.get(str(src_val))
                 if not trows_match:
-                    continue
+                    if fm.join_type == 'inner':
+                        continue
+                    # join_type='left'：无匹配目标行时保留源行（映射字段为空）
+                    trows_match = []
                 # 展开：对每个匹配目标行写（每组属性传播到组内全部物料）；
                 # 目标键唯一时仅一行，等价原折叠取首条语义
                 for trow in trows_match:

@@ -18,7 +18,7 @@
           </span>
         </div>
         <a-tag v-if="pkStatusData?.all_configured" color="success" style="margin: 0">✓ 全部完成</a-tag>
-        <a-badge :count="detailCheckData?.unregistered?.length || 0" :dot="(detailCheckData?.unregistered?.length || 0) > 0" offset="[0, 2]">
+        <a-badge v-if="hasDetailCheckIssues" :count="detailCheckData?.unregistered?.length || 0" :dot="(detailCheckData?.unregistered?.length || 0) > 0" offset="[0, 2]">
           <a-button @click="showDetailCheck = true" size="small" style="margin-right: 4px">
             明细检查
           </a-button>
@@ -71,6 +71,10 @@
             <a-tag v-if="record.relation_type === 'detail'" color="blue">明细子表</a-tag>
             <a-tag v-else color="default">普通关联</a-tag>
           </template>
+          <template v-if="column.key === 'join_type'">
+            <a-tag v-if="record.join_type === 'inner'" color="blue">INNER JOIN</a-tag>
+            <a-tag v-else color="default">LEFT JOIN</a-tag>
+          </template>
           <template v-if="column.key === 'action'">
             <a-space :size="4" style="white-space: nowrap">
               <a @click="openEdit(record)" style="color: #1677ff">编辑</a>
@@ -87,6 +91,7 @@
         <div style="display: flex; align-items: center; gap: 12px; width: 100%">
           <span style="color: #999; font-size: 12px">节点展示表与字段，连线标注具体字段映射关系（可拖动节点调整布局）</span>
           <a-button size="small" @click="resetErLayout" :loading="resettingEr" style="margin-left: auto">重置布局</a-button>
+          <a-button size="small" @click="toggleErHighlightPrecombine" :type="erHighlightPrecombine ? 'primary' : 'default'">预组合表</a-button>
         </div>
       </template>
       <div v-show="mappings.length > 0" ref="erContainer" :class="erFullScreen ? 'er-container er-container--full' : 'er-container'"></div>
@@ -176,16 +181,30 @@
             <a-button :loading="dcDetectingRowKey" @click="detectDcRowKey" :disabled="!dcEditingId">检测</a-button>
           </a-space>
         </a-form-item>
-        <a-form-item label="代表行排序字段" help="决定主表展示哪条明细行作为代表（如生效日期，最新=代表行）">
-          <a-select v-model:value="dcForm.display_sort_field" style="width: 100%" show-search allowClear placeholder="不排序（主表展示字段不更新）">
-            <a-select-option v-for="f in dcSourceFields" :key="f.id" :value="f.id">{{ f.name }} ({{ f.code }})</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item label="排序方向">
-          <a-switch v-model:checked="dcForm.display_sort_desc" checked-children="降序（最新优先）" un-checked-children="升序（最早优先）" />
-        </a-form-item>
-        <a-form-item label="筛选条件（可选）" help="仅同步满足条件的明细行，JSON 格式 [{field, operator, value}]">
-          <a-input v-model:value="dcForm.conditionsText" placeholder='[{"field": "PRICE", "operator": "gt", "value": 0}]' />
+        <a-form-item label="筛选条件（可选）" help="仅同步满足条件的明细行，多条件同时满足（AND 关系）">
+          <div style="margin-bottom: 4px">
+            字段 操作符 值（多条件同时满足，自动转为 AND 查询）
+          </div>
+          <div v-for="(cond, idx) in dcConditions" :key="idx" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center">
+            <a-select v-model:value="cond.field" style="width: 155px" show-search placeholder="选择字段">
+              <a-select-option v-for="f in dcSourceFields" :key="f.id" :value="f.code">{{ f.name }} ({{ f.code }})</a-select-option>
+            </a-select>
+            <a-select v-model:value="cond.operator" style="width: 130px" placeholder="操作符">
+              <a-select-option value="eq">等于 (=)</a-select-option>
+              <a-select-option value="ne">不等于 (!=)</a-select-option>
+              <a-select-option value="gt">大于 (&gt;)</a-select-option>
+              <a-select-option value="ge">大于等于 (&gt;=)</a-select-option>
+              <a-select-option value="lt">小于 (&lt;)</a-select-option>
+              <a-select-option value="le">小于等于 (&lt;=)</a-select-option>
+              <a-select-option value="in">在列表中</a-select-option>
+              <a-select-option value="starts_with">开头是</a-select-option>
+              <a-select-option value="contains">包含</a-select-option>
+            </a-select>
+            <a-input v-if="cond.operator !== 'in'" v-model:value="cond.value" style="flex: 1" placeholder="值" />
+            <a-select v-else v-model:value="cond.value" mode="tags" style="flex: 1" placeholder="输入值后回车" />
+            <a-button type="text" danger @click="removeDcCondition(idx)" size="small" style="flex-shrink: 0">✕</a-button>
+          </div>
+          <a-button size="small" @click="addDcCondition">+ 添加条件</a-button>
         </a-form-item>
       </a-form>
     </a-modal>
@@ -207,7 +226,6 @@
             {{ record.header_link_field_name || '?' }} ↔ {{ record.detail_link_field_name || '?' }}
           </template>
           <template v-else-if="column.key === 'row_key'">{{ record.row_key_field_name || '自动检测' }}</template>
-          <template v-else-if="column.key === 'sort'">{{ record.display_sort_field_name || '未配置' }}{{ record.display_sort_field_name ? (record.display_sort_desc ? ' ↓' : ' ↑') : '' }}</template>
           <template v-else-if="column.key === 'mappings'">{{ record.mapping_count }} 个</template>
           <template v-else-if="column.key === 'action'">
             <a @click="openDetailConfigEdit(record)">编辑</a>
@@ -220,14 +238,26 @@
       </a-table>
     </a-modal>
 
-    <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="640px">
+    <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="960px">
       <a-form layout="vertical">
-        <a-form-item label="关系类型">
-          <a-select v-model:value="form.relation_type" style="width: 100%" @change="onRelationTypeChange">
-            <a-select-option value="reference">引用（字段级映射，默认）</a-select-option>
-            <a-select-option value="detail">明细子表（整表作为子表挂载到主表）</a-select-option>
-          </a-select>
-        </a-form-item>
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="关系类型">
+              <a-select v-model:value="form.relation_type" style="width: 100%" @change="onRelationTypeChange">
+                <a-select-option value="reference">引用（字段级映射，默认）</a-select-option>
+                <a-select-option value="detail">明细子表（整表作为子表挂载到主表）</a-select-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="JOIN 类型" help="数据同步时表间关联所采用的 JOIN 方式">
+              <a-select v-model:value="form.join_type">
+                <a-select-option value="left">LEFT JOIN（保留无匹配行）</a-select-option>
+                <a-select-option value="inner">INNER JOIN（仅保留匹配行）</a-select-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+        </a-row>
 
         <!-- 明细子表（形态1）：主表 → 子表 → 关联字段；注册与挂载分离，方向由系统处理 -->
         <template v-if="form.relation_type === 'detail'">
@@ -289,42 +319,74 @@
           />
         </template>
 
-        <!-- 引用关系：字段级映射（保持原表单） -->
+        <!-- 引用关系：字段级映射（左右分栏，2026-08-13 Issue 4） -->
         <template v-else>
-          <a-form-item label="源表" required>
-            <a-select v-model:value="form.source_table" style="width: 100%" show-search @change="loadSourceFields" :disabled="!!editingMappingId">
-              <a-select-option v-for="t in domainTables" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
-            </a-select>
-          </a-form-item>
-          <a-form-item label="源字段" required>
-            <a-select v-model:value="form.source_field" style="width: 100%" show-search allowClear placeholder="请选择源字段">
-              <a-select-option v-if="hasCompositeSourceKey" :value="'composite'" :title="compositeKeyLabel">
-                <span style="color: #faad14; margin-right: 4px">⚿</span>
-                <span style="font-weight: 600">{{ compositeKeyLabel }}</span>
-                <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
-              </a-select-option>
-              <a-select-option v-for="f in sourceFields" :key="f.id" :value="f.id">
-                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 4px">⚿</span>{{ f.name }} ({{ f.code }})
-              </a-select-option>
-            </a-select>
-          </a-form-item>
-          <a-form-item label="目标表" required>
-            <a-select v-model:value="form.target_table" style="width: 100%" show-search @change="loadTargetFields">
-              <a-select-option v-for="t in targetTableOptions" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
-            </a-select>
-          </a-form-item>
-          <a-form-item label="目标字段" required>
-            <a-select v-model:value="form.target_field" style="width: 100%" show-search allowClear placeholder="请选择目标字段">
-              <a-select-option v-if="hasCompositeTargetKey" :value="'composite'" :title="targetCompositeKeyLabel">
-                <span style="color: #faad14; margin-right: 4px">⚿</span>
-                <span style="font-weight: 600">{{ targetCompositeKeyLabel }}</span>
-                <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
-              </a-select-option>
-              <a-select-option v-for="f in targetFields" :key="f.id" :value="f.id">
-                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 4px">⚿</span>{{ f.name }} ({{ f.code }})
-              </a-select-option>
-            </a-select>
-          </a-form-item>
+          <a-row :gutter="16">
+            <!-- 左侧：源表 + 源字段 -->
+            <a-col :span="12">
+              <a-form-item label="源表" required>
+                <a-select v-model:value="form.source_table" style="width: 100%" show-search @change="loadSourceFields" :disabled="!!editingMappingId">
+                  <a-select-option v-for="t in domainTables" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
+                </a-select>
+              </a-form-item>
+              <div class="field-panel">
+                <div class="field-panel__header">源字段（点击选择）</div>
+                <div class="field-panel__list">
+                  <div v-if="hasCompositeSourceKey" class="field-item field-item--composite"
+                       :class="{'field-item--selected': form.source_field === 'composite'}"
+                       @click="form.source_field = 'composite'">
+                    <span style="color: #faad14; margin-right: 4px">⚿</span>
+                    <span style="font-weight: 600">{{ compositeKeyLabel }}</span>
+                    <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
+                  </div>
+                  <div v-for="f in sourceFields" :key="f.id"
+                       class="field-item"
+                       :class="{'field-item--selected': form.source_field === f.id}"
+                       @click="form.source_field = f.id">
+                    <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                    {{ f.name }} ({{ f.code }})
+                  </div>
+                  <div v-if="sourceFields.length === 0" class="field-panel__empty">请先选择源表</div>
+                </div>
+              </div>
+            </a-col>
+            <!-- 中间：箭头 -->
+            <a-col :span="1" style="text-align: center; padding-top: 120px">
+              <span style="font-size: 28px; color: #bbb">→</span>
+            </a-col>
+            <!-- 右侧：目标表 + 目标字段 -->
+            <a-col :span="11">
+              <a-form-item label="目标表" required>
+                <a-select v-model:value="form.target_table" style="width: 100%" show-search @change="loadTargetFields">
+                  <a-select-option v-for="t in targetTableOptions" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
+                </a-select>
+              </a-form-item>
+              <div class="field-panel">
+                <div class="field-panel__header">目标字段（点击选择）</div>
+                <div class="field-panel__list">
+                  <div v-if="hasCompositeTargetKey" class="field-item field-item--composite"
+                       :class="{'field-item--selected': form.target_field === 'composite'}"
+                       @click="form.target_field = 'composite'">
+                    <span style="color: #faad14; margin-right: 4px">⚿</span>
+                    <span style="font-weight: 600">{{ targetCompositeKeyLabel }}</span>
+                    <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
+                  </div>
+                  <div v-for="f in targetFields" :key="f.id"
+                       class="field-item"
+                       :class="{'field-item--selected': form.target_field === f.id}"
+                       @click="form.target_field = f.id">
+                    <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                    {{ f.name }} ({{ f.code }})
+                  </div>
+                  <div v-if="targetFields.length === 0" class="field-panel__empty">请先选择目标表</div>
+                </div>
+              </div>
+              <!-- 联合主键提示 -->
+              <a-alert v-if="hasCompositeSourceKey || hasCompositeTargetKey" type="info" show-icon style="margin-top: 12px"
+                message="联合主键"
+                :description="(hasCompositeSourceKey ? '源表联合主键：' + compositeKeyLabel : '') + (hasCompositeSourceKey && hasCompositeTargetKey ? ' | ' : '') + (hasCompositeTargetKey ? '目标表联合主键：' + targetCompositeKeyLabel : '')" />
+            </a-col>
+          </a-row>
         </template>
       </a-form>
     </a-modal>
@@ -440,6 +502,7 @@ const saving = ref(false)
 const form = ref<any>({
   source_table: null, source_field: null, target_table: null, target_field: null,
   relation_type: 'reference',
+  join_type: 'left',
   row_key_field: null,
   display_sort_field: null,
   display_sort_desc: true,
@@ -470,6 +533,7 @@ const dcForm = ref<any>({
   row_key_field: null, display_sort_field: null,
   display_sort_desc: true, conditionsText: '',
 })
+const dcConditions = ref<{ field: string; operator: string; value: any }[]>([])
 const dcSourceFields = ref<any[]>([])
 const dcHeaderFields = ref<any[]>([])
 const dcDetectingRowKey = ref(false)
@@ -481,6 +545,12 @@ const dcListModalVisible = ref(false)
 const showDetailCheck = ref(false)
 const detailCheckLoading = ref(false)
 const detailCheckData = ref<any>(null)
+
+// Issue 1：有异常时才显示明细检查按钮
+const hasDetailCheckIssues = computed(() => {
+  const d = detailCheckData.value
+  return d && (d.registered?.length > 0 || d.unregistered?.length > 0 || d.suspect?.length > 0)
+})
 
 // 关联字段手动修改标记（自动推荐不覆盖用户选择）
 const sourceFieldTouched = ref(false)
@@ -536,6 +606,7 @@ const mappingColumns = [
   { title: '目标表', key: 'target_table', width: 170 },
   { title: '目标字段', key: 'target_field', width: 170 },
   { title: '关系类型', key: 'relation_type', width: 110 },
+  { title: 'JOIN 类型', key: 'join_type', width: 120 },
   { title: '操作', key: 'action', width: 120 },
 ]
 
@@ -554,7 +625,6 @@ const dcColumns = [
   { title: '预组合（头表 + 明细表）', key: 'combo', width: 280 },
   { title: '头↔明细关联', key: 'link', width: 140 },
   { title: '行键', key: 'row_key', width: 120 },
-  { title: '代表行排序', key: 'sort', width: 160 },
   { title: '挂载', key: 'mappings', width: 80 },
   { title: '操作', key: 'action', width: 110 },
 ]
@@ -583,6 +653,8 @@ const mappingRows = computed(() => {
         target_table_name: m.target_table_name,
         relation_type: m.relation_type || 'reference',
         relation_type_label: m.relation_type_label || '',
+        join_type: m.join_type || 'left',
+        join_type_label: m.join_type_label || 'LEFT JOIN',
         row_key_field: m.row_key_field,
         row_key_field_name: m.row_key_field_name || '',
         display_sort_field: m.display_sort_field,
@@ -636,6 +708,8 @@ const mappingRows = computed(() => {
         is_target_pk: g._tgtFields.some((f: number) => tgtPkSet?.has(f)),
         relation_type: g.relation_type,
         relation_type_label: g.relation_type_label,
+        join_type: g.join_type,
+        join_type_label: g.join_type_label,
         row_key_field: g.row_key_field,
         row_key_field_name: g.row_key_field_name,
         display_sort_field: g.display_sort_field,
@@ -700,6 +774,7 @@ const erFullScreen = ref(false)
 const erContainer = ref<HTMLElement | null>(null)
 let graph: Graph | null = null
 const resettingEr = ref(false)
+const erHighlightPrecombine = ref(false)
 const erNodeMap: Record<number, { node: any; tableId: number; tableRef: any }> = {}
 
 // ER 图常量
@@ -734,6 +809,9 @@ async function loadData() {
 
     // 加载子表注册配置
     await loadDetailConfigs()
+
+    // Issue 1：预加载明细检查数据（结果为空时不显示按钮）
+    loadDetailCheck()
   } finally {
     loading.value = false
   }
@@ -998,6 +1076,54 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
       },
     })
   })
+
+  // 绘制预组合（头表↔明细表）关联虚线（Issue 1: ER图展现预组合概念）
+  const precombineTableIds = new Set<number>()
+  domainDetailConfigs.value.forEach((dc: any) => {
+    if (!dc.header_table || !dc.table) return
+    precombineTableIds.add(dc.header_table)
+    precombineTableIds.add(dc.table)
+    const srcNodeId = nodeMap[dc.header_table]
+    const tgtNodeId = nodeMap[dc.table]
+    if (srcNodeId && tgtNodeId) {
+      graph!.addEdge({
+        source: { cell: srcNodeId, anchor: { name: 'top', args: { dx: 0.8, dy: 0.05 } } },
+        target: { cell: tgtNodeId, anchor: { name: 'top', args: { dx: 0.8, dy: 0.05 } } },
+        router: { name: 'manhattan', args: { padding: 16 } },
+        connector: { name: 'rounded', args: { radius: 6 } },
+        attrs: {
+          line: {
+            stroke: '#52c41a',
+            strokeWidth: 1.5,
+            strokeDasharray: '5,5',
+            targetMarker: { name: 'block', size: 6, fill: '#52c41a' },
+          },
+        },
+        labels: [{
+          attrs: {
+            text: { text: '预组合', fill: '#52c41a', fontSize: 11 },
+          },
+          position: { distance: 0.5 },
+        }],
+      })
+    }
+  })
+
+  // Issue 3: 预组合表高亮——边框变绿
+  if (erHighlightPrecombine.value) {
+    precombineTableIds.forEach((tid) => {
+      const entry = erNodeMap[tid]
+      if (entry) {
+        const view = graph!.findViewByCell(entry.node.id)
+        if (view) {
+          const el = view.container as HTMLElement
+          el.style.border = '2px solid #52c41a'
+          el.style.boxShadow = '0 0 8px rgba(82, 196, 26, 0.4)'
+          el.style.borderRadius = '4px'
+        }
+      }
+    })
+  }
 }
 
 function escapeHtml(s: string) {
@@ -1133,6 +1259,7 @@ function openCreate() {
   form.value = {
     source_table: null, source_field: null, target_table: null, target_field: null,
     relation_type: 'reference',
+    join_type: 'left',
     row_key_field: null,
     display_sort_field: null,
     display_sort_desc: true,
@@ -1156,6 +1283,7 @@ async function openEdit(row: any) {
     target_table: row.target_table,
     target_field: null,
     relation_type: row.relation_type || 'reference',
+    join_type: row.join_type || 'left',
     row_key_field: row.row_key_field || null,
     display_sort_field: row.display_sort_field || null,
     display_sort_desc: row.display_sort_desc !== false,
@@ -1285,6 +1413,7 @@ async function handleSubmit() {
             source_field: sourcePks[i].id,
             target_table: form.value.target_table,
             target_field: targetPks[i].id,
+            join_type: form.value.join_type,
           })
           createdIds.push(res.data.id)
         }
@@ -1301,6 +1430,7 @@ async function handleSubmit() {
             source_field: pk.id,
             target_table: form.value.target_table,
             target_field: form.value.target_field,
+            join_type: form.value.join_type,
           })
           createdIds.push(res.data.id)
         }
@@ -1317,6 +1447,7 @@ async function handleSubmit() {
             source_field: form.value.source_field,
             target_table: form.value.target_table,
             target_field: pk.id,
+            join_type: form.value.join_type,
           })
           createdIds.push(res.data.id)
         }
@@ -1331,6 +1462,7 @@ async function handleSubmit() {
           source_field: form.value.source_field,
           target_table: form.value.target_table,
           target_field: form.value.target_field,
+          join_type: form.value.join_type,
         })
         createdIds.push(res.data.id)
       }
@@ -1345,7 +1477,7 @@ async function handleSubmit() {
     // 批3a：更新 detail 配置（新范式优先 detail_config，旧 inline 字段 deprecated 兼容）
     if (createdIds.length > 0) {
       if (form.value.relation_type === 'detail') {
-        const detailData: Record<string, any> = { relation_type: 'detail' }
+        const detailData: Record<string, any> = { relation_type: 'detail', join_type: form.value.join_type }
         // 新范式：挂载 detail_config（优先）
         if (form.value.detail_config) {
           detailData.detail_config = form.value.detail_config
@@ -1367,6 +1499,7 @@ async function handleSubmit() {
         for (const id of createdIds) {
           await fieldMappingApi.update(id, {
             relation_type: 'reference',
+            join_type: form.value.join_type,
             detail_config: null,
             row_key_field: null,
             display_sort_field: null,
@@ -1431,9 +1564,9 @@ function openDetailConfigCreate() {
   dcForm.value = {
     header_table: null, table: null,
     header_link_field: null, detail_link_field: null,
-    row_key_field: null, display_sort_field: null,
-    display_sort_desc: true, conditionsText: '',
+    row_key_field: null, conditionsText: '',
   }
+  dcConditions.value = []
   dcSourceFields.value = []
   dcHeaderFields.value = []
   dcModalVisible.value = true
@@ -1447,10 +1580,12 @@ async function openDetailConfigEdit(cfg: any) {
     header_link_field: cfg.header_link_field,
     detail_link_field: cfg.detail_link_field,
     row_key_field: cfg.row_key_field || null,
-    display_sort_field: cfg.display_sort_field || null,
-    display_sort_desc: cfg.display_sort_desc !== false,
-    conditionsText: cfg.conditions?.length ? JSON.stringify(cfg.conditions) : '',
+    conditionsText: '',
   }
+  // 回填条件行（结构化 -> 可视化行列表）
+  dcConditions.value = cfg.conditions?.length
+    ? cfg.conditions.map((c: any) => ({ field: c.field, operator: c.operator, value: c.value ?? '' }))
+    : []
   dcSourceFields.value = []
   dcHeaderFields.value = []
   if (cfg.header_table) {
@@ -1541,11 +1676,14 @@ async function handleDcSubmit() {
       header_link_field: dcForm.value.header_link_field,
       detail_link_field: dcForm.value.detail_link_field,
       row_key_field: dcForm.value.row_key_field || null,
-      display_sort_field: dcForm.value.display_sort_field || null,
-      display_sort_desc: dcForm.value.display_sort_desc,
     }
-    if (dcForm.value.conditionsText) {
-      try { payload.conditions = JSON.parse(dcForm.value.conditionsText) } catch { /* 保持 null */ }
+    // 条件行 -> JSON
+    if (dcConditions.value.length > 0) {
+      payload.conditions = dcConditions.value.map(c => ({
+        field: c.field,
+        operator: c.operator,
+        value: c.operator === 'in' ? (Array.isArray(c.value) ? c.value : []) : c.value,
+      }))
     }
     payload.domain = domainId
 
@@ -1582,6 +1720,14 @@ async function detectDcRowKey() {
   } finally {
     dcDetectingRowKey.value = false
   }
+}
+
+function addDcCondition() {
+  dcConditions.value.push({ field: '', operator: 'eq', value: '' })
+}
+
+function removeDcCondition(idx: number) {
+  dcConditions.value.splice(idx, 1)
 }
 
 function onDetailConfigChange(configId: number | undefined) {
@@ -1670,12 +1816,9 @@ async function doDelete(row: any) {
   }
 }
 
-function toggleErFullScreen() {
-  erFullScreen.value = !erFullScreen.value
-  // 切换后需要重新渲染 ER 图以适应新容器尺寸
-  nextTick(() => {
-    renderER()
-  })
+function toggleErHighlightPrecombine() {
+  erHighlightPrecombine.value = !erHighlightPrecombine.value
+  renderER()
 }
 
 async function resetErLayout() {
@@ -1694,9 +1837,13 @@ async function resetErLayout() {
   }
 }
 
-onMounted(loadData)
+onMounted(() => {
+  loadData()
+  // Issue 2：监听浏览器全屏/退出事件
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+})
 
-// 监听 detail-check 打开时自动加载
+// 监听 detail-check 打开时重新加载（用户手动打开抽屉时刷新数据）
 watch(showDetailCheck, (val) => {
   if (val) loadDetailCheck()
 })
@@ -1719,7 +1866,34 @@ watch(() => dcForm.value.header_table, (val) => {
   }
 })
 
+function onFullscreenChange() {
+  if (!document.fullscreenElement && erFullScreen.value) {
+    erFullScreen.value = false
+    nextTick(() => {
+      if (mappings.value.length > 0) renderER()
+    })
+  }
+}
+
+function toggleErFullScreen() {
+  if (!erContainer.value) return
+  if (document.fullscreenElement) {
+    document.exitFullscreen()
+    // fullscreenchange 事件处理程序会自动同步状态
+  } else {
+    erContainer.value.requestFullscreen().then(() => {
+      erFullScreen.value = true
+      nextTick(() => renderER())
+    }).catch(() => {
+      // Fullscreen API 不可用时的回退
+      erFullScreen.value = !erFullScreen.value
+      nextTick(() => renderER())
+    })
+  }
+}
+
 onBeforeUnmount(() => {
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
   for (const tid of Object.keys(erNodeMap)) {
     const { node, tableRef } = erNodeMap[Number(tid)]
     if (node && graph) {
@@ -1899,5 +2073,56 @@ onBeforeUnmount(() => {
 :deep(.er-f--key .er-f__type) {
   background: #e6f4ff;
   color: #1677ff;
+}
+
+/* 字段面板（Issue 4 左右分栏） */
+.field-panel {
+  border: 1px solid #e8e8e8;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.field-panel__header {
+  background: #fafafa;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #666;
+  border-bottom: 1px solid #e8e8e8;
+  font-weight: 500;
+}
+.field-panel__list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+.field-panel__empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: #bbb;
+  font-size: 13px;
+}
+.field-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid #f5f5f5;
+  transition: background 0.15s;
+  line-height: 1.5;
+}
+.field-item:hover {
+  background: #f0f5ff;
+}
+.field-item--selected {
+  background: #e6f4ff;
+  color: #1677ff;
+  font-weight: 500;
+}
+.field-item--composite {
+  background: #fffbe6;
+  border-left: 3px solid #faad14;
+}
+.field-item--composite:hover {
+  background: #fff7cc;
+}
+.field-item--composite.field-item--selected {
+  background: #fff7cc;
 }
 </style>

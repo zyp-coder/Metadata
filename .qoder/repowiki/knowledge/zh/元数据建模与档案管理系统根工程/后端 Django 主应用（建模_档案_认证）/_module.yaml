@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: backend
-title: 后端主数据与档案服务（Django 多应用聚合）
+title: 后端 Django 主应用（建模/档案/认证）
 scope:
     - backend/
 source_files: []

@@ -553,17 +553,25 @@ class FieldMapping(models.Model):
                                            help_text='子表关系：主表展示取代表行的排序字段（如 EFFECTIVE_DATE；同值自动取行键最大，保证确定性）')
     display_sort_desc = models.BooleanField('代表行降序', default=True,
                                             help_text='True=排序字段降序（最新在前），False=升序')
+    
+    class JoinType(models.TextChoices):
+        LEFT = 'left', 'LEFT JOIN'
+        INNER = 'inner', 'INNER JOIN'
+    
+    join_type = models.CharField('连接类型', max_length=10, choices=JoinType.choices,
+                                 default=JoinType.LEFT,
+                                 help_text='LEFT JOIN=保留无匹配行；INNER JOIN=仅保留匹配行')
     conditions = models.JSONField('筛选条件', default=list, blank=True,
                                   help_text='结构化 ON/WHERE 条件（AND 组合）：[{"field": "物理列名或字段编码", "operator": "eq/ne/gt/ge/lt/le/in", "value": 值}]')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
-
+    
     class Meta:
         verbose_name = '字段映射'
         verbose_name_plural = '字段映射'
         unique_together = [('source_table', 'source_field', 'target_table', 'target_field')]
-
+    
     def __str__(self):
-        return f'{self.source_table.name}.{self.source_field.name} → {self.target_table.name}.{self.target_field.name}'
+        return f'{self.source_table.name}.{self.source_field.name} \u2192 {self.target_table.name}.{self.target_field.name}'
 
 
 class DetailTableConfig(models.Model):

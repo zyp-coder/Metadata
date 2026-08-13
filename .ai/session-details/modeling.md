@@ -236,3 +236,12 @@
 - **验证**：后端 APIClient 6 项全过（重复 id=5→400 友好、重复 id=3 detail 挂载→400 友好、全新 201+204、编辑自身 200、编辑撞他人 400 友好）；vue-tsc 0 + django check 0；浏览器实测预检拦截（message.warning「该关系已存在：…ID=5」、弹窗保持打开未提交）
 - **状态**：实施+验证完成，收尾留痕完成
 - **遗留**：7 处同类 unique 约束默认模板待分批（用户选择下批）；存量 id=4 detail 映射 detail_config 为空（旧范式遗留，编辑会触发必填校验，待用户遇到再处理）
+### 第一百五十二轮（2026-08-13）标签：测试报告4问题、明细检查按钮、ER图全屏、JOIN类型、左右分栏
+- **背景**：测试报告4个问题，分批处理。批1=Issues 1-2；批2=Issue 3（JOIN类型配置）；批3=Issue 4（弹窗左右分栏）
+- **Issue 1 明细检查按钮**：按钮点开抽屉后 API 返回全空数据，用户认为"没有作用"。修复→onMounted 自动预加载 loadDetailCheck()；新增 `hasDetailCheckIssues` computed（registered/unregistered/suspect 任一有数据才 true）；`v-if="hasDetailCheckIssues"` 控制 badge+按钮渲染，无异常时隐藏
+- **Issue 2 ER图全屏**：原逻辑仅 v-show 隐藏映射列表+CSS 高度拉伸（calc(100vh-220px)），用户要真正的浏览器全屏。修复→`toggleErFullScreen` 改为 `erContainer.requestFullscreen()` + `document.exitFullscreen()`；`fullscreenchange` 事件同步 `erFullScreen.value` 状态；Fullscreen API 不可用时回退原逻辑
+- **Issue 3 JOIN 类型配置**：FieldMapping 新增 `join_type`（JoinType.LEFT/INNER，迁移0033）+ 序列化器暴露 + 同步引擎四场景适配（_join_header_rows join_type='inner' 跳过无匹配头表行 / _upsert_dimension_via_mapping inner 跳过无匹配目标行 / _sync_detail_rows nested_sources inner 跳过明细行）+ 前端 JOIN 选择器（关系类型右侧并列）+ 列表 join_type 列（灰色LEFT JOIN/蓝色INNER JOIN）+ TypeScript 类型扩展
+- **Issue 4 弹窗左右分栏**：弹窗宽度 640px→960px；引用表单改为 a-row 左右分栏——左侧源表 select+字段可点选列表（联合主键特殊行+field-panel CSS），中间箭头，右侧目标表 select+字段可点选列表
+- **变更文件**：`backend/apps/modeling/models.py`（FieldMapping JoinType+join_type）、`backend/apps/modeling/migrations/0033_fieldmapping_join_type.py`（新）、`backend/apps/modeling/serializers.py`、`backend/apps/archive/views.py`（四场景适配）、`frontend/src/types/index.ts`（FieldMapping 接口扩展）、`frontend/src/views/modeling/DomainFieldMapping.vue`（模板+脚本+样式）
+- **验证**：vue-tsc 0 errors + django check 0 issues + 102 tests 0.716s PASS
+- **状态**：全部4个问题实施+验证+留痕完成

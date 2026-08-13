@@ -631,8 +631,12 @@ class DomainViewSet(viewsets.ModelViewSet):
                 .order_by('sort_order', 'id')
                 .values('id', 'code', 'name', 'comment', 'sort_order')
             )
-            # 检查该表是否已配置关系（作为源表或目标表均可）
+            # 检查该表是否已配置关系（作为源表或目标表均可，或已注册为预组合）
             has_mapping = FieldMapping.objects.filter(Q(source_table=t) | Q(target_table=t)).exists()
+            if not has_mapping:
+                has_mapping = DetailTableConfig.objects.filter(
+                    Q(header_table=t) | Q(table=t)
+                ).exists()
             is_configured = len(pk_fields) > 0 and has_mapping
             if not is_configured:
                 all_configured = False

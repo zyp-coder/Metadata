@@ -102,6 +102,8 @@ export interface FieldMapping {
   target_field_name: string
   relation_type?: 'reference' | 'detail'
   relation_type_label?: string
+  join_type?: 'left' | 'inner'
+  join_type_label?: string
   row_key_field?: number | null
   row_key_field_name?: string | null
   display_sort_field?: number | null
