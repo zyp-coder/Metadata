@@ -900,3 +900,127 @@ class DetailSyncEngineTest(TestCase):
         self.assertEqual(detail.detail_row_key, '101')
         self.assertIsNone(detail.detail_group_id)
         self.assertEqual(detail.get_change_type_display(), '明细同步')
+
+
+class DetailSyncOneToManyTest(TestCase):
+    """2026-08-13 方向修正：挂载字段=任意键（不限定主键）+ 一对多归属。
+
+    场景：物料主表 ↔ 分组预组合，主表端挂载字段=MATERIAL_GROUP（非主键，物料所属分组），
+    组合体端=分组头.GROUP_ID（非主键业务键）；一个分组下多个物料（同值多主记录），
+    分组明细行挂到所有同值主记录（用户 GROUP_ID 场景）。
+    """
+
+    def setUp(self):
+        from apps.modeling.models import FieldMapping
+        self.domain = Domain.objects.create(name='一对多挂载域', code='DSYNC1N')
+        # 主表：物料信息，主键 MATERIAL_ID，另有非主键 MATERIAL_GROUP（物料所属分组）
+        self.t_main = Table.objects.create(
+            domain=self.domain, name='物料信息', code='SYNC1N_MAIN', is_primary=True)
+        self.f_mid = Field.objects.create(
+            table=self.t_main, name='物料ID', code='MATERIAL_ID',
+            is_primary_key=True, archive_category='base')
+        self.f_grp = Field.objects.create(
+            table=self.t_main, name='所属分组', code='MATERIAL_GROUP', archive_category='base')
+        # 明细表：分组头（主键 FID，GROUP_ID 非主键业务键）
+        self.t_detail = Table.objects.create(domain=self.domain, name='分组头', code='SYNC1N_DET')
+        self.f_fid = Field.objects.create(
+            table=self.t_detail, name='分组ID', code='FID',
+            is_primary_key=True, archive_category='base')
+        self.f_gid = Field.objects.create(
+            table=self.t_detail, name='分组编号', code='GROUP_ID', archive_category='base')
+        self.f_name = Field.objects.create(
+            table=self.t_detail, name='分组名', code='GROUP_NAME', archive_category='base')
+        self.f_entry = Field.objects.create(
+            table=self.t_detail, name='行号', code='ENTRY_ID', archive_category='base')
+        self.archive = Archive.objects.create(domain=self.domain, name='一对多档案', schema=[
+            {'code': 'MATERIAL_ID', 'name': '物料ID', 'type': 'string', 'ownership': 'source'},
+            {'code': 'MATERIAL_GROUP', 'name': '所属分组', 'type': 'string', 'ownership': 'source'},
+            {'code': 'GROUP_NAME', 'name': '分组名', 'type': 'string', 'ownership': 'source'},
+        ])
+        # 主记录：M1/M2 同属 G1 分组，M3 属 G2（一对多数据）
+        self.rec_m1 = ArchiveRecord.objects.create(
+            archive=self.archive,
+            source_data={'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'},
+            data={'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'}, created_by='system')
+        self.rec_m2 = ArchiveRecord.objects.create(
+            archive=self.archive,
+            source_data={'MATERIAL_ID': 'M2', 'MATERIAL_GROUP': 'G1'},
+            data={'MATERIAL_ID': 'M2', 'MATERIAL_GROUP': 'G1'}, created_by='system')
+        self.rec_m3 = ArchiveRecord.objects.create(
+            archive=self.archive,
+            source_data={'MATERIAL_ID': 'M3', 'MATERIAL_GROUP': 'G2'},
+            data={'MATERIAL_ID': 'M3', 'MATERIAL_GROUP': 'G2'}, created_by='system')
+        # 挂载：组合体端=分组头.GROUP_ID（非主键），主表端=物料.MATERIAL_GROUP（非主键）
+        self.fm = FieldMapping.objects.create(
+            source_table=self.t_detail, source_field=self.f_gid,
+            target_table=self.t_main, target_field=self.f_grp,
+            relation_type=FieldMapping.RelationType.DETAIL,
+            row_key_field=self.f_entry,
+            display_sort_field=self.f_entry,
+            display_sort_desc=True,
+        )
+
+    def _run_sync(self, rows):
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        stats = {'records_created': 0, 'records_updated': 0, 'tables_synced': 0,
+                 'records_deactivated': 0, 'records_reactivated': 0,
+                 'details_created': 0, 'details_updated': 0, 'details_deactivated': 0,
+                 'errors': [], 'warnings': []}
+        code_to_physical = {
+            'MATERIAL_ID': [(self.t_main.id, 'MATERIAL_ID')],
+            'MATERIAL_GROUP': [(self.t_main.id, 'MATERIAL_GROUP'), (self.t_detail.id, 'GROUP_ID')],
+            'GROUP_NAME': [(self.t_detail.id, 'GROUP_NAME')],
+        }
+        match_channels = {}
+        viewset._sync_detail_rows(
+            self.archive, self.t_detail, rows, self.fm, code_to_physical,
+            ['MATERIAL_ID'], match_channels, 'system', stats, set(), [], set(), set(),
+        )
+        return stats
+
+    def test_non_primary_mount_field_one_to_many(self):
+        """非主键挂载字段：G1 分组明细挂到 M1/M2 两条主记录（一对多），G2 挂到 M3"""
+        rows = [
+            {'ENTRY_ID': 1, 'GROUP_ID': 'G1', 'GROUP_NAME': '默认分组'},
+            {'ENTRY_ID': 2, 'GROUP_ID': 'G2', 'GROUP_NAME': '促销分组'},
+        ]
+        stats = self._run_sync(rows)
+        self.assertEqual(stats['details_created'], 3)  # G1→M1,M2（2条）+ G2→M3（1条）
+        # M1/M2 都挂到 G1 明细，M3 挂到 G2 明细
+        d_m1 = ArchiveRecordDetail.objects.filter(record=self.rec_m1)
+        d_m2 = ArchiveRecordDetail.objects.filter(record=self.rec_m2)
+        d_m3 = ArchiveRecordDetail.objects.filter(record=self.rec_m3)
+        self.assertEqual(d_m1.count(), 1)
+        self.assertEqual(d_m2.count(), 1)
+        self.assertEqual(d_m3.count(), 1)
+        self.assertEqual(d_m1.first().row_key, '1')
+        self.assertEqual(d_m1.first().data.get('GROUP_NAME'), '默认分组')
+        self.assertEqual(d_m2.first().row_key, '1')
+        self.assertEqual(d_m3.first().row_key, '2')
+        # 代表行：同挂载值的 M1/M2 共享 G1 代表行（分组名写入主记录）
+        self.rec_m1.refresh_from_db()
+        self.rec_m2.refresh_from_db()
+        self.rec_m3.refresh_from_db()
+        self.assertEqual(self.rec_m1.data.get('GROUP_NAME'), '默认分组')
+        self.assertEqual(self.rec_m2.data.get('GROUP_NAME'), '默认分组')
+        self.assertEqual(self.rec_m3.data.get('GROUP_NAME'), '促销分组')
+
+    def test_one_to_many_idempotent_second_sync(self):
+        """第二轮相同数据：一对多明细不重复创建（幂等）"""
+        rows = [
+            {'ENTRY_ID': 1, 'GROUP_ID': 'G1', 'GROUP_NAME': '默认分组'},
+            {'ENTRY_ID': 2, 'GROUP_ID': 'G2', 'GROUP_NAME': '促销分组'},
+        ]
+        self._run_sync(rows)
+        stats = self._run_sync(rows)
+        self.assertEqual(stats['details_created'], 0)
+        self.assertEqual(stats['details_updated'], 0)
+        self.assertEqual(ArchiveRecordDetail.objects.count(), 3)
+
+    def test_one_to_many_unmatched_value_skipped(self):
+        """挂载字段值未匹配到任何主记录 → 明细行跳过"""
+        rows = [{'ENTRY_ID': 9, 'GROUP_ID': 'G9', 'GROUP_NAME': '未知分组'}]
+        stats = self._run_sync(rows)
+        self.assertEqual(stats['details_created'], 0)
+        self.assertEqual(ArchiveRecordDetail.objects.count(), 0)

@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: master
 nodes_managed: true
-exported_at: "2026-08-13T06:38:51Z"
+exported_at: "2026-08-13T07:08:40Z"
 modules:
     "":
-        dir_name: 元数据建模与档案平台（Django + Vue3 双端编排）
-        title: 元数据建模与档案平台（Django + Vue3 双端编排）
+        dir_name: 元数据建模与档案管理系统（前后端聚合根）
+        title: 元数据建模与档案管理系统（前后端聚合根）
         scope:
             - .ai/
             - scripts/
@@ -81,8 +81,8 @@ modules:
         depends_on: []
         related_to: []
     frontend:
-        dir_name: 元数据建模与档案前端（Vue3 + Vite）
-        title: 元数据建模与档案前端（Vue3 + Vite）
+        dir_name: 元数据建模与档案管理系统前端（Vue3 + Vite）
+        title: 元数据建模与档案管理系统前端（Vue3 + Vite）
         scope:
             - frontend/
         source_files: []

@@ -409,14 +409,11 @@
                 </a-col>
                 <a-col :span="16">
                   <div class="field-panel">
-                    <div class="field-panel__header">主表字段（仅主键可选）</div>
+                    <div class="field-panel__header">主表字段（点击选择）</div>
                     <div class="field-panel__list">
                       <div v-for="f in targetFields" :key="f.id"
                            class="field-item"
-                           :class="{
-                             'field-item--selected': form.target_field === f.id,
-                             'field-item--disabled': !f.is_primary_key
-                           }"
+                           :class="{'field-item--selected': form.target_field === f.id}"
                            @click="selectDetailTargetField(f.id)">
                         <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
                         {{ f.name }} ({{ f.code }})
@@ -443,14 +440,6 @@
                 <strong>挂载数：</strong>{{ selectedDetailConfig.mapping_count }} 个映射</div>
             </div>
           </a-form-item>
-          <a-alert
-            v-if="detailTargetNoPk"
-            type="warning"
-            show-icon
-            message="主表需要配置单一主键字段"
-            description="明细子表通过关联字段挂载到主表主键，请先在表配置中设置主表的主键字段"
-            style="margin-bottom: 16px"
-          />
         </template>
 
         <!-- 引用关系：字段级映射（左右分栏，表列表+字段列表左右布局） -->
@@ -745,25 +734,28 @@ const dcRegisteredMap = computed<Record<number, string>>(() => {
   return map
 })
 
-// 关联字段自动推荐：子表字段与主表主键 code 匹配（完全同名 > FID↔ID 后缀模式）
+// 关联字段自动推荐（2026-08-13 方向修正：挂载字段任意）：子表字段与已选目标字段 code 匹配
+// （完全同名 > FID↔ID 后缀模式）；目标字段未选时回退主表主键匹配
 const detailRecommendedFieldId = computed<number | null>(() => {
   if (form.value.relation_type !== 'detail' || !form.value.target_table || sourceFields.value.length === 0) return null
-  const pkFields = targetFields.value.filter((f: any) => f.is_primary_key)
-  if (pkFields.length !== 1) return null
-  const pkCode = String(pkFields[0].code || '')
-  if (!pkCode) return null
-  const exact = sourceFields.value.find((f: any) => String(f.code) === pkCode)
+  let targetCode = ''
+  const tf = targetFields.value.find((f: any) => f.id === form.value.target_field)
+  if (tf) targetCode = String(tf.code || '')
+  if (!targetCode) {
+    const pkFields = targetFields.value.filter((f: any) => f.is_primary_key)
+    if (pkFields.length !== 1) return null
+    targetCode = String(pkFields[0].code || '')
+  }
+  if (!targetCode) return null
+  const exact = sourceFields.value.find((f: any) => String(f.code) === targetCode)
   if (exact) return exact.id
-  const suffix = sourceFields.value.find((f: any) => String(f.code).endsWith(pkCode) && String(f.code).length > pkCode.length)
+  const suffix = sourceFields.value.find((f: any) => String(f.code).endsWith(targetCode) && String(f.code).length > targetCode.length)
   if (suffix) return suffix.id
   return null
 })
 
 // 主表主键检查：明细子表挂载需要主表单一主键
-const detailTargetNoPk = computed(() => {
-  if (form.value.relation_type !== 'detail' || !form.value.target_table) return false
-  return targetFields.value.filter((f: any) => f.is_primary_key).length !== 1
-})
+// 2026-08-13 方向修正：挂载字段任意，删除主键强校验（保留空注释位说明）
 
 // AI 建议表格列定义
 const aiSuggestionColumns = [
@@ -1384,7 +1376,7 @@ async function loadTargetFields() {
     targetFields.value = res.data.results.sort((a: any, b: any) => (b.is_primary_key ? 1 : 0) - (a.is_primary_key ? 1 : 0))
     const pkFields = targetFields.value.filter((f: any) => f.is_primary_key)
     if (form.value.relation_type === 'detail') {
-      // 明细子表挂载：目标字段=主表单一主键（联合主键不支持挂载）
+      // 挂载字段任意（2026-08-13 方向修正）：默认推荐单一主键（用户可改选任意字段）
       form.value.target_field = pkFields.length === 1 ? pkFields[0].id : null
       // 主表变化后重新推荐关联字段
       applyDetailRecommendation()
@@ -1579,7 +1571,7 @@ async function handleSubmit() {
       return
     }
     if (!form.value.target_field) {
-      message.warning('主表需要配置单一主键字段，请先在表配置中设置主表主键')
+      message.warning('请选择主表端关联字段')
       return
     }
   } else {
@@ -2006,11 +1998,13 @@ function selectDetailSourceField(fieldId: number) {
   onDetailSourceFieldChange()
 }
 
-// 主表字段点击选择（挂载目标固定为主表单一主键，非主键禁选）
+// 主表字段点击选择（挂载字段可为任意字段，2026-08-13 方向修正）
 function selectDetailTargetField(fieldId: number) {
   const f = targetFields.value.find((x: any) => x.id === fieldId)
-  if (!f || !f.is_primary_key) return
+  if (!f) return
   form.value.target_field = fieldId
+  // 目标字段变化后重新推荐源字段（已手动选过源字段则不覆盖）
+  applyDetailRecommendation()
 }
 
 function applyDetailRecommendation() {

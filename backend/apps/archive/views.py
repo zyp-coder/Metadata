@@ -1844,6 +1844,8 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                           created_in_this_batch, sync_exclude_codes):
         """子表关系同步（2026-08-08）：明细行全量保留写 ArchiveRecordDetail + 代表行折叠写主表。
 
+        - 归属（2026-08-13 方向修正）：明细行按挂载字段（detail_fm.target_field）值归属主记录，
+          同值多记录=一对多全部挂载（替代原按主表主键归属）；
         - 行键：detail_fm.row_key_field 配置优先；未配置 → _detect_unique_column 自动检测唯一列并回填配置；
         - 嵌套属性：target_table=本表的 reference 映射（一级透传），源表属性以 `__nested__{code}` 前缀
           并入明细行（同值多行取排序后最后一条，确定性）；
@@ -1869,18 +1871,21 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 if tbl_id == table.id or tbl_id == header_table_id:
                     physical_to_schema[phys_col] = schema_code
 
-        # 本表物理列 → 主键 schema code（明细归属主记录 + 代表行 key 构建用）
+        # 归属键：挂载字段（主表端 target_field，2026-08-13 方向修正：任何键均可挂载，
+        # 不再限定主键；同步按挂载字段值匹配主记录，同值多记录=一对多全部挂载）
+        # 本表物理列 → 挂载字段 schema code（明细归属主记录 + 代表行 key 构建用）
         # 2026-08-11 第三轮修复：预组合时头表物理列同样纳入（头表字段可作挂载关联键，
         # 平铺行中以其 `__hdr__` 前缀形态被 _record_key_for_row 取值）
-        pk_physical_to_schema = {}
-        for pk in pk_fields:
-            for tbl_id, phys in list(code_to_physical.get(pk, [])) + list(match_channels.get(pk, [])):
+        target_code = detail_fm.target_field.code if detail_fm.target_field else None
+        target_physical_to_schema = {}
+        if target_code:
+            for tbl_id, phys in list(code_to_physical.get(target_code, [])) + list(match_channels.get(target_code, [])):
                 if tbl_id == table.id or tbl_id == header_table_id:
-                    pk_physical_to_schema[phys] = pk
-        if not pk_physical_to_schema:
+                    target_physical_to_schema[phys] = target_code
+        if not target_code or not target_physical_to_schema:
             stats['warnings'].append(
-                f'明细子表 {source_table_name}：本表无映射到档案主键的物理列，'
-                f'明细行无法归属主记录（请在关系管理配置指向主表主键的映射）')
+                f'明细子表 {source_table_name}：挂载字段 {target_code or "未配置"} 无本表物理列映射，'
+                f'明细行无法归属主记录（请在关系管理重新选择挂载字段）')
             return
 
         # 行键列：detail_config 优先；未配置自动检测唯一列并回填配置（一次检测全表复用）
@@ -1961,33 +1966,28 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             existing_details[(d.record_id, d.row_key)] = d
 
         # 预加载该档案全部记录（active 优先），代表行/明细归属匹配用
+        # 2026-08-13 方向修正：按挂载字段值索引，同值多记录全保留（一对多挂载）
         existing_records = {}
         for rec in ArchiveRecord.objects.filter(archive=archive).order_by('id'):
-            key = tuple(str(rec.data.get(pk, '')) for pk in pk_fields)
-            if not any(k for k in key):
+            val = rec.data.get(target_code)
+            if val is None or str(val) == '':
                 continue
-            prev = existing_records.get(key)
-            if prev is not None and prev.status == ArchiveRecord.Status.ACTIVE:
-                continue
-            if prev is None or rec.status == ArchiveRecord.Status.ACTIVE:
-                existing_records[key] = rec
+            key = str(val)
+            lst = existing_records.setdefault(key, [])
+            if rec.status == ArchiveRecord.Status.ACTIVE:
+                lst.insert(0, rec)
+            else:
+                lst.append(rec)
 
         def _record_key_for_row(row):
-            key_parts = []
-            for pk in pk_fields:
-                pk_val = ''
-                for phys, code in pk_physical_to_schema.items():
-                    if code == pk:
-                        # 2026-08-11 第三轮修复：头表字段在平铺行中以 __hdr__ 前缀存在，同样参与归属匹配
-                        if phys in row:
-                            pk_val = row[phys]
-                            break
-                        hdr_key = f'__hdr__{phys}'
-                        if hdr_key in row:
-                            pk_val = row[hdr_key]
-                            break
-                key_parts.append('' if pk_val is None else str(pk_val))
-            return tuple(key_parts)
+            # 挂载字段值（含平铺头表 __hdr__ 前缀列）；无值返回 None（无法归属）
+            for phys, code in target_physical_to_schema.items():
+                if phys in row and row[phys] is not None:
+                    return str(row[phys])
+                hdr_key = f'__hdr__{phys}'
+                if hdr_key in row and row[hdr_key] is not None:
+                    return str(row[hdr_key])
+            return None
 
         # 代表行排序（display_sort DESC/ASC + 行键次级键；空值永远垫底）
         sorted_rows = rows
@@ -2003,11 +2003,13 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         matched_detail_ids = set()
         blank_rk = 0
         for row in sorted_rows:
-            # —— 明细行归属主记录（行内映射到主键的物理列构建 key）——
+            # —— 明细行归属主记录（行内挂载字段物理列构建 key，2026-08-13 一对多）——
             rec_key = _record_key_for_row(row)
-            existing = existing_records.get(rec_key)
-            if not existing:
-                continue  # 无法归属主记录：跳过（外键引用非独立实体）
+            if rec_key is None:
+                continue  # 行内无挂载字段值：无法归属
+            existing_list = existing_records.get(rec_key, [])
+            if not existing_list:
+                continue  # 挂载字段值未匹配到任何主记录：跳过
 
             # —— 明细行数据：本表映射字段 + 嵌套属性透传（__nested__ 前缀独立命名空间）——
             # 2026-08-11 第三轮：__hdr__ 前缀字段按基础列名映射头表物理列（预组合平铺）
@@ -2049,36 +2051,38 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             if not rk:
                 blank_rk += 1
                 continue  # 行键为空：无法唯一定位明细（行键列配置错误，防 unique_together 冲突）
-            existing_detail = existing_details.get((existing.id, rk))
-            if existing_detail:
-                matched_detail_ids.add(existing_detail.id)
-                # 源删自动停用的明细行源端重现 → 自动复活
-                if existing_detail.status == ArchiveRecordDetail.Status.DELETED:
-                    existing_detail.status = ArchiveRecordDetail.Status.ACTIVE
-                # 整层替换：明细行全部数据来自本表（无他表合并），源侧删字段即消失
-                existing_detail.source_data = detail_data
-                merged, lineage = _merge_record_data(existing_detail, schema)
-                old_data = existing_detail.data or {}
-                if old_data != merged:
-                    existing_detail.data = merged
-                    existing_detail.lineage = lineage
-                    existing_detail.save()
-                    stats['details_updated'] += 1
+            # 2026-08-13 一对多：同挂载字段值的所有主记录都挂该明细行
+            for existing in existing_list:
+                existing_detail = existing_details.get((existing.id, rk))
+                if existing_detail:
+                    matched_detail_ids.add(existing_detail.id)
+                    # 源删自动停用的明细行源端重现 → 自动复活
+                    if existing_detail.status == ArchiveRecordDetail.Status.DELETED:
+                        existing_detail.status = ArchiveRecordDetail.Status.ACTIVE
+                    # 整层替换：明细行全部数据来自本表（无他表合并），源侧删字段即消失
+                    existing_detail.source_data = detail_data
+                    merged, lineage = _merge_record_data(existing_detail, schema)
+                    old_data = existing_detail.data or {}
+                    if old_data != merged:
+                        existing_detail.data = merged
+                        existing_detail.lineage = lineage
+                        existing_detail.save()
+                        stats['details_updated'] += 1
+                    else:
+                        existing_detail.lineage = lineage
+                        detail_no_change.append(existing_detail)
                 else:
-                    existing_detail.lineage = lineage
-                    detail_no_change.append(existing_detail)
-            else:
-                detail = ArchiveRecordDetail(
-                    record=existing, mapping=detail_fm, row_key=rk,
-                    source_data=detail_data, manual_data={},
-                )
-                merged, lineage = _merge_record_data(detail, schema)
-                detail.data = merged
-                detail.lineage = lineage
-                detail.save()
-                existing_details[(existing.id, rk)] = detail
-                matched_detail_ids.add(detail.id)
-                stats['details_created'] += 1
+                    detail = ArchiveRecordDetail(
+                        record=existing, mapping=detail_fm, row_key=rk,
+                        source_data=detail_data, manual_data={},
+                    )
+                    merged, lineage = _merge_record_data(detail, schema)
+                    detail.data = merged
+                    detail.lineage = lineage
+                    detail.save()
+                    existing_details[(existing.id, rk)] = detail
+                    matched_detail_ids.add(detail.id)
+                    stats['details_created'] += 1
 
         if blank_rk:
             stats['warnings'].append(
@@ -2092,20 +2096,20 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 batch_size=2000,
             )
 
-        # —— 代表行写主表（按物料分组：每组排序首行 = 默认价；对齐第133轮方向锁定语义）——
+        # —— 代表行写主表（按挂载字段值分组：每组排序首行 = 默认价；对齐第133轮方向锁定语义）——
+        # 2026-08-13 一对多：同挂载字段值的所有主记录共享代表行数据
         # 复用 _write_dimension_row 公共写入逻辑：本表非空映射字段 → source_data 合并 → 版本+1 + 变更明细
         if display_phys is not None and sorted_rows:
             seen_keys = set()
             for rep_row in sorted_rows:
                 rep_key = _record_key_for_row(rep_row)
-                if rep_key in seen_keys:
+                if rep_key is None or rep_key in seen_keys:
                     continue
                 seen_keys.add(rep_key)
-                rep_existing = existing_records.get(rep_key)
-                if rep_existing:
+                for rep_existing in existing_records.get(rep_key, []):
                     self._write_dimension_row(
                         rep_existing, rep_row, physical_to_schema, schema, field_name_map,
-                        source_table_name, rep_key, operated_by, stats, matched_ids,
+                        source_table_name, (rep_key,), operated_by, stats, matched_ids,
                         change_entries, created_in_this_batch, record_no_change,
                     )
 

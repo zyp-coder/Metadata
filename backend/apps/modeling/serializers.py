@@ -373,7 +373,7 @@ class FieldMappingSerializer(serializers.ModelSerializer):
         return dc.table.name
 
     def validate(self, attrs):
-        """2026-08-11 交互改造校验：relation_type=detail 时必填 detail_config、target_field 必须目标表主键。"""
+        """2026-08-11 交互改造校验（2026-08-13 放宽挂载字段）：relation_type=detail 时必填 detail_config、target_field。"""
         relation_type = attrs.get('relation_type') or getattr(getattr(self, 'instance', None), 'relation_type', None)
         detail_config = attrs.get('detail_config')
         target_field = attrs.get('target_field') or getattr(getattr(self, 'instance', None), 'target_field', None)
@@ -383,11 +383,8 @@ class FieldMappingSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({'detail_config': '明细子表关系必须挂载到已注册的子表配置（先注册再挂载）'})
             if not target_field:
                 raise serializers.ValidationError({'target_field': '明细子表关系必须选择目标字段'})
-            # 校验 target_field 是目标表主键字段
-            from .models import Field as MField
-            target_f = target_field if isinstance(target_field, MField) else MField.objects.filter(pk=target_field).first()
-            if target_f and not target_f.is_primary_key:
-                raise serializers.ValidationError({'target_field': '明细子表关系的目标字段必须是目标表的主键字段'})
+            # 2026-08-13 方向修正：挂载字段可为目标表任意字段（不限定主键），
+            # 同步引擎按挂载字段值归属主记录（同值多记录=一对多全部挂载）
             # 校验 detail_config.table == source_table
             source_table = attrs.get('source_table') or getattr(getattr(self, 'instance', None), 'source_table', None)
             dc = detail_config if isinstance(detail_config, DetailTableConfig) else DetailTableConfig.objects.filter(pk=detail_config).first()

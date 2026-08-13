@@ -2157,18 +2157,10 @@ class FieldMappingViewSet(viewsets.ModelViewSet):
             else:
                 unregistered.append({**entry, 'reason': '未注册子表配置（请先注册再挂载）'})
 
-            # 方向异常检测：source_table 的字段是否有 is_primary_key 列可映射到档案主键
-            from .models import Field as MField
-            src_pk = MField.objects.filter(
-                table=fm.source_table, is_primary_key=True, status='active'
-            ).exists()  # 自身有主键列
-            has_pk_mapping = FieldMapping.objects.filter(
-                source_table=fm.source_table,
-                target_field__is_primary_key=True,
-                target_field__status='active',
-            ).exists()  # 经 FieldMapping 映射到其他表主键
-            if not (src_pk or has_pk_mapping):
-                suspect.append({**entry, 'reason': '方向可能反了（明细子表无法映射到档案主键，无归属主记录通道）'})
+            # 方向异常检测（2026-08-13 放宽挂载字段后简化）：detail 映射必须配置挂载字段，
+            # 否则明细行无法归属主记录（同步按挂载字段值匹配）
+            if not fm.target_field:
+                suspect.append({**entry, 'reason': '未配置挂载字段（请在关系管理选择主表端关联字段）'})
 
         return Response({
             'registered': registered,
