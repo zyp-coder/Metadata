@@ -1,5 +1,18 @@
 # 操作详情 — modeling 模块（倒序，最新在前）
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
+### 第一百五十四轮（2026-08-13）标签：测试报告8问题、预组合改名、表列表点选、按钮去重、ER预组合标签
+**任务**：测试报告8个问题修复，全部在 /modeling/domains/2/mappings 页面，按4批处理。
+**读取文件**：
+- `frontend/src/views/modeling/DomainFieldMapping.vue`（核心修改，~+97/-57行）
+
+**变更摘要**：
+- 批1（#6, #2, #3）：关系类型下拉选项 "引用（字段级映射，默认）"→"普通关系"、"明细子表（整表作为子表挂载到主表）"→"预组合关系"；ER按钮 "预组合表"→"预组合" + font-weight:600；dcColumns 移除 row_key 和 挂载两列
+- 批2（#5）：表选择从 a-select 下拉改为左右布局列表点选——源侧 a-col:span=12 内再分 8|16（表列表|字段列表），目标侧 span=11 内同样 8|16，中间箭头 padding-top 200px；新增 selectSourceTable/selectTargetTable 函数（直接切换+清空字段+加载）；field-item--disabled CSS
+- 批3（#1, #2）：移除「明细检查」a-badge 按钮，子表注册按钮 type="primary" label="预组合"
+- 批4（#8）：ER图 renderER 内建 headerTableToDetails/detailTableToHeaders 查找表，头表节点追加绿色"预组合" tag + 明细表名，明细表节点追加青色"预组合" tag + 头表名
+**验证**：vue-tsc --noEmit 0 errors；已 commit+push（3a93caa）
+**遗留**：无。
+
 ### 第一百四十四轮（2026-08-11）标签：关系管理列表直观性改进、预组合名、主表tag、浅蓝底
 **任务**：用户反馈关系管理列表「明细表和主表、普通表的关系不直观」。现状分析（DOM 实证）：detail 行只显示明细表名（预组合信息丢失）、目标表主表地位无体现、普通关联是裸灰字。AskUserQuestion 确认方案A（表格增强）。
 **修改文件**：

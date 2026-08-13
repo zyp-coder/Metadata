@@ -356,3 +356,16 @@ ER 图字段行从单行改为两行布局：
 - 回归 54/54 PASS；vue-tsc 0 errors
 - 真实域#11 复测：dup-fields 返回空 groups（原 4 组冲突均为未分配字段，档案范围内确无同名冲突），属性配置页告警条/角标已消失（浏览器 DOM 复核 .ant-alert=0、无橙色角标）
 教训：新增检查项前必须核对既有范围决策（第一百零八轮口径），配置检查类功能默认继承「仅档案字段」范围。
+
+## 2026-08-13 测试报告8问题4批修复（第一百五十四轮）
+### 变更背景
+测试报告8个问题，按4批处理：批1 #6（关系类型选项改名）+ #2（ER按钮改名加粗）+ #3（dcColumns移除行键/挂载列）；批2 #5（表选择由下拉改为左右布局列表点选）；批3 #1（移除明细检查按钮）+ #2（子表注册→预组合高亮）；批4 #8（ER图预组合标签）。
+### 关键实现
+- **批1 改名+列显隐**：a-select-option value="reference" → "普通关系"、value="detail" → "预组合关系"；ER按钮 "预组合表"→"预组合" + font-weight:600；dcColumns 移除 row_key（width:120）和 挂载（width:80）两列
+- **批2 表列表点选**：源侧 reference 表单重写为 a-row:gutter=8 布局——a-col:span=8 源表列表（可点选 field-item）+ a-col:span=16 源字段列表（左右布局）+ 箭头 padding-top 200px + 目标侧 a-col:span=11 内同样 8|16 布局；新增 selectSourceTable(直接切换+自动清空源字段+加载)+ selectTargetTable；样式 field-item--disabled（opacity 0.5 + cursor not-allowed）
+- **批3 按钮去重+改名**：移除 a-badge +「明细检查」按钮及关联代码；子表注册按钮 type="primary" + label "预组合"
+- **批4 ER图预组合标签**：renderER 内置变量——headerTableToDetails（头表→明细表配置数组）和 detailTableToHeaders（明细表→头表名）；节点 HTML 中：头表节点追加绿色"预组合" tag + 包含明细表名；明细表节点追加青色"预组合" tag + 头表名
+### 变更文件清单
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：批1~批4 全在此文件（约+97/-57 行）
+### 验证
+vue-tsc --noEmit 0 errors；已 commit+push（3a93caa）

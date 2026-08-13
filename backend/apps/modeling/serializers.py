@@ -274,7 +274,7 @@ class DetailTableConfigSerializer(serializers.ModelSerializer):
                   'header_link_field', 'header_link_field_name',
                   'detail_link_field', 'detail_link_field_name',
                   'row_key_field', 'row_key_field_name', 'display_sort_field', 'display_sort_field_name',
-                  'display_sort_desc', 'conditions', 'created_at', 'updated_at', 'mapping_count']
+                  'display_sort_desc', 'join_type', 'conditions', 'created_at', 'updated_at', 'mapping_count']
         read_only_fields = ['id', 'created_at', 'updated_at']
         validators = [DetailTableUniqueValidator(DetailTableConfig.objects.all(), ('domain', 'table'))]
 

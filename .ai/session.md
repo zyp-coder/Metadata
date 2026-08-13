@@ -1,15 +1,16 @@
 # 会话接力 — 主文件（当前状态 + 功能索引）
 > 启动只读本文件（rule §3）。历史详情按模块存于 `.ai/session-details/<模块>.md`（archive / modeling / uxqa / project / early-logs），确认需求后按「模块+功能标签/第N轮」grep 加载，禁止全量读。
 ## 当前会话状态
-- **当前阶段**：第一百五十三轮（已完成）——新增 scripts/release.ps1（本地一键发布：build 前端→git add/commit/push）+ deploy/sync.sh（服务器一键同步：git pull→npm run build→重建 backend 自动 migrate→nginx reload）；服务器路径 /opt/metadata/deploy（有 Node/npm）；双脚本语法验证通过
-- **活跃模块**：project（运维脚本）
+- **当前阶段**：第一百五十四轮（已完成）——测试报告 8 问题 4 批修复（改名+列显隐+表点选+按钮去重+ER预组合标签），vue-tsc 0 errors
+- **活跃模块**：modeling、frontend
 ### 最近 3 轮详情（满 3 轮后最旧一轮下沉到详情文件）
-- **本次操作**：2026-08-13 — 第一百五十三轮：用户测试工作流诉求「本地一键启动前后端 + 改完保证 commit + 服务器同步」，封装两脚本：① scripts/release.ps1（检查 git 变更→npm run build（失败中止不提交）→-m 参数/交互输入 commit message→git add -A+commit+push origin master，push 前 pre-push hook 自动跑测试，输出服务器下一步提示）；② deploy/sync.sh（git pull→node_modules 缺失自动 npm install→npm run build→docker compose/docker-compose 自动探测→up -d --build backend（启动链自带 migrate，模型变更自动生效）→nginx -s reload 失败兜底 restart）。验证：release.ps1 PowerShell Parser 解析 OK + sync.sh git-bash bash -n OK
+- **本次操作**：2026-08-13 — 第一百五十四轮：测试报告 8 问题 4 批修复——批1（#6 下拉选项改名"普通关系/预组合关系"、#2 ER按钮改名"预组合"+font-weight:600、#3 dcColumns 移除行键/挂载列）+ 批2（#5 表选择由下拉改为左右布局列表点选——源侧8列|16列 + 目标侧8列|16列 + 箭头 padding-top 200px + selectSourceTable/selectTargetTable + field-item--disabled CSS）+ 批3（#1 移除明细检查按钮 + #2 子表注册→"预组合"高亮 type=primary）+ 批4（#8 ER图预组合查找表 headerTableToDetails/detailTableToHeaders + 节点预组合标签——头表绿标含明细表名、明细表青标含头表名）。验证：vue-tsc --noEmit 0 errors；已 commit+push（3a93caa）
 - **上次操作**：2026-08-13 — 第一百五十二轮：测试报告4问题，分批处理。批2+3（Issues 3-4）：③后端 FieldMapping 模型加 join_type（JoinType.LEFT/INNER，迁移0033）+ 序列化器暴露 + 同步引擎四场景适配（_join_header_rows 参数 join_type、_upsert_dimension_via_mapping `inner` 跳过无匹配、_sync_detail_rows nested_sources `inner` 跳过明细行）+ 前端 JOIN 类型选择器（关系类型右侧并列）+ 前端列表 join_type 列 + TypeScript 类型扩展 + ④弹窗宽度 640→960px + 引用表单左右分栏（源表+字段可点选列表 | 箭头 | 目标表+字段可点选列表）+ field-panel/field-item 样式。验证：vue-tsc 0 errors + django check 0 + 102 tests 0.716s PASS
 - **更早操作**：2026-08-12 — 第一百五十轮：用户要求「先走通有数据的」——diag_full_sync.py 模拟前端全流程实测（预检→确认→sync-schema）；600s 脚本超时被杀但后端同步线程继续执行（客户端断开不终止服务端线程）；SQLite 写锁期间系统不可用；journal 连续 90s 无写事务确认同步结束；最终 ArchiveRecord=209,123（active/synced）+ArchiveRecordDetail=49,588（mapping 3: 24,794 + mapping 9: 24,794）+部分主记录含 PRICE 等代表行字段；遗留 5 项：①ChangeBatch=0+OpLog仅create（sync_schema 收尾未执行）②cfg id=6 物料分组 pk_physical_to_schema 为空致明细0条 ③cfg id=2 row_key=MATERIAL_ID 非唯一致 239K 行去重为 24,794 ④NAME/DESCRIPTION 价目表头 0 值 ⑤代表行字段仅覆盖有明细物料（架构预期）；diag 临时文件已全清
 ## 功能索引（倒序，每轮一行；完整性/确认点自本次迁移后开始记录）
 | 轮次 | 日期 | 模块 | 功能标签 | 一句话摘要 | 完整性 | 确认点 |
 |------|------|------|----------|------------|--------|--------|
+| 第一百五十四轮 | 2026-08-13 | modeling、frontend | /modeling/domains/2/mappings、测试报告8问题、预组合改名、表列表点选、ER预组合标签 | 测试报告8问题4批修复：批1 关系选项'普通关系/预组合关系'+ER按钮改名'预组合'+dcColumns移除行键/挂载列 + 批2 表下拉→左右布局列表点选 + 批3 移除明细检查按钮+子表注册→'预组合'高亮 + 批4 ER图预组合标签（头表绿标含明细表名、明细表青标含头表名）；vue-tsc 0 errors；已commit+push（3a93caa） | 闸✓记✓拓✓测✓ | 1问/0改向 |
 | 第一百五十三轮 | 2026-08-13 | project、deploy | release.ps1、sync.sh、一键发布、服务器同步、/opt/metadata | 新增本地一键发布脚本 scripts/release.ps1（build 前端→git add/commit/push，失败中止不提交）+ 服务器同步脚本 deploy/sync.sh（git pull→npm run build→重建 backend 自动 migrate→nginx reload）；服务器 /opt/metadata/deploy 有 Node/npm；双脚本语法验证通过（PS Parser + bash -n） | 闸✓记✓拓✓测✓（无新增路径） | 1问/0改向 |
 | 第一百五十二轮 | 2026-08-13 | modeling、frontend、archive | /modeling/domains/2/mappings、测试报告、JOIN类型、左右分栏、FieldMapping join_type、同步引擎 | 测试报告4问题分批处理，批1（Issues 1-2）：明细检查按钮/ER图全屏；批2+3（Issues 3-4）：FieldMapping join_type+同步引擎适配+前端JOIN选择器+列表列+弹窗左右分栏960px；vue-tsc 0+django check 0+102 tests PASS | 闸✓记✓拓✓测✓ | 0问/0改向 |
 | 第一百五十一轮 | 2026-08-13 | modeling、frontend、archive | /modeling/domains/2/mappings、ER图预组合、表配置进度、排序字段、条件构建器 | UXQA测试报告问题1-5修复：①ER图预组合绿虚线②pk_status 后端预组合感知③ER图「预组合表」高亮④移除排序字段⑤JSON条件→结构化条件构建器（字段/操作符/值行列表，后端加contains/starts_with）；102 tests PASS；问题6保持现状 | 闸✓记✓拓✓测✓ | 2问/0改向 |

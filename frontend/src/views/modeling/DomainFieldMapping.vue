@@ -39,6 +39,7 @@
         rowKey="id"
         size="middle"
         :row-class-name="mappingRowClassName"
+        :scroll="{ x: 1160 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'source_table'">
@@ -134,38 +135,111 @@
     </a-drawer>
 
     <!-- 子表注册管理弹窗（预组合=头表+明细表） -->
-    <a-modal v-model:open="dcModalVisible" :title="dcEditingId ? '编辑子表配置' : '新建子表注册（预组合）'" @ok="handleDcSubmit" :confirmLoading="dcSaving" width="640px" :destroyOnClose="true">
+    <a-modal v-model:open="dcModalVisible" :title="dcEditingId ? '编辑子表配置' : '新建子表注册（预组合）'" @ok="handleDcSubmit" :confirmLoading="dcSaving" width="860px" :destroyOnClose="true">
       <a-alert v-if="!dcEditingId" type="info" show-icon style="margin-bottom: 16px"
         message="预组合 = 头表 + 明细表"
         description="先选头表和明细表（如 价目表 + 价目表明细），再配头↔明细关联字段；后续挂载时用整个预组合体关联主表" />
       <a-form layout="vertical">
-        <a-form-item label="头表" required help="组合体的主表（如 销售价目表）">
-          <a-select v-model:value="dcForm.header_table" style="width: 100%" show-search :disabled="!!dcEditingId" @change="onDcHeaderChange">
-            <a-select-option v-for="t in domainTables" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item label="明细表" required help="组合体的明细表（如 销售价目表明细）；同一明细表只能注册一次，已注册的不可重复选择（可到「管理注册」编辑）">
-          <a-select v-model:value="dcForm.table" style="width: 100%" show-search :disabled="!!dcEditingId" @change="onDcTableChange">
-            <a-select-option v-for="t in domainTables" :key="t.id" :value="t.id" :disabled="!!dcRegisteredMap[t.id]">
-              {{ t.name }} ({{ t.code }})
-              <span v-if="dcRegisteredMap[t.id]" style="color: #faad14; margin-left: 4px">· 已注册（{{ dcRegisteredMap[t.id] }}）</span>
-            </a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item label="头↔明细关联字段" required help="头表字段与明细表字段的关联（如 头表 ID ↔ 明细表 FID），自动检测可改">
-          <a-space style="width: 100%">
-            <a-select v-model:value="dcForm.header_link_field" style="width: 200px" show-search placeholder="头表字段" :disabled="!!dcEditingId">
-              <a-select-option v-for="f in dcHeaderFields" :key="f.id" :value="f.id">
-                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>{{ f.code }}
-              </a-select-option>
-            </a-select>
-            <span style="color: #999">↔</span>
-            <a-select v-model:value="dcForm.detail_link_field" style="flex: 1" show-search placeholder="明细表字段" :disabled="!!dcEditingId">
-              <a-select-option v-for="f in dcSourceFields" :key="f.id" :value="f.id">{{ f.code }}</a-select-option>
-            </a-select>
-            <a-button size="small" :loading="dcDetectingLink" @click="detectDcLink" :disabled="!!dcEditingId">检测</a-button>
-          </a-space>
-        </a-form-item>
+        <!-- 顶栏：关系类型（只读）+ JOIN 类型 -->
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="关系类型">
+              <a-tag color="blue" style="margin: 0; line-height: 32px; height: 32px; font-size: 13px; padding: 0 12px">预组合关系</a-tag>
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="JOIN 类型" help="同步时头表与明细表的 JOIN 方式">
+              <a-select v-model:value="dcForm.join_type">
+                <a-select-option value="left">LEFT JOIN（保留无匹配头表的明细行）</a-select-option>
+                <a-select-option value="inner">INNER JOIN（仅保留有匹配头表的明细行）</a-select-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <!-- 左右分栏：头表（左） ↔ 关联字段（中） ↔ 明细表（右） -->
+        <a-row :gutter="16">
+          <!-- 左侧：头表列表 + 头表关联字段列表 -->
+          <a-col :span="11">
+            <a-row :gutter="8">
+              <a-col :span="8">
+                <div class="field-panel">
+                  <div class="field-panel__header">头表（点击选择）</div>
+                  <div class="field-panel__list">
+                    <div v-for="t in domainTables" :key="t.id"
+                         class="field-item"
+                         :class="'field-item' + (dcForm.header_table === t.id ? ' field-item--selected' : '') + (dcEditingId ? ' field-item--disabled' : '')"
+                         @click="!dcEditingId && selectDcHeaderTable(t.id)">
+                      <div style="font-weight: 500; font-size: 12px">{{ t.name }}</div>
+                      <div style="font-size: 11px; color: #999; margin-top: 2px">{{ t.code }}</div>
+                    </div>
+                    <div v-if="domainTables.length === 0" class="field-panel__empty">暂无表</div>
+                  </div>
+                </div>
+              </a-col>
+              <a-col :span="16">
+                <div class="field-panel">
+                  <div class="field-panel__header">头表关联字段</div>
+                  <div class="field-panel__list">
+                    <div v-for="f in dcHeaderFields" :key="f.id"
+                         class="field-item"
+                         :class="'field-item' + (dcForm.header_link_field === f.id ? ' field-item--selected' : '') + (dcEditingId ? ' field-item--disabled' : '')"
+                         @click="!dcEditingId && (dcForm.header_link_field = f.id)">
+                      <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                      {{ f.name }} ({{ f.code }})
+                    </div>
+                    <div v-if="dcHeaderFields.length === 0" class="field-panel__empty">请先选择头表</div>
+                  </div>
+                </div>
+              </a-col>
+            </a-row>
+          </a-col>
+          <!-- 中间：箭头 + 检测按钮 -->
+          <a-col :span="2" style="text-align: center; padding-top: 180px">
+            <div><span style="font-size: 28px; color: #bbb">↔</span></div>
+            <div style="margin-top: 8px"><a-button size="small" :loading="dcDetectingLink" @click="detectDcLink" :disabled="!!dcEditingId">检测</a-button></div>
+          </a-col>
+          <!-- 右侧：明细表列表 + 明细表关联字段列表 -->
+          <a-col :span="11">
+            <a-row :gutter="8">
+              <a-col :span="8">
+                <div class="field-panel">
+                  <div class="field-panel__header">明细表（点击选择）</div>
+                  <div class="field-panel__list">
+                    <div v-for="t in domainTables" :key="t.id"
+                         class="field-item"
+                         :class="{
+                           'field-item--selected': dcForm.table === t.id,
+                           'field-item--disabled': (!!dcRegisteredMap[t.id] && dcForm.table !== t.id) || !!dcEditingId
+                         }"
+                         @click="!dcEditingId && !dcRegisteredMap[t.id] && selectDcDetailTable(t.id)">
+                      <div style="font-weight: 500; font-size: 12px">{{ t.name }}</div>
+                      <div style="font-size: 11px; color: #999; margin-top: 2px">{{ t.code }}</div>
+                      <div v-if="dcRegisteredMap[t.id] && dcForm.table !== t.id" style="font-size: 10px; color: #faad14; margin-top: 2px">已注册</div>
+                    </div>
+                    <div v-if="domainTables.length === 0" class="field-panel__empty">暂无表</div>
+                  </div>
+                </div>
+              </a-col>
+              <a-col :span="16">
+                <div class="field-panel">
+                  <div class="field-panel__header">明细表关联字段</div>
+                  <div class="field-panel__list">
+                    <div v-for="f in dcSourceFields" :key="f.id"
+                         class="field-item"
+                         :class="'field-item' + (dcForm.detail_link_field === f.id ? ' field-item--selected' : '') + (dcEditingId ? ' field-item--disabled' : '')"
+                         @click="!dcEditingId && (dcForm.detail_link_field = f.id)">
+                      <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                      {{ f.name }} ({{ f.code }})
+                    </div>
+                    <div v-if="dcSourceFields.length === 0" class="field-panel__empty">请先选择明细表</div>
+                  </div>
+                </div>
+              </a-col>
+            </a-row>
+          </a-col>
+        </a-row>
+
         <a-form-item label="行键字段" help="明细行唯一标识列（如 ENTRY_ID），未配置时同步自动检测并回填">
           <a-space style="width: 100%">
             <a-select v-model:value="dcForm.row_key_field" style="flex: 1" show-search allowClear placeholder="自动检测">
@@ -181,8 +255,12 @@
             字段 操作符 值（多条件同时满足，自动转为 AND 查询）
           </div>
           <div v-for="(cond, idx) in dcConditions" :key="idx" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center">
+            <a-select v-model:value="cond.fieldSource" style="width: 90px" placeholder="来源">
+              <a-select-option value="detail">明细</a-select-option>
+              <a-select-option value="header">头表</a-select-option>
+            </a-select>
             <a-select v-model:value="cond.field" style="width: 155px" show-search placeholder="选择字段">
-              <a-select-option v-for="f in dcSourceFields" :key="f.id" :value="f.code">{{ f.name }} ({{ f.code }})</a-select-option>
+              <a-select-option v-for="f in (cond.fieldSource === 'header' ? dcHeaderFields : dcSourceFields)" :key="f.id" :value="f.code">{{ f.name }} ({{ f.code }})</a-select-option>
             </a-select>
             <a-select v-model:value="cond.operator" style="width: 130px" placeholder="操作符">
               <a-select-option value="eq">等于 (=)</a-select-option>
@@ -208,10 +286,11 @@
     <a-modal v-model:open="dcListModalVisible" title="子表注册管理（预组合）" width="860px" :footer="null">
       <a-alert type="info" show-icon style="margin-bottom: 12px" message="预组合 = 头表 + 明细表"
         description="注册（头表+明细表先组合）与挂载（用组合体关联主表）是两步；同一明细表只能注册一次，新建时已注册的明细表不可重复选择" />
+      <a-input v-model:value="dcListSearch" placeholder="搜索头表名或明细表名..." allowClear style="margin-bottom: 12px" />
       <div style="text-align: right; margin-bottom: 12px">
         <a-button type="primary" size="small" @click="openDetailConfigCreate">新建注册</a-button>
       </div>
-      <a-table :dataSource="domainDetailConfigs" :columns="dcColumns" rowKey="id" size="small" :pagination="false" :scroll="{ y: 380 }">
+      <a-table :dataSource="filteredDetailConfigs" :columns="dcColumns" rowKey="id" size="small" :pagination="false" :scroll="{ y: 380 }">
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'combo'">
             <span style="font-weight: 500">{{ record.header_table_name ? record.header_table_name + ' + ' : '' }}{{ record.table_name }}</span>
@@ -554,15 +633,28 @@ const dcForm = ref<any>({
   header_table: null, table: null,
   header_link_field: null, detail_link_field: null,
   row_key_field: null, display_sort_field: null,
-  display_sort_desc: true, conditionsText: '',
+  display_sort_desc: true, join_type: 'left', conditionsText: '',
 })
-const dcConditions = ref<{ field: string; operator: string; value: any }[]>([])
+const dcConditions = ref<{ field: string; operator: string; value: any; fieldSource: string }[]>([])
 const dcSourceFields = ref<any[]>([])
 const dcHeaderFields = ref<any[]>([])
 const dcDetectingRowKey = ref(false)
 const dcDetectingLink = ref(false)
 const domainDetailConfigs = ref<any[]>([])
 const dcListModalVisible = ref(false)
+const dcListSearch = ref('')
+
+// 预组合列表搜索过滤
+const filteredDetailConfigs = computed(() => {
+  const q = dcListSearch.value.trim().toLowerCase()
+  if (!q) return domainDetailConfigs.value
+  return domainDetailConfigs.value.filter((cfg: any) =>
+    (cfg.header_table_name || '').toLowerCase().includes(q) ||
+    (cfg.table_name || '').toLowerCase().includes(q) ||
+    (cfg.header_table_code || '').toLowerCase().includes(q) ||
+    (cfg.table_code || '').toLowerCase().includes(q)
+  )
+})
 
 // detail-check 状态
 const showDetailCheck = ref(false)
@@ -1647,11 +1739,12 @@ async function openDetailConfigEdit(cfg: any) {
     header_link_field: cfg.header_link_field,
     detail_link_field: cfg.detail_link_field,
     row_key_field: cfg.row_key_field || null,
+    join_type: cfg.join_type || 'left',
     conditionsText: '',
   }
   // 回填条件行（结构化 -> 可视化行列表）
   dcConditions.value = cfg.conditions?.length
-    ? cfg.conditions.map((c: any) => ({ field: c.field, operator: c.operator, value: c.value ?? '' }))
+    ? cfg.conditions.map((c: any) => ({ field: c.field, operator: c.operator, value: c.value ?? '', fieldSource: c.field_source || 'detail' }))
     : []
   dcSourceFields.value = []
   dcHeaderFields.value = []
@@ -1687,6 +1780,19 @@ async function onDcHeaderChange() {
   }
 }
 
+// 头表点击选择（替代 a-select 下拉）
+function selectDcHeaderTable(tableId: number) {
+  if (dcEditingId.value) return
+  if (dcForm.value.header_table === tableId) return
+  dcForm.value.header_table = tableId
+  dcForm.value.header_link_field = null
+  onDcHeaderChange()
+  // 头表+明细表都选好时自动检测关联字段
+  if (dcForm.value.table && !dcForm.value.detail_link_field) {
+    detectDcLink()
+  }
+}
+
 async function onDcTableChange() {
   if (dcForm.value.table) {
     const res = await fieldApi.list({ table: dcForm.value.table })
@@ -1698,6 +1804,16 @@ async function onDcTableChange() {
   } else {
     dcSourceFields.value = []
   }
+}
+
+// 明细表点击选择（替代 a-select 下拉）
+function selectDcDetailTable(tableId: number) {
+  if (dcEditingId.value) return
+  if (dcRegisteredMap.value[tableId] && dcForm.value.table !== tableId) return
+  if (dcForm.value.table === tableId) return
+  dcForm.value.table = tableId
+  dcForm.value.detail_link_field = null
+  onDcTableChange()
 }
 
 async function detectDcLink() {
@@ -1743,6 +1859,7 @@ async function handleDcSubmit() {
       header_link_field: dcForm.value.header_link_field,
       detail_link_field: dcForm.value.detail_link_field,
       row_key_field: dcForm.value.row_key_field || null,
+      join_type: dcForm.value.join_type || 'left',
     }
     // 条件行 -> JSON
     if (dcConditions.value.length > 0) {
@@ -1750,6 +1867,7 @@ async function handleDcSubmit() {
         field: c.field,
         operator: c.operator,
         value: c.operator === 'in' ? (Array.isArray(c.value) ? c.value : []) : c.value,
+        field_source: c.fieldSource || 'detail',
       }))
     }
     payload.domain = domainId
@@ -1790,7 +1908,7 @@ async function detectDcRowKey() {
 }
 
 function addDcCondition() {
-  dcConditions.value.push({ field: '', operator: 'eq', value: '' })
+  dcConditions.value.push({ field: '', operator: 'eq', value: '', fieldSource: 'detail' })
 }
 
 function removeDcCondition(idx: number) {

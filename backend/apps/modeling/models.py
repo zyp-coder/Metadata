@@ -606,6 +606,9 @@ class DetailTableConfig(models.Model):
                                            help_text='主表展示取代表行的排序字段（如 EFFECTIVE_DATE；同值自动取行键最大，保证确定性）')
     display_sort_desc = models.BooleanField('代表行降序', default=True,
                                             help_text='True=排序字段降序（最新在前），False=升序')
+    join_type = models.CharField('JOIN 类型', max_length=10, choices=FieldMapping.JoinType.choices,
+                                 default=FieldMapping.JoinType.LEFT,
+                                 help_text='同步时头表与明细表的 JOIN 方式：LEFT=保留无匹配头表的明细行，INNER=仅保留有匹配头表的明细行')
     conditions = models.JSONField('筛选条件', default=list, blank=True,
                                   help_text='结构化 ON/WHERE 条件（AND 组合）：[{"field": "物理列名或字段编码", "operator": "eq/ne/gt/ge/lt/le/in", "value": 值}]')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
