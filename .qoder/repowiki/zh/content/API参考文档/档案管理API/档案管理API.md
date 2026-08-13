@@ -9,15 +9,16 @@
 - [open_api_gateway.py](file://backend/apps/archive/open_api_gateway.py)
 - [open_api_auth.py](file://backend/apps/archive/open_api_auth.py)
 - [archive.ts](file://frontend/src/api/archive.ts)
+- [tests.py](file://backend/apps/archive/tests.py)
+- [models.py](file://backend/apps/modeling/models.py)
 </cite>
 
 ## 更新摘要
 **变更内容**   
-- 新增开放API网关模块，提供六个标准化端点用于外部系统集成
-- 实现API密钥认证机制，支持密钥生成、轮换、吊销和授权管理
-- 添加速率限制功能，防止API滥用
-- 集成全面审计日志记录，追踪所有API调用
-- 增强数据服务API管理能力，支持暴露字段配置和筛选条件
+- 增强档案同步API，在`_upsert_dimension_via_mapping`方法中正确处理reference关系的conditions参数
+- 改进后端处理逻辑，支持关系筛选条件的透传执行
+- 新增对FieldMapping条件参数的智能处理，区分reference和detail关系类型
+- 完善测试覆盖，确保条件参数在不同关系类型下的正确行为
 
 ## 目录
 1. [简介](#简介)
@@ -46,22 +47,25 @@ C["models.py<br/>数据模型"]
 D["serializers.py<br/>序列化器"]
 E["open_api_gateway.py<br/>开放网关"]
 F["open_api_auth.py<br/>认证鉴权"]
+G["modeling/models.py<br/>字段映射模型"]
 end
 subgraph "前端"
-G["archive.ts<br/>API封装"]
+H["archive.ts<br/>API封装"]
 end
-G --> A
+H --> A
 A --> B
 A --> E
 E --> F
 B --> C
 B --> D
+B --> G
 ```
 
 **图表来源** 
 - [urls.py:1-29](file://backend/apps/archive/urls.py#L1-L29)
 - [open_api_gateway.py:1-400](file://backend/apps/archive/open_api_gateway.py#L1-L400)
 - [open_api_auth.py:1-137](file://backend/apps/archive/open_api_auth.py#L1-L137)
+- [models.py:519-625](file://backend/apps/modeling/models.py#L519-L625)
 
 **章节来源**
 - [urls.py:1-29](file://backend/apps/archive/urls.py#L1-L29)
@@ -77,10 +81,12 @@ B --> D
 - **API调用日志（ApiCallLog）**：v19新增，记录所有API调用的详细信息。
 - **变更批次与明细（ArchiveChangeBatch / ArchiveChangeDetail）**：统一记录源侧同步与人工编辑的变更，支持整批撤销与单条回滚。
 - **一致性差异与规则（ConsistencyIssue / ConsistencyCheckRule）**：四类一致性检查与规则失效管理。
+- **字段映射（FieldMapping）**：支持reference和detail两种关系类型，具备结构化筛选条件能力。
 
 **章节来源**
 - [models.py:1-541](file://backend/apps/archive/models.py#L1-L541)
 - [serializers.py:1-552](file://backend/apps/archive/serializers.py#L1-L552)
+- [models.py:519-625](file://backend/apps/modeling/models.py#L519-L625)
 
 ## 架构总览
 档案数据同步与合并的核心流程如下，**v19版本新增开放API网关架构**：
@@ -214,12 +220,12 @@ CBV-->>FE : 返回撤销统计与跳过明细
 ```
 
 **图表来源** 
-- [views.py:1848-1948](file://backend/apps/archive/views.py#L1848-L1948)
-- [views.py:1951-2102](file://backend/apps/archive/views.py#L1951-L2102)
+- [views.py:1848-1948](file://backend/apps/archive/views.py#L1848-1948)
+- [views.py:1951-2102](file://backend/apps/archive/views.py#L1951-2102)
 
 **章节来源**
-- [views.py:1848-1948](file://backend/apps/archive/views.py#L1848-L1948)
-- [views.py:1951-2102](file://backend/apps/archive/views.py#L1951-L2102)
+- [views.py:1848-1948](file://backend/apps/archive/views.py#L1848-1948)
+- [views.py:1951-2102](file://backend/apps/archive/views.py#L1951-2102)
 
 ### 一致性检查与规则（ConsistencyIssue / ConsistencyCheckRule）
 - 四类检查：
@@ -315,11 +321,52 @@ Gateway-->>Client : 返回响应
 - [views.py:2386-2448](file://backend/apps/archive/views.py#L2386-L2448)
 - [serializers.py:530-552](file://backend/apps/archive/serializers.py#L530-L552)
 
+### 字段映射与关系筛选（新增功能）
+**增强功能**：在档案同步过程中，针对reference类型的字段映射关系，系统现在能够正确处理并透传筛选条件参数。
+
+#### 关系类型支持
+- **REFERENCE（普通关联）**：支持结构化筛选条件，在同步时应用到目标表查询
+- **DETAIL（子表关系）**：保持原有行为，条件在detail_config上配置，目标表行不过滤
+
+#### 条件处理逻辑
+```mermaid
+flowchart TD
+A["FieldMapping查询"] --> B{"relation_type == REFERENCE?"}
+B --> |是| C{"conditions存在且非空?"}
+B --> |否| D["conditions = None"]
+C --> |是| E["conditions = fm.conditions"]
+C --> |否| D
+E --> F["_query_external_table(target, conditions=conds)"]
+D --> F
+F --> G["应用WHERE条件过滤目标表数据"]
+```
+
+**图表来源** 
+- [views.py:2503-2507](file://backend/apps/archive/views.py#L2503-L2507)
+- [models.py:519-565](file://backend/apps/modeling/models.py#L519-L565)
+
+#### 条件语法规范
+筛选条件采用结构化JSON格式，支持以下操作符：
+- `eq`：等于
+- `ne`：不等于  
+- `gt`：大于
+- `ge`：大于等于
+- `lt`：小于
+- `le`：小于等于
+- `in`：在列表中
+
+示例：`[{"field": "STATUS", "operator": "eq", "value": "启用"}]`
+
+**章节来源**
+- [views.py:2432-2570](file://backend/apps/archive/views.py#L2432-L2570)
+- [models.py:519-565](file://backend/apps/modeling/models.py#L519-L565)
+- [tests.py:1078-1151](file://backend/apps/archive/tests.py#L1078-L1151)
+
 ## 依赖关系分析
 - 路由注册：DefaultRouter 将多个 ViewSet 映射到 /api/ 前缀路径，**v19新增开放网关路由**。
 - 视图依赖：
   - 模型层：Archive、ArchiveRecord、ArchiveRecordVersion、ArchiveSyncLog、ArchiveOperationLog、ArchiveApi、ApiKey、ApiKeyGrant、ApiCallLog、ArchiveChangeBatch、ArchiveChangeDetail、ConsistencyIssue、ConsistencyCheckRule、ConsistencyIssueHistory。
-  - 建模层：Domain、Table、Field、StandardField、ComputedField、FieldGroup、DataSource。
+  - 建模层：Domain、Table、Field、StandardField、ComputedField、FieldGroup、DataSource、FieldMapping。
   - 计算字段服务：computed_service.batch_recalculate 与 recalculate_affected。
 - 序列化器：用于输入校验与输出格式化，部分包含业务逻辑（如创建/更新时的双层拆分与合并）。
 
@@ -332,16 +379,19 @@ V --> M["models.py"]
 V --> S["serializers.py"]
 V --> MD["apps.modeling.models"]
 V --> CS["apps.modeling.computed_service"]
+MD --> FM["FieldMapping"]
+FM --> CT["conditions字段"]
 ```
 
 **图表来源** 
 - [urls.py:1-29](file://backend/apps/archive/urls.py#L1-L29)
 - [open_api_gateway.py:1-400](file://backend/apps/archive/open_api_gateway.py#L1-L400)
 - [open_api_auth.py:1-137](file://backend/apps/archive/open_api_auth.py#L1-L137)
+- [models.py:519-565](file://backend/apps/modeling/models.py#L519-L565)
 
 **章节来源**
 - [urls.py:1-29](file://backend/apps/archive/urls.py#L1-L29)
-- [views.py:1-3881](file://backend/apps/archive/views.py#L1-L3881)
+- [views.py:1-3923](file://backend/apps/archive/views.py#L1-L3923)
 
 ## 性能考量
 - 数据拉取限制：本地/外部表查询默认 LIMIT 1000，避免一次性拉取过大数据集。
@@ -354,6 +404,10 @@ V --> CS["apps.modeling.computed_service"]
   - API调用日志保留90天，自动清理
   - 分页查询限制最大500条记录
   - 密钥验证使用恒定时间比较防时序攻击
+- **关系筛选优化**：
+  - 仅在reference类型映射时应用条件过滤
+  - 条件参数直接透传到数据库查询层，避免内存过滤
+  - 支持复杂条件组合，提升数据同步精度
 
 [本节为通用指导，无需引用具体文件]
 
@@ -367,14 +421,19 @@ V --> CS["apps.modeling.computed_service"]
   - 403错误：检查API是否启用，密钥是否获得相应授权
   - 429错误：检查是否超过速率限制，调整rate_limit_per_min配置
   - 404错误：检查slug路径是否存在，记录key是否正确
+- **关系筛选故障排查**：
+  - 条件不生效：确认FieldMapping的relation_type是否为REFERENCE
+  - 数据过滤异常：检查conditions参数格式是否符合规范
+  - 性能问题：确认筛选条件是否使用了合适的字段索引
 
 **章节来源**
 - [views.py:930-1085](file://backend/apps/archive/views.py#L930-L1085)
 - [views.py:1951-2102](file://backend/apps/archive/views.py#L1951-L2102)
 - [open_api_auth.py:39-108](file://backend/apps/archive/open_api_auth.py#L39-L108)
+- [tests.py:1078-1151](file://backend/apps/archive/tests.py#L1078-L1151)
 
 ## 结论
-本模块通过双层存储与版本快照机制，实现了档案数据的稳定同步、精确追溯与灵活回滚；一致性检查与规则管理保障了数据质量；变更批次与明细提供了强大的审计能力。**v19版本新增的开放API网关功能**为外部系统集成提供了标准化接口，具备完善的认证、授权、限流和审计能力。建议在生产环境结合定时任务与监控告警，确保数据同步与一致性检查的稳定运行，同时合理配置API密钥策略和速率限制以保障系统安全。
+本模块通过双层存储与版本快照机制，实现了档案数据的稳定同步、精确追溯与灵活回滚；一致性检查与规则管理保障了数据质量；变更批次与明细提供了强大的审计能力。**v19版本新增的开放API网关功能**为外部系统集成提供了标准化接口，具备完善的认证、授权、限流和审计能力。**最新的增强功能**进一步提升了档案同步的灵活性，通过智能处理reference关系的筛选条件，实现了更精准的数据过滤和同步控制。建议在生产环境结合定时任务与监控告警，确保数据同步与一致性检查的稳定运行，同时合理配置API密钥策略和速率限制以保障系统安全。
 
 [本节为总结性内容，无需引用具体文件]
 
@@ -537,3 +596,35 @@ if response.status_code == 201:
 **章节来源**
 - [open_api_gateway.py:103-155](file://backend/apps/archive/open_api_gateway.py#L103-L155)
 - [open_api_gateway.py:208-399](file://backend/apps/archive/open_api_gateway.py#L208-L399)
+
+### 字段映射条件配置示例
+#### Reference关系条件配置
+```json
+{
+  "source_table": "物料表",
+  "source_field": "MATERIAL_ID", 
+  "target_table": "状态表",
+  "target_field": "STATUS",
+  "relation_type": "reference",
+  "conditions": [
+    {"field": "STATUS", "operator": "eq", "value": "启用"},
+    {"field": "CATEGORY", "operator": "in", "value": ["A", "B"]}
+  ]
+}
+```
+
+#### Detail关系条件配置
+```json
+{
+  "source_table": "订单主表",
+  "source_field": "ORDER_ID",
+  "target_table": "订单明细表", 
+  "target_field": "ORDER_ID",
+  "relation_type": "detail",
+  "conditions": [] // detail类型不使用此字段
+}
+```
+
+**章节来源**
+- [models.py:519-565](file://backend/apps/modeling/models.py#L519-L565)
+- [tests.py:1078-1151](file://backend/apps/archive/tests.py#L1078-L1151)

@@ -1,5 +1,45 @@
 # 模块详情：archive
 
+### 第一百五十九轮续2（2026-08-13）标签：服务器同步、mssql后端缺失、ODBC Driver 18、Dockerfile、requirements
+
+**任务**：用户部署服务器后档案同步预检报错 `'mssql' isn't an available database backend or couldn't be imported`（4 张 SQL Server 表同报），预检无法完成。
+
+**诊断（事实链）**：
+- 代码全部 SQL Server 连接经 `ENGINE_MAP['sqlserver']='mssql'`（distinct_cache.py L11）动态建连接，OPTIONS 硬编码 `'ODBC Driver 18 for SQL Server'`（archive/views.py + modeling/views.py 共 6 处）
+- 本机 venv 有 mssql-django 1.7.3 + pyodbc 5.3.0（**手工安装**），requirements.txt 从未包含——依赖清单与实装分叉
+- 服务器 Docker 镜像（python:3.12-slim）只装 requirements.txt 内包 → 无 mssql-django；且 slim 镜像无微软 ODBC 驱动 → 即使有 pip 包也连不上
+
+**变更文件**：
+- `backend/requirements.txt`：追加 `mssql-django>=1.7,<2.0`（对齐本机实装 1.7.3，清单成为唯一主副本）
+- `backend/Dockerfile`：新增 ODBC 安装层（curl/gnupg2 拉微软签名 → Debian 12 prod.list → ACCEPT_EULA=Y 装 msodbcsql18 + unixodbc-dev）
+
+**验证**：本机 mssql-django 1.7.3 已装，`importlib.import_module('mssql.base')` 成功；Dockerfile/requirements 语法层检查通过；服务器侧待用户重新 `docker compose build backend` 后实测同步。
+
+**状态变更**：BUG-2026-0813-01 已修复（代码侧闭环），待服务器 rebuild 验证。
+
+**教训**：依赖清单（requirements.txt）必须是唯一主副本——本机手工 pip install 不登记 = 分叉冻结，部署必然踩空；SQL Server 数据源连 Linux/Docker 需双依赖（pip 包 + 系统 ODBC 驱动）。
+
+### 第一百五十九轮续（2026-08-13）标签：档案删除、SQLite too many SQL variables、perform_destroy、combined_updates、ArchiveChangeDetail SET_NULL
+
+**任务**：用户反馈「档案列表点删除删除不了」。诊断为后端 DELETE /api/archives/1/ 500 OperationalError：too many SQL variables。
+
+**根因**：SQLite 999 绑定变量上限。Django 6.0 Collector 的 `combined_updates` 优化将过多 PK 合并到单条 UPDATE 语句（`ArchiveChangeDetail.detail_group` FK SET_NULL），超限。
+
+**第一次修复（不足）**：按 record_id 500/批分别 delete 版本/明细/记录。但 `ArchiveRecordDetail.objects.filter(record_id__in=batch).delete()` → Collector 收集 ~1250 详情 PK → combined_updates UPDATE SET NULL 超限。
+
+**第二次修复（成功）**：先清 `ArchiveChangeDetail.detail_group` 反指 FK（200 PK/批 update detail_group=None），再按 200 PK/批 delete ArchiveRecordDetail。
+
+**修改文件**：
+- `backend/apps/archive/views.py`：perform_destroy 完全重写——ArchiveRecordVersion 按 record_id 500/批 DELETE（无反向 FK）；ArchiveRecordDetail 先清 ArchiveChangeDetail 反指 FK、再按 detail PK 200/批 DELETE；ArchiveRecord 按 PK 500/批 DELETE；instance.delete() CASCADE 兜底量小关联
+
+**验证**：curl DELETE /api/archives/1/ → 204 No Content ✅
+
+**状态变更**：
+- `perform_destroy` 从简单分批升级为三层策略（考虑反向 FK SET_NULL 触发器）
+- 教训：SQLite 下 Django 6.0 的 combined_updates 会将反向 SET_NULL 的 FK 合并为单条 UPDATE，PK 数 > 999 时必炸，必须手动清空反向 FK 再删
+
+**回执**：闸[✓] 记[✓] 拓[✓] 测[✓（curl 实测 204）]
+
 ### 第一百五十九轮（2026-08-13）标签：普通关联筛选条件、_upsert_dimension_via_mapping、conditions透传、FieldMappingConditionsApiTest、ReferenceConditionsSyncTest
 
 **任务**：批2③ reference 映射筛选条件接入同步引擎（配合前端弹窗条件构建器）。

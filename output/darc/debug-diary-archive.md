@@ -105,3 +105,11 @@
 - **修复中引入并当场拦截的二次缺陷**：watchEffect 首次同步执行回调时访问尚未声明的 menuItems（TDZ）→ 全站白屏（控制台 Cannot access 'menuItems' before initialization）；浏览器实测第一轮发现，将 watchEffect 移到 menuItems computed 声明之后解决。vue-tsc 查不出此类运行时 TDZ（闭包内引用不算提前使用），**布局/全局组件改动必须浏览器实测**。
 - **验证**：vue-tsc 0 errors；Browser 子代理 5 页实测（/archive/versions 与 /archive/domain-changes 均高亮变更日志、/archive 高亮档案管理、/modeling/domains 高亮域管理、/archive/api-management 高亮 API管理），DOM 检测 ant-menu-item-selected 5/5 符合期望，控制台零应用级 error（截图工具故障未留图，结论靠 DOM class 确定性核验）。
 - **教训**：①“手动白名单 + 新页面忘登记”是结构性漏洞，同类匹配表一律改为从源头（menuItems/路由表）自动推导；② watchEffect/watch 回调若访问后声明的 const，必须放在声明之后（首次同步执行会 TDZ）；③ 浏览器截图工具可能故障，验证结论可降级为 DOM 精确检测（class/属性断言）。
+
+## BUG-2026-0813-01 服务器同步预检报「'mssql' isn't an available database backend」（用户反馈）
+
+- **现象**（第一百五十九轮续）：用户部署到服务器后，档案同步预检报错 `EDS_K3_物料信息: 'mssql' isn't an available database backend or couldn't be imported`，4 张 SQL Server 表全部报同错，预检无法完成。
+- **RCA**：三层依赖缺二——① 代码全部 SQL Server 连接经 `ENGINE_MAP['sqlserver'] = 'mssql'`（distinct_cache.py）动态建连接，OPTIONS 硬编码 `'ODBC Driver 18 for SQL Server'`（archive/views.py、modeling/views.py 等 6 处）；② 服务器 Docker 镜像（python:3.12-slim）`pip install -r requirements.txt` 只装清单内包，**requirements.txt 从未包含 mssql-django**（本机 venv 1.7.3 为手工安装，未登记清单——同一事实两处存放隐患，服务器部署踩中）；③ slim 镜像无微软 ODBC 驱动（unixodbc + msodbcsql18），即使装上 pip 包 pyodbc 也连不上 SQL Server。
+- **修复**：① `backend/requirements.txt` 追加 `mssql-django>=1.7,<2.0`（对齐本机实装 1.7.3，依赖清单成为唯一主副本）；② `backend/Dockerfile` 新增微软官方源安装层（curl/gnupg2 拉取签名 → Debian 12 prod.list → `ACCEPT_EULA=Y` 装 `msodbcsql18` + `unixodbc-dev`）；③ 服务器需重新 `docker compose build backend` 后重启生效。
+- **验证**：本机 mssql-django 1.7.3 已装且 `importlib.import_module('mssql.base')` 成功（后端可加载）；Dockerfile/requirements 语法层检查通过；服务器侧待用户重新 build 后实测同步。
+- **教训**：① **依赖清单（requirements.txt）必须是唯一主副本**——本机手工 pip install 而不登记清单 = 分叉冻结，部署时必然踩空（rule §8 一致性底线）；② SQL Server 数据源连 Linux/Docker 需要**双依赖**（pip 包 mssql-django + 系统 ODBC 驱动），漏任一报错不同但都连不上；③ 驱动名 'ODBC Driver 18 for SQL Server' 在代码 6 处硬编码，Dockerfile 装 18 版驱动才能匹配。

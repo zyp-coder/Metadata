@@ -8,7 +8,17 @@
 - [urls.py](file://backend/apps/archive/urls.py)
 - [refresh_archives.py](file://backend/apps/archive/management/commands/refresh_archives.py)
 - [archive.ts](file://frontend/src/api/archive.ts)
+- [DomainFieldMapping.vue](file://frontend/src/views/modeling/DomainFieldMapping.vue)
+- [models.py](file://backend/apps/modeling/models.py)
 </cite>
+
+## 更新摘要
+**变更内容**   
+- 新增任意字段作为挂载点的档案同步机制，支持一对多归属场景
+- 增强DetailTableConfig模型，支持预组合（头表+明细表）注册与多挂载
+- 更新前端字段选择界面，移除主键强校验，支持任意字段作为挂载关联键
+- 改进同步引擎，支持一子表多挂载和头表字段平铺合并
+- 完善序列化器验证，确保detail_config必填和字段映射完整性
 
 ## 目录
 1. [简介](#简介)
@@ -23,10 +33,11 @@
 10. [附录：API配置完整指南](#附录api配置完整指南)
 
 ## 简介
-本文件围绕 MetaData002 的“档案（Archive）”模块，系统性说明其 API 同步管理能力。重点包括：
+本文件围绕 MetaData002 的"档案（Archive）"模块，系统性说明其 API 同步管理能力。重点包括：
 - ArchiveApi 模型设计：接口路径、暴露字段控制、筛选条件与角色授权机制
 - 同步日志（ArchiveSyncLog）记录机制：状态跟踪与错误详情
 - 定时任务与手动触发的同步执行流程：多表同步与冲突处理
+- **新增**：任意字段作为挂载点的档案同步机制，支持一对多归属场景
 - 前端调用与后端视图交互
 - 性能优化与故障排查最佳实践
 
@@ -41,28 +52,34 @@ V["views.py<br/>视图与业务逻辑"]
 S["serializers.py<br/>序列化器"]
 U["urls.py<br/>路由注册"]
 C["refresh_archives.py<br/>管理命令"]
+MD["modeling/models.py<br/>DetailTableConfig"]
 end
 subgraph "前端"
 F["archive.ts<br/>API封装"]
+DF["DomainFieldMapping.vue<br/>字段映射界面"]
 end
 F --> U
 U --> V
 V --> M
 V --> S
+V --> MD
 C --> V
+DF --> F
 ```
 
 图表来源
-- [models.py:1-379](file://backend/apps/archive/models.py#L1-L379)
-- [views.py:1-2487](file://backend/apps/archive/views.py#L1-L2487)
-- [serializers.py:1-552](file://backend/apps/archive/serializers.py#L1-L552)
+- [models.py:1-541](file://backend/apps/archive/models.py#L1-L541)
+- [views.py:1-3919](file://backend/apps/archive/views.py#L1-L3919)
+- [serializers.py:1-733](file://backend/apps/archive/serializers.py#L1-L733)
 - [urls.py:1-21](file://backend/apps/archive/urls.py#L1-L21)
 - [refresh_archives.py:1-39](file://backend/apps/archive/management/commands/refresh_archives.py#L1-L39)
-- [archive.ts:1-139](file://frontend/src/api/archive.ts#L1-L139)
+- [archive.ts:1-179](file://frontend/src/api/archive.ts#L1-L179)
+- [DomainFieldMapping.vue:730-929](file://frontend/src/views/modeling/DomainFieldMapping.vue#L730-L929)
+- [models.py:577-625](file://backend/apps/modeling/models.py#L577-L625)
 
 章节来源
 - [urls.py:1-21](file://backend/apps/archive/urls.py#L1-L21)
-- [archive.ts:1-139](file://frontend/src/api/archive.ts#L1-L139)
+- [archive.ts:1-179](file://frontend/src/api/archive.ts#L1-L179)
 
 ## 核心组件
 - 档案与记录
@@ -76,13 +93,16 @@ C --> V
   - ConsistencyIssue / ConsistencyCheckRule / ConsistencyIssueHistory：差异发现、规则失效、历史轨迹
 - 数据服务API
   - ArchiveApi：对外暴露档案数据的API配置（路径、暴露字段、筛选条件、角色授权）
+- **新增**：明细子表注册与挂载
+  - DetailTableConfig：明细子表独立注册，支持预组合（头表+明细表）
+  - FieldMapping.detail_config：挂载到已注册的子表配置，支持一子表多挂载
 
 章节来源
-- [models.py:5-172](file://backend/apps/archive/models.py#L5-L172)
-- [models.py:174-379](file://backend/apps/archive/models.py#L174-L379)
+- [models.py:5-541](file://backend/apps/archive/models.py#L5-L541)
+- [models.py:577-625](file://backend/apps/modeling/models.py#L577-L625)
 
 ## 架构总览
-整体流程分为“模型同步→数据拉取→合并物化→计算字段重算→一致性检查→变更日志归档”，并提供“预览→确认→执行”的安全闸门。
+整体流程分为"模型同步→数据拉取→合并物化→计算字段重算→一致性检查→变更日志归档"，并提供"预览→确认→执行"的安全闸门。**新增任意字段挂载点支持，实现一对多归属场景**。
 
 ```mermaid
 sequenceDiagram
@@ -91,10 +111,13 @@ participant API as "ArchiveViewSet"
 participant DS as "数据源(本地/外部)"
 participant DB as "数据库"
 participant CS as "计算字段服务"
+participant DTC as "DetailTableConfig"
 FE->>API : POST /archives/{id}/sync-schema/
 API->>DB : 生成新schema并保存
 API->>DS : 查询各表数据
 DS-->>API : 返回行集
+API->>DTC : 检查明细子表注册
+DTC-->>API : 返回预组合配置
 API->>DB : 按主键upsert source_data
 API->>DB : 合并物化data/lineage/version
 API->>CS : 批量重算计算字段
@@ -156,14 +179,53 @@ ArchiveApi --> Archive : "所属档案"
 ```
 
 图表来源
-- [models.py:139-172](file://backend/apps/archive/models.py#L139-L172)
+- [models.py:208-250](file://backend/apps/archive/models.py#L208-L250)
 - [views.py:2386-2448](file://backend/apps/archive/views.py#L2386-L2448)
-- [serializers.py:529-552](file://backend/apps/archive/serializers.py#L529-L552)
+- [serializers.py:625-691](file://backend/apps/archive/serializers.py#L625-L691)
 
 章节来源
-- [models.py:139-172](file://backend/apps/archive/models.py#L139-L172)
+- [models.py:208-250](file://backend/apps/archive/models.py#L208-L250)
 - [views.py:2402-2448](file://backend/apps/archive/views.py#L2402-L2448)
-- [serializers.py:529-552](file://backend/apps/archive/serializers.py#L529-L552)
+- [serializers.py:625-691](file://backend/apps/archive/serializers.py#L625-L691)
+
+### 任意字段挂载点同步机制
+**新增功能**：支持任意字段作为挂载点，实现一对多归属场景
+
+- DetailTableConfig模型扩展
+  - header_table：预组合头表（如价目表）
+  - header_link_field：头表关联字段
+  - detail_link_field：明细表关联字段
+  - join_type：LEFT JOIN或INNER JOIN
+- 同步引擎改造
+  - 先查DetailTableConfig，有则循环多挂载
+  - 头表字段JOIN进明细行，平铺宽表展示
+  - 支持一子表多主表挂载
+- 前端界面更新
+  - 移除主键强校验，支持任意字段作为挂载关联键
+  - 自动推荐关联字段（完全同名>FID↔ID后缀模式）
+  - 支持预组合（头表+明细表）注册与挂载
+
+```mermaid
+flowchart TD
+Start(["开始"]) --> CheckConfig{"检查DetailTableConfig"}
+CheckConfig --> |存在| MultiMount{"多挂载处理"}
+CheckConfig --> |不存在| LegacyCompat{"兼容旧配置"}
+MultiMount --> HeaderJoin{"头表JOIN明细"}
+HeaderJoin --> SyncRows{"同步明细行"}
+LegacyCompat --> SyncRows
+SyncRows --> MergeData{"合并数据"}
+MergeData --> End(["结束"])
+```
+
+图表来源
+- [views.py:1291-1346](file://backend/apps/archive/views.py#L1291-L1346)
+- [models.py:577-625](file://backend/apps/modeling/models.py#L577-L625)
+- [DomainFieldMapping.vue:737-759](file://frontend/src/views/modeling/DomainFieldMapping.vue#L737-L759)
+
+章节来源
+- [views.py:1291-1346](file://backend/apps/archive/views.py#L1291-L1346)
+- [models.py:577-625](file://backend/apps/modeling/models.py#L577-L625)
+- [DomainFieldMapping.vue:737-759](file://frontend/src/views/modeling/DomainFieldMapping.vue#L737-L759)
 
 ### 同步日志（ArchiveSyncLog）记录机制
 - 字段说明
@@ -178,8 +240,8 @@ ArchiveApi --> Archive : "所属档案"
   - 若需逐条记录，可在 _sync_data_from_sources 中扩展写入（当前主要统计在 operation log 与 change batch/detail）
 
 章节来源
-- [models.py:112-137](file://backend/apps/archive/models.py#L112-L137)
-- [serializers.py:435-442](file://backend/apps/archive/serializers.py#L435-L442)
+- [models.py:181-206](file://backend/apps/archive/models.py#L181-L206)
+- [serializers.py:531-537](file://backend/apps/archive/serializers.py#L531-L537)
 - [views.py:1554-1560](file://backend/apps/archive/views.py#L1554-L1560)
 
 ### 同步执行流程与多表同步、冲突处理
@@ -234,12 +296,12 @@ Log --> End(["结束"])
   - 使用 filter_conditions 在服务端过滤数据
 
 章节来源
-- [archive.ts:130-139](file://frontend/src/api/archive.ts#L130-L139)
+- [archive.ts:151-160](file://frontend/src/api/archive.ts#L151-L160)
 - [views.py:2402-2448](file://backend/apps/archive/views.py#L2402-L2448)
 
 ## 依赖关系分析
 - 视图依赖模型：Archive、ArchiveRecord、ArchiveSyncLog、ArchiveOperationLog、ArchiveApi、ArchiveChangeBatch、ArchiveChangeDetail、ConsistencyIssue、ConsistencyCheckRule
-- 视图依赖建模模块：Table、Field、StandardField、ComputedField、Domain、DataSource
+- 视图依赖建模模块：Table、Field、StandardField、ComputedField、Domain、DataSource、**DetailTableConfig**
 - 计算字段服务：batch_recalculate/recalculate_affected
 - 外部数据源：动态连接（Oracle/SQL Server/MySQL/PostgreSQL）
 
@@ -250,15 +312,17 @@ V --> SM["serializers.py"]
 V --> MD["apps.modeling.models"]
 V --> CS["computed_service"]
 V --> DS["外部数据源"]
+MD --> DTC["DetailTableConfig"]
 ```
 
 图表来源
-- [views.py:1-2487](file://backend/apps/archive/views.py#L1-L2487)
-- [models.py:1-379](file://backend/apps/archive/models.py#L1-L379)
-- [serializers.py:1-552](file://backend/apps/archive/serializers.py#L1-L552)
+- [views.py:1-3919](file://backend/apps/archive/views.py#L1-L3919)
+- [models.py:1-541](file://backend/apps/archive/models.py#L1-L541)
+- [serializers.py:1-733](file://backend/apps/archive/serializers.py#L1-L733)
+- [models.py:577-625](file://backend/apps/modeling/models.py#L577-L625)
 
 章节来源
-- [views.py:1-2487](file://backend/apps/archive/views.py#L1-L2487)
+- [views.py:1-3919](file://backend/apps/archive/views.py#L1-L3919)
 
 ## 性能与优化
 - 数据拉取限制
@@ -273,6 +337,9 @@ V --> DS["外部数据源"]
   - 零变更不建批次，降低写放大
 - 外部连接
   - 临时连接别名，用完清理，避免连接泄漏
+- **新增优化**
+  - 多挂载时rows只拉一次，多路复用
+  - DetailTableConfig缓存减少重复查询
 
 章节来源
 - [views.py:1259-1331](file://backend/apps/archive/views.py#L1259-L1331)
@@ -283,7 +350,7 @@ V --> DS["外部数据源"]
 ## 故障排查指南
 - 常见错误定位
   - 外部数据源连接失败：查看 sync-stats.errors 与日志
-  - 主键缺失：预检报错提示“未配置主键字段，无法试算”
+  - 主键缺失：预检报错提示"未配置主键字段，无法试算"
   - 组合字段未设主字段：预检告警，建议到属性配置页设置
   - 计算字段重算失败：warning 日志，不影响主流程
 - 排查步骤
@@ -294,6 +361,10 @@ V --> DS["外部数据源"]
   - 版本回滚（指定版本或时间点）
   - 单条/整批撤销（change-details/batch rollback）
   - 定版/取消定版锁定重要版本
+- **新增排查要点**
+  - DetailTableConfig注册检查：确认预组合配置正确
+  - 多挂载冲突：检查同一子表是否被多个映射挂载
+  - 头表JOIN失败：验证header_link_field与detail_link_field配对
 
 章节来源
 - [views.py:344-394](file://backend/apps/archive/views.py#L344-L394)
@@ -302,12 +373,13 @@ V --> DS["外部数据源"]
 - [views.py:2061-2102](file://backend/apps/archive/views.py#L2061-L2102)
 
 ## 结论
-本方案通过“双层存储+合并物化+版本快照+变更批次”的设计，实现了高可靠、可追溯、可回滚的档案数据同步体系。ArchiveApi 提供灵活的对外数据服务能力，配合前端权限控制与筛选条件，满足多样化消费场景。建议在网关层增强 auth_roles 鉴权，结合监控与告警提升稳定性。
+本方案通过"双层存储+合并物化+版本快照+变更批次"的设计，实现了高可靠、可追溯、可回滚的档案数据同步体系。**新增任意字段挂载点支持**，实现了一对多归属场景，增强了系统的灵活性。ArchiveApi 提供灵活的对外数据服务能力，配合前端权限控制与筛选条件，满足多样化消费场景。建议在网关层增强 auth_roles 鉴权，结合监控与告警提升稳定性。
 
 ## 附录：API配置完整指南
 - 字段映射
   - 使用 sync-schema 生成/更新 schema；refresh-data 仅刷新数据
   - 组合字段主字段作为唯一数据源头，非主成员只用于一致性检查
+  - **新增**：DetailTableConfig注册与挂载，支持预组合（头表+明细表）
 - 权限设置
   - auth_roles：前端控制可见性与操作；建议在网关/中间件层实施强制鉴权
   - exposed_fields：按需暴露字段，减少不必要的数据传输
@@ -320,10 +392,13 @@ V --> DS["外部数据源"]
   - 为组合字段设置主字段，避免歧义
   - 对敏感字段启用修正保护（overrides）与血缘追踪（lineage）
   - 使用版本管理与回滚能力保障数据安全
+  - **新增**：合理配置DetailTableConfig，避免多挂载冲突
+  - **新增**：使用预组合功能简化复杂的多表关联场景
 
 章节来源
 - [views.py:275-329](file://backend/apps/archive/views.py#L275-L329)
 - [views.py:331-342](file://backend/apps/archive/views.py#L331-L342)
 - [views.py:344-394](file://backend/apps/archive/views.py#L344-L394)
 - [views.py:2402-2448](file://backend/apps/archive/views.py#L2402-L2448)
-- [serializers.py:529-552](file://backend/apps/archive/serializers.py#L529-L552)
+- [serializers.py:625-691](file://backend/apps/archive/serializers.py#L625-L691)
+- [models.py:577-625](file://backend/apps/modeling/models.py#L577-L625)

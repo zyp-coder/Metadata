@@ -272,6 +272,61 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             change_summary={'schema_field_count': len(schema)},
         )
 
+    def perform_destroy(self, instance):
+        """分批删除关联记录，绕过 SQLite 变量数上限（too many SQL variables）。
+
+        策略（按依赖顺序清理，避免 Django 6.0 Collector combined_updates 优化
+        将过多 PK 塞入单条 UPDATE/SET NULL 语句，超 SQLite 999 变量上限）：
+
+        1. ArchiveRecordVersion：无反向 FK 指向它，可直接按 record_id 分批 DELETE。
+        2. ArchiveRecordDetail：有 ArchiveChangeDetail.detail_group FK （SET_NULL）
+           指向它 → 先清空 ArchiveChangeDetail 反向引用，再按 detail PK 分批 DELETE。
+        3. ArchiveRecord：无 SET_NULL 反向 FK，直接按 PK 分批 DELETE。
+        4. instance.delete() CASCADE 兜底其余量小的关联（sync_logs/apis 等）。
+        """
+        from itertools import islice
+        from django.db import connection
+
+        RECORD_BATCH = 500      # 取 ArchiveRecord PK 的批次大小
+        DETAIL_PK_BATCH = 200   # 删除 ArchiveRecordDetail PK 的批次大小
+
+        qs = instance.records.all()
+        pk_iter = iter(qs.values_list('pk', flat=True).iterator())
+
+        while True:
+            batch = list(islice(pk_iter, RECORD_BATCH))
+            if not batch:
+                break
+
+            # --- 1. 删版本：无反向 FK → safe ---
+            ArchiveRecordVersion.objects.filter(record_id__in=batch).delete()
+
+            # --- 2. 删明细行：先清 ArchiveChangeDetail 反指 FK，再分批删 ---
+            # 收集本条记录批次下所有明细 PK
+            detail_pks = list(ArchiveRecordDetail.objects.filter(
+                record_id__in=batch
+            ).values_list('pk', flat=True).iterator())
+
+            for i in range(0, len(detail_pks), DETAIL_PK_BATCH):
+                pk_batch = detail_pks[i:i + DETAIL_PK_BATCH]
+                # 先清空反指（SET_NULL），消除 collector combined_updates
+                ArchiveChangeDetail.objects.filter(
+                    detail_group_id__in=pk_batch
+                ).update(detail_group=None)
+                # 再删明细行
+                ArchiveRecordDetail.objects.filter(pk__in=pk_batch).delete()
+
+        # --- 3. 删记录行：无反向 FK → safe ---
+        pk_iter = iter(qs.values_list('pk', flat=True).iterator())
+        while True:
+            batch = list(islice(pk_iter, RECORD_BATCH))
+            if not batch:
+                break
+            ArchiveRecord.objects.filter(pk__in=batch).delete()
+
+        # 4. instance.delete() CASCADE 兜底其余量小的关联
+        instance.delete()
+
     @action(detail=True, methods=['post'], url_path='sync-schema')
     def sync_schema(self, request, pk=None):
         """同步模型变更：将域的最新模型更新到档案 schema，并从数据源拉取实际数据"""
