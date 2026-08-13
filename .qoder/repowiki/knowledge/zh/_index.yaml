@@ -3,11 +3,11 @@ schema_version: 1
 locale: zh-CN
 branch: master
 nodes_managed: true
-exported_at: "2026-08-13T04:08:27Z"
+exported_at: "2026-08-13T06:08:20Z"
 modules:
     "":
-        dir_name: 主数据管理系统（MetaData002）根编排层
-        title: 主数据管理系统（MetaData002）根编排层
+        dir_name: 元数据建模与档案平台（Django + Vue3 双端编排）
+        title: 元数据建模与档案平台（Django + Vue3 双端编排）
         scope:
             - .ai/
             - scripts/

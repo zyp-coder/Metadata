@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: ""
-title: 主数据管理系统（MetaData002）根编排层
+title: 元数据建模与档案平台（Django + Vue3 双端编排）
 scope:
     - .ai/
     - scripts/

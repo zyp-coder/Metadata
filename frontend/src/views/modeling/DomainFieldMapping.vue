@@ -18,12 +18,7 @@
           </span>
         </div>
         <a-tag v-if="pkStatusData?.all_configured" color="success" style="margin: 0">✓ 全部完成</a-tag>
-        <a-badge v-if="hasDetailCheckIssues" :count="detailCheckData?.unregistered?.length || 0" :dot="(detailCheckData?.unregistered?.length || 0) > 0" offset="[0, 2]">
-          <a-button @click="showDetailCheck = true" size="small" style="margin-right: 4px">
-            明细检查
-          </a-button>
-        </a-badge>
-        <a-button @click="openDetailConfigList()">子表注册</a-button>
+        <a-button type="primary" @click="openDetailConfigList()">预组合</a-button>
         <a-button type="primary" @click="openCreate()">+ 新建映射</a-button>
         <a-button @click="aiAutoMapping" :loading="aiMappingLoading">
           <template #icon><span style="font-size: 14px">🤖</span></template>
@@ -91,7 +86,7 @@
         <div style="display: flex; align-items: center; gap: 12px; width: 100%">
           <span style="color: #999; font-size: 12px">节点展示表与字段，连线标注具体字段映射关系（可拖动节点调整布局）</span>
           <a-button size="small" @click="resetErLayout" :loading="resettingEr" style="margin-left: auto">重置布局</a-button>
-          <a-button size="small" @click="toggleErHighlightPrecombine" :type="erHighlightPrecombine ? 'primary' : 'default'">预组合表</a-button>
+          <a-button size="small" @click="toggleErHighlightPrecombine" :type="erHighlightPrecombine ? 'primary' : 'default'" style="font-weight: 600">预组合</a-button>
         </div>
       </template>
       <div v-show="mappings.length > 0" ref="erContainer" :class="erFullScreen ? 'er-container er-container--full' : 'er-container'"></div>
@@ -244,8 +239,8 @@
           <a-col :span="12">
             <a-form-item label="关系类型">
               <a-select v-model:value="form.relation_type" style="width: 100%" @change="onRelationTypeChange">
-                <a-select-option value="reference">引用（字段级映射，默认）</a-select-option>
-                <a-select-option value="detail">明细子表（整表作为子表挂载到主表）</a-select-option>
+                <a-select-option value="reference">普通关系</a-select-option>
+                <a-select-option value="detail">预组合关系</a-select-option>
               </a-select>
             </a-form-item>
           </a-col>
@@ -319,68 +314,96 @@
           />
         </template>
 
-        <!-- 引用关系：字段级映射（左右分栏，2026-08-13 Issue 4） -->
+        <!-- 引用关系：字段级映射（左右分栏，表列表+字段列表左右布局） -->
         <template v-else>
           <a-row :gutter="16">
-            <!-- 左侧：源表 + 源字段 -->
+            <!-- 左侧：源表列表 + 源字段列表（左右布局） -->
             <a-col :span="12">
-              <a-form-item label="源表" required>
-                <a-select v-model:value="form.source_table" style="width: 100%" show-search @change="loadSourceFields" :disabled="!!editingMappingId">
-                  <a-select-option v-for="t in domainTables" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
-                </a-select>
-              </a-form-item>
-              <div class="field-panel">
-                <div class="field-panel__header">源字段（点击选择）</div>
-                <div class="field-panel__list">
-                  <div v-if="hasCompositeSourceKey" class="field-item field-item--composite"
-                       :class="{'field-item--selected': form.source_field === 'composite'}"
-                       @click="form.source_field = 'composite'">
-                    <span style="color: #faad14; margin-right: 4px">⚿</span>
-                    <span style="font-weight: 600">{{ compositeKeyLabel }}</span>
-                    <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
+              <a-row :gutter="8">
+                <a-col :span="8">
+                  <div class="field-panel">
+                    <div class="field-panel__header">源表（点击选择）</div>
+                    <div class="field-panel__list">
+                      <div v-for="t in domainTables" :key="t.id"
+                           class="field-item"
+                           :class="{'field-item--selected': form.source_table === t.id}"
+                           @click="selectSourceTable(t.id)">
+                        <div style="font-weight: 500; font-size: 12px">{{ t.name }}</div>
+                        <div style="font-size: 11px; color: #999; margin-top: 2px">{{ t.code }}</div>
+                      </div>
+                      <div v-if="domainTables.length === 0" class="field-panel__empty">暂无表</div>
+                    </div>
                   </div>
-                  <div v-for="f in sourceFields" :key="f.id"
-                       class="field-item"
-                       :class="{'field-item--selected': form.source_field === f.id}"
-                       @click="form.source_field = f.id">
-                    <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
-                    {{ f.name }} ({{ f.code }})
+                </a-col>
+                <a-col :span="16">
+                  <div class="field-panel">
+                    <div class="field-panel__header">源字段（点击选择）</div>
+                    <div class="field-panel__list">
+                      <div v-if="hasCompositeSourceKey" class="field-item field-item--composite"
+                           :class="{'field-item--selected': form.source_field === 'composite'}"
+                           @click="form.source_field = 'composite'">
+                        <span style="color: #faad14; margin-right: 4px">⚿</span>
+                        <span style="font-weight: 600">{{ compositeKeyLabel }}</span>
+                        <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
+                      </div>
+                      <div v-for="f in sourceFields" :key="f.id"
+                           class="field-item"
+                           :class="{'field-item--selected': form.source_field === f.id}"
+                           @click="form.source_field = f.id">
+                        <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                        {{ f.name }} ({{ f.code }})
+                      </div>
+                      <div v-if="sourceFields.length === 0" class="field-panel__empty">请先选择源表</div>
+                    </div>
                   </div>
-                  <div v-if="sourceFields.length === 0" class="field-panel__empty">请先选择源表</div>
-                </div>
-              </div>
+                </a-col>
+              </a-row>
             </a-col>
             <!-- 中间：箭头 -->
-            <a-col :span="1" style="text-align: center; padding-top: 120px">
+            <a-col :span="1" style="text-align: center; padding-top: 200px">
               <span style="font-size: 28px; color: #bbb">→</span>
             </a-col>
-            <!-- 右侧：目标表 + 目标字段 -->
+            <!-- 右侧：目标表列表 + 目标字段列表（左右布局） -->
             <a-col :span="11">
-              <a-form-item label="目标表" required>
-                <a-select v-model:value="form.target_table" style="width: 100%" show-search @change="loadTargetFields">
-                  <a-select-option v-for="t in targetTableOptions" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
-                </a-select>
-              </a-form-item>
-              <div class="field-panel">
-                <div class="field-panel__header">目标字段（点击选择）</div>
-                <div class="field-panel__list">
-                  <div v-if="hasCompositeTargetKey" class="field-item field-item--composite"
-                       :class="{'field-item--selected': form.target_field === 'composite'}"
-                       @click="form.target_field = 'composite'">
-                    <span style="color: #faad14; margin-right: 4px">⚿</span>
-                    <span style="font-weight: 600">{{ targetCompositeKeyLabel }}</span>
-                    <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
+              <a-row :gutter="8">
+                <a-col :span="8">
+                  <div class="field-panel">
+                    <div class="field-panel__header">目标表（点击选择）</div>
+                    <div class="field-panel__list">
+                      <div v-for="t in targetTableOptions" :key="t.id"
+                           class="field-item"
+                           :class="{'field-item--selected': form.target_table === t.id}"
+                           @click="selectTargetTable(t.id)">
+                        <div style="font-weight: 500; font-size: 12px">{{ t.name }}</div>
+                        <div style="font-size: 11px; color: #999; margin-top: 2px">{{ t.code }}</div>
+                      </div>
+                      <div v-if="targetTableOptions.length === 0" class="field-panel__empty">暂无表</div>
+                    </div>
                   </div>
-                  <div v-for="f in targetFields" :key="f.id"
-                       class="field-item"
-                       :class="{'field-item--selected': form.target_field === f.id}"
-                       @click="form.target_field = f.id">
-                    <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
-                    {{ f.name }} ({{ f.code }})
+                </a-col>
+                <a-col :span="16">
+                  <div class="field-panel">
+                    <div class="field-panel__header">目标字段（点击选择）</div>
+                    <div class="field-panel__list">
+                      <div v-if="hasCompositeTargetKey" class="field-item field-item--composite"
+                           :class="{'field-item--selected': form.target_field === 'composite'}"
+                           @click="form.target_field = 'composite'">
+                        <span style="color: #faad14; margin-right: 4px">⚿</span>
+                        <span style="font-weight: 600">{{ targetCompositeKeyLabel }}</span>
+                        <span style="color: #888; font-size: 11px; margin-left: 4px">(联合主键)</span>
+                      </div>
+                      <div v-for="f in targetFields" :key="f.id"
+                           class="field-item"
+                           :class="{'field-item--selected': form.target_field === f.id}"
+                           @click="form.target_field = f.id">
+                        <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                        {{ f.name }} ({{ f.code }})
+                      </div>
+                      <div v-if="targetFields.length === 0" class="field-panel__empty">请先选择目标表</div>
+                    </div>
                   </div>
-                  <div v-if="targetFields.length === 0" class="field-panel__empty">请先选择目标表</div>
-                </div>
-              </div>
+                </a-col>
+              </a-row>
               <!-- 联合主键提示 -->
               <a-alert v-if="hasCompositeSourceKey || hasCompositeTargetKey" type="info" show-icon style="margin-top: 12px"
                 message="联合主键"
@@ -624,8 +647,6 @@ const primaryTableId = computed(() => {
 const dcColumns = [
   { title: '预组合（头表 + 明细表）', key: 'combo', width: 280 },
   { title: '头↔明细关联', key: 'link', width: 140 },
-  { title: '行键', key: 'row_key', width: 120 },
-  { title: '挂载', key: 'mappings', width: 80 },
   { title: '操作', key: 'action', width: 110 },
 ]
 
@@ -873,6 +894,16 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
   const colY = new Array(cols).fill(30)
   const nodeMap: Record<number, string> = {}
 
+  // 预组合查找表（Issue 8: ER图展示组合表效果）
+  const headerTableToDetails: Record<number, any[]> = {}
+  const detailTableToHeaders: Record<number, string> = {}
+  domainDetailConfigs.value.forEach((dc: any) => {
+    if (!dc.header_table || !dc.table) return
+    if (!headerTableToDetails[dc.header_table]) headerTableToDetails[dc.header_table] = []
+    headerTableToDetails[dc.header_table].push(dc)
+    detailTableToHeaders[dc.table] = dc.header_table_name
+  })
+
   idList.forEach((tid, idx) => {
     const t = domainTables.value.find((x) => x.id === tid)
     const rawFields = tableFieldsMap.get(tid) || []
@@ -947,6 +978,25 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
         }).join('')
       : '<div class="er-f er-f--empty">暂无字段</div>'
 
+    // 预组合标签（Issue 8: ER图展示组合表效果）
+    const pcDetails = headerTableToDetails[tid]
+    const pcHeaderName = detailTableToHeaders[tid]
+    let precombineHtml = ''
+    if (pcDetails) {
+      // 头表：显示预组合标签 + 明细表名列表
+      const detailNames = pcDetails.map((dc: any) => escapeHtml(dc.table_name)).join(', ')
+      precombineHtml = `<div style="display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 12px 6px">
+        <span style="display: inline-block; background: #52c41a; color: #fff; font-size: 11px; padding: 0 6px; border-radius: 2px; line-height: 20px; font-weight: 500">预组合</span>
+        <span style="font-size: 11px; color: #52c41a; line-height: 20px">包含：${detailNames}</span>
+      </div>`
+    } else if (pcHeaderName) {
+      // 明细表：显示预组合标签 + 头表名
+      precombineHtml = `<div style="display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 12px 6px">
+        <span style="display: inline-block; background: #e6f7ff; color: #13c2c2; font-size: 11px; padding: 0 6px; border-radius: 2px; line-height: 20px; font-weight: 500">预组合</span>
+        <span style="font-size: 11px; color: #13c2c2; line-height: 20px">头表：${escapeHtml(pcHeaderName)}</span>
+      </div>`
+    }
+
     const nodeHtml = `
       <div class="er-node">
         <div class="er-node__header">
@@ -956,6 +1006,7 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
             <div class="er-node__code">${escapeHtml(t?.code || '')}</div>
           </div>
         </div>
+        ${precombineHtml}
         <div class="er-node__body">${fieldRows}</div>
       </div>
     `
@@ -1130,6 +1181,14 @@ function escapeHtml(s: string) {
   return String(s).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]!))
 }
 
+// 点击选择源表（替代原下拉选择）
+function selectSourceTable(tableId: number) {
+  if (form.value.source_table === tableId) return
+  form.value.source_table = tableId
+  form.value.source_field = null as any
+  loadSourceFields()
+}
+
 async function loadSourceFields() {
   if (form.value.source_table) {
     let results: any[] = []
@@ -1157,6 +1216,14 @@ async function loadSourceFields() {
       }
     }
   }
+}
+
+// 点击选择目标表（替代原下拉选择）
+function selectTargetTable(tableId: number) {
+  if (form.value.target_table === tableId) return
+  form.value.target_table = tableId
+  form.value.target_field = null as any
+  loadTargetFields()
 }
 
 async function loadTargetFields() {
@@ -2124,5 +2191,12 @@ onBeforeUnmount(() => {
 }
 .field-item--composite.field-item--selected {
   background: #fff7cc;
+}
+.field-item--disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.field-item--disabled:hover {
+  background: transparent;
 }
 </style>
