@@ -14,7 +14,7 @@
 **执行摘要**：
 1. **前置确认**：AskUserQuestion 合并确认——影响范围（新增 2 脚本，不改现有代码）+ 服务器 Node/npm 环境（用户确认有，sync.sh 在服务器直接 build）；用户要求脚本内容直接贴出来
 2. **scripts/release.ps1**：检查 git 有无变更（无则退出）→ npm run build（vue-tsc+vite，失败中止不提交）→ commit message（-m 参数，缺省 Read-Host 交互输入）→ git add -A + commit + push origin master（push 前 pre-push hook 自动跑后端测试+前端类型检查）→ 输出服务器下一步提示
-3. **deploy/sync.sh**：set -e 任一步失败中止→ git pull origin master → npm run build（node_modules 缺失自动 npm install）→ docker compose/docker-compose 自动探测 → up -d --build backend（镜像含代码必须 --build，启动链自带 migrate --noinput，模型变更自动生效）→ nginx -s reload 失败兜底 restart
+3. **deploy/sync.sh**（用户要求简化）：原版本含 set -e + REPO_ROOT 自动探测 + docker compose 兼容检查 + node_modules 自动 install，用户反馈太复杂，改为极简版本——直接 cd /opt/MetaData002 → git pull → cd frontend && npm run build → cd ../deploy → docker compose up -d --build backend → docker compose exec nginx nginx -s reload，无错误处理无兼容判断，用户按参考命令写的
 4. **验证**：release.ps1 用 PowerShell Parser 解析通过（踩坑：外层 powershell -Command 双引号内 $ 变量被提前展开致误报，改用临时检查脚本）；sync.sh 用 Git for Windows 自带 bash -n 验证通过（本机 PATH 无 bash）
 
 **验证证据**：release.ps1: syntax OK（PS Parser）+ sync.sh: syntax OK（bash -n）
