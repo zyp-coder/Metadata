@@ -1,6 +1,20 @@
 # 开发日记 - 主数据建模引擎（modeling）
 > 记录 modeling 模块开发过程中的关键实现决策和技术细节。
 ---
+## 2026-08-13 挂载字段放宽为任意键（方向修正，第一百五十七轮）
+### 变更背景
+用户方向性纠正：detail 挂载的主表端关联字段不应限定主键，应是任何键——物料主数据场景：物料表↔物料分组预组合表用 GROUP_ID 关联（分组头 GROUP_ID 非主键业务键，一组合多物料=一对多）。用户拍板方案B（同步按挂载字段归属），AskUserQuestion 确认一对多=明细行挂到所有同值主记录。
+### 关键实现（modeling 侧）
+- **serializers.py**：FieldMappingSerializer.validate 移除 `target_field.is_primary_key` 强校验块——挂载字段可为目标表任意字段；保留 detail 必填 detail_config/target_field
+- **views.py detail-check**：方向异常检测简化为仅「未配置挂载字段」suspect（原 src_pk+target_field__is_primary_key 组合检测移除，同步侧警告兜底）
+- **DomainFieldMapping.vue（6 处）**：主表字段列表移除 `field-item--disabled`（仅主键可选→全部可选）；删除 detailTargetNoPk 主键警告 alert+computed（保留注释说明）；detailRecommendedFieldId 改为基于已选目标字段 code 匹配（未选时回退主表主键匹配）；selectDetailTargetField 移除主键拦截+选择后触发重新推荐源字段；loadTargetFields detail 分支默认推荐单一主键保留；handleSubmit 文案改「请选择主表端关联字段」
+### 变更文件清单
+- `backend/apps/modeling/serializers.py`（移除主键校验）
+- `backend/apps/modeling/views.py`（detail-check 简化）
+- `frontend/src/views/modeling/DomainFieldMapping.vue`（主表字段全可选等 6 处）
+### 验证
+vue-tsc --noEmit 0 errors + py_compile OK；同步引擎归属改造与新增测试见 dev-diary-archive 第一百五十七轮
+
 ## 2026-08-13 测试报告1问题：预组合关系表单改左右分栏（第一百五十六轮）
 ### 变更背景
 用户测试报告：新建映射弹窗选「预组合关系」时没有匹配字段可选功能，且不是左源右目标设计。根因：detail 分支仍是 a-select 下拉表单，而 reference 分支已是左右分栏点选。

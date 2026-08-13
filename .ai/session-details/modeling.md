@@ -1,5 +1,29 @@
 # 操作详情 — modeling 模块（倒序，最新在前）
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
+## 第一百五十七轮（2026-08-13）标签：方向修正、挂载字段任意键、一对多归属、GROUP_ID、同步归属机制
+**任务**：用户方向性纠正——「为什么和预组合表的关联字段只能是主键呢？？？我们的设计应该是任何键啊」+ 拍板方案B「B，支持挂载的字段一对多啊。。场景很现实啊。。我的是物料主数据，物料表和物料分组预组合表的关联。。肯定是用GROUPID来关联的啊」；AskUserQuestion 确认一对多方向=明细行挂到所有同值主记录（推荐项）。
+**读取文件**：
+- `backend/apps/archive/views.py`（_sync_detail_rows 归属机制改造）
+- `backend/apps/modeling/serializers.py`（挂载字段校验放宽）
+- `backend/apps/modeling/views.py`（detail-check 简化）
+- `frontend/src/views/modeling/DomainFieldMapping.vue`（主表字段全可选）
+- `backend/apps/archive/tests.py`（新增 DetailSyncOneToManyTest）
+
+**变更摘要**：
+- 后端 archive/views.py `_sync_detail_rows` 归属机制核心改造：
+  - 归属键从「主表主键 pk_fields」改为「挂载字段 detail_fm.target_field.code」：code_to_physical+match_channels 构建 target_physical_to_schema（本表+头表物理列），无映射→warnings+return 不静默
+  - existing_records 改多值索引 `{挂载字段值: [records]}`（active 优先 insert(0)）
+  - 明细行 upsert 循环 `for existing in existing_list:`——同值多主记录全部挂载（一对多）
+  - _record_key_for_row 从行内取挂载字段物理列值（含 __hdr__ 头表前缀回退），无值返回 None 跳过
+  - 代表行折叠按挂载字段值分组（seen_keys），每组首行写所有同值主记录（key=(rep_key,)）
+- 后端 modeling/serializers.py：移除 target_field is_primary_key 强校验（保留 detail 必填 detail_config/target_field）
+- 后端 modeling/views.py detail-check：方向异常检测简化为仅「未配置挂载字段」suspect（同步侧警告兜底）
+- 前端 DomainFieldMapping.vue（6 处）：主表字段「仅主键可选」→全部可选（移除 field-item--disabled）；删除主键警告 alert+detailTargetNoPk computed；detailRecommendedFieldId 改按已选目标字段 code 匹配（未选回退主键）；loadTargetFields detail 分支默认推荐单一主键保留；handleSubmit 文案改「请选择主表端关联字段」；selectDetailTargetField 移除主键拦截+触发重新推荐
+- 新增测试 DetailSyncOneToManyTest 3 条（域 DSYNC1N：主表 MATERIAL_ID 主键+MATERIAL_GROUP 非主键 / 明细分组头 FID 主键+GROUP_ID 非主键；G1→M1,M2 一对多+代表行共享；第二轮幂等；G9 未匹配跳过）
+
+**验证**：vue-tsc --noEmit 0 errors + py_compile 3 文件 OK + DetailSyncOneToManyTest+DetailSyncEngineTest+ArchiveRecordDetailModelTest 14/14 + 全套 105/105 PASS
+**遗留**：服务器部署后需重新构建前端+重启后端生效（release.ps1 / deploy/sync.sh 一键发布）。
+
 ## 第一百五十六轮（2026-08-13）标签：测试报告1问题、预组合关系表单、左右分栏、左源右目标、匹配字段点选
 **任务**：用户新测试报告1个问题：新建/编辑映射弹窗选「预组合关系」时界面没有匹配字段可选功能，且不是左源右目标设计（XPath 指向 body/div[6] 弹窗容器）。
 **读取文件**：

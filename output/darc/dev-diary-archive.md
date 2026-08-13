@@ -2,6 +2,26 @@
 
 > 记录 archive 模块编码实现的关键数据流与实现要点，供后续影响分析使用。
 
+## 2026-08-13 — 同步引擎挂载归属改造：按挂载字段一对多（第一百五十七轮）
+
+### 变更背景
+用户拍板方案B：同步按挂载字段（detail_fm.target_field）归属主记录，支持一对多（物料表↔物料分组预组合用 GROUP_ID 关联，一组合多物料）。替代原按主表主键归属。
+
+### 关键实现（_sync_detail_rows）
+- **归属键**：target_code=detail_fm.target_field.code；`target_physical_to_schema` 由 code_to_physical+match_channels 构建（tbl_id==table.id 或 header_table_id——头表物理列可作归属键，第一百四十一轮平铺 `__hdr__` 机制复用）；无映射→stats['warnings'] 追加+return（不静默）
+- **existing_records 多值索引**：`{str(挂载字段值): [records]}`，active 优先 insert(0)；原按 pk_fields tuple 单值索引
+- **一对多挂载**：明细行 upsert 包进 `for existing in existing_list:` 循环——同挂载字段值的所有主记录各挂一份
+- **_record_key_for_row**：行内取挂载字段物理列值（先本表列再 `__hdr__` 前缀回退），无值返回 None→continue（不创建）
+- **代表行折叠**：按挂载字段值分组（seen_keys），每组排序首行写**所有**同值主记录（共享代表行数据），key 传 (rep_key,) tuple
+- pk_fields 参数保留（L2021 排除列判断仍用，归属用途移除）
+
+### 新增测试（backend/apps/archive/tests.py DetailSyncOneToManyTest，域 DSYNC1N）
+- 主表物料信息：MATERIAL_ID 主键 + MATERIAL_GROUP 非主键；明细分组头：FID 主键 + GROUP_ID 非主键；挂载 source_field=GROUP_ID → target_field=MATERIAL_GROUP
+- 用例1：G1→M1,M2 + G2→M3，details_created=3，代表行 GROUP_NAME 写入 M1/M2（共享）；用例2：第二轮幂等（details_created=0/details_updated=0/count=3）；用例3：G9 未匹配→0 条
+
+### 验证
+DetailSyncOneToManyTest 3/3 + DetailSyncEngineTest+ArchiveRecordDetailModelTest 11/11 定向回归 + 全套 105/105 PASS
+
 ## 2026-08-10 — 明细致子表批3a+3b（前端）：关系管理配置页 + 明细展示 + 变更日志展示
 
 ### 批3a（关系管理配置页前端）

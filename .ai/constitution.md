@@ -251,3 +251,11 @@
 - **决策**：①后端 FieldMappingSerializer 新增 `detail_config_combo`（SerializerMethodField）——预组合全名「头表名 + 明细表名」（旧注册无头表只返明细表名），不破坏 detail_config_name 既有语义；②前端列表增强：源表列 detail 行显示预组合全名+蓝色小标「明细子表（预组合）」、目标表=域主表（is_primary）金色「主表」tag、普通关联裸灰字升级灰色 tag「普通关联」、detail 行浅蓝底（:row-class-name + scoped :deep 样式）；③展示层纯增强，接口只增字段不破坏调用方
 - **边界**：id=4 旧范式 detail 映射（detail_config 为空）如实显示（浅蓝底+原表名，无组合名）；主表判定用 domainTables 的 is_primary 实时反映主表切换
 - **回执**：后端 APIClient 实测 6 条映射 combo 全对 + vue-tsc 0 + django check 0 + 浏览器 DOM 实测（4 行浅蓝底/预组合名/3 个主表 tag/普通关联 tag；首次抓取未见 tag 为 HMR 重渲染时序，二次确认全过）
+
+## 架构级决策：挂载字段放宽为任意键 + 同步按挂载字段一对多归属（2026-08-13 方向修正，已实施）
+
+- **背景**：用户质疑「为什么和预组合表的关联字段只能是主键呢？？？我们的设计应该是任何键啊」——第一百五十六轮界面把 detail 挂载的主表端字段限定为仅主键可选；用户场景=物料主数据：物料表↔物料分组预组合表用 GROUP_ID 关联（分组头 GROUP_ID 非主键业务键，一组合多物料），用户拍板方案 B（同步按挂载字段归属，而非按主表主键）并明确支持一对多（「B，支持挂载的字段一对多啊。。场景很现实啊。。我的是物料主数据，物料表和物料分组预组合表的关联。。肯定是用GROUPID来关联的啊。你有什么问题么？」）
+- **决策（方向理解清单 + AskUserQuestion 2 问，用户拍板 2 次）**：①挂载字段（detail_fm.target_field）可为目标表任意字段——后端校验移除 is_primary_key 强校验、detail-check 简化（仅未配置挂载字段报 suspect）、前端主表字段全部可选（默认仍推荐单一主键）；②同步归属机制改为按挂载字段值匹配主记录（替代原按主表主键 pk_fields 构建归属键）：target_code=detail_fm.target_field.code，本表+头表物理列映射（code_to_physical+match_channels）构建 target_physical_to_schema，无映射→同步警告返回不静默；③一对多：existing_records 改多值索引 {挂载字段值:[records]}（active 优先），明细行 upsert 循环全部同值主记录——明细行挂到所有同值主记录下；④代表行折叠按挂载字段值分组，每组排序首行写所有同值主记录（共享代表行数据）；⑤行内无挂载字段值或无匹配主记录→跳过不创建（不静默）；⑥存量兼容：挂载字段为主键时同值唯一，新逻辑等同旧语义（回归测试证明）
+- **实证支撑**：域 14 真实数据——表4 S_K3_T_BD_MATERIALGROUP 分组头 FID 主键、GROUP_ID 非主键业务键，表1 S_K3_T_BD_MATERIAL 物料 MATERIAL_GROUP 非主键，fm=8 已存在 GROUP_ID 挂载（组合体端非主键）——用户场景完全成立；新测试 DetailSyncOneToManyTest 3 条（一对多挂载/第二轮幂等/未匹配跳过）+ 存量 DetailSyncEngineTest 11 条定向回归全过
+- **adqa 自查**：质疑1 归属键不在 schema（无本表/头表物理列映射）→ 同步警告返回不静默；质疑2 代表行覆盖同值多记录（同数据写多记录）→ 新测试断言共享写入；质疑3 存量回归（主键挂载语义不变）→ DetailSyncEngineTest 11 条全过；质疑4 detail-check 简化漏报方向异常 → 同步侧警告兜底
+- **回执**：回执：闸[✓] 记[✓] 拓[✓] 测[✓]（新增测试 3 条 + 全套 105/105 回归）
