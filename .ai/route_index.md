@@ -56,6 +56,8 @@ quality ← auth
 | `deploy/docker-compose.yml` | 生产环境 Docker Compose 编排（nginx + backend:gunicorn + postgres15 + redis7） |
 | `deploy/.env` | 生产环境变量模板（DEBUG=0 + DB_PASSWORD + ALLOWED_HOSTS） |
 | `deploy/data_dump.json` | SQLite→PostgreSQL 数据迁移 dump（138 条，.gitignore），首次 docker compose up 时 loaddata 自动导入 |
+| `scripts/release.ps1` | 本地一键发布（第一百五十三轮）：检查 git 变更→npm run build（失败中止）→commit→push origin master；-m 参数或交互输入 commit message；push 前 pre-push hook 自动跑测试 |
+| `deploy/sync.sh` | 服务器一键同步（第一百五十三轮，/opt/metadata/deploy）：git pull→npm run build（无 node_modules 自动 install）→up -d --build backend（启动链自动 migrate）→nginx reload；docker compose/docker-compose 自动探测 |
 
 ### archive 模块
 

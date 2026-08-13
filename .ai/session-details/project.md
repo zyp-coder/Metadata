@@ -2,6 +2,25 @@
 
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
 
+### 第一百五十三轮（2026-08-13）标签：release.ps1、sync.sh、一键发布、服务器同步
+
+**任务**：用户测试工作流诉求「本地一键启动前后端 + 改完保证 git commit + 服务器同步」，封装本地发布脚本 + 服务器同步脚本。服务器目录已确认 /opt/metadata/deploy（有 Node/npm）。
+
+**读取/修改文件**：
+- `scripts/release.ps1`（新增，本地一键发布）
+- `deploy/sync.sh`（新增，服务器一键同步）
+- 零修改现有文件，零数据迁移
+
+**执行摘要**：
+1. **前置确认**：AskUserQuestion 合并确认——影响范围（新增 2 脚本，不改现有代码）+ 服务器 Node/npm 环境（用户确认有，sync.sh 在服务器直接 build）；用户要求脚本内容直接贴出来
+2. **scripts/release.ps1**：检查 git 有无变更（无则退出）→ npm run build（vue-tsc+vite，失败中止不提交）→ commit message（-m 参数，缺省 Read-Host 交互输入）→ git add -A + commit + push origin master（push 前 pre-push hook 自动跑后端测试+前端类型检查）→ 输出服务器下一步提示
+3. **deploy/sync.sh**：set -e 任一步失败中止→ git pull origin master → npm run build（node_modules 缺失自动 npm install）→ docker compose/docker-compose 自动探测 → up -d --build backend（镜像含代码必须 --build，启动链自带 migrate --noinput，模型变更自动生效）→ nginx -s reload 失败兜底 restart
+4. **验证**：release.ps1 用 PowerShell Parser 解析通过（踩坑：外层 powershell -Command 双引号内 $ 变量被提前展开致误报，改用临时检查脚本）；sync.sh 用 Git for Windows 自带 bash -n 验证通过（本机 PATH 无 bash）
+
+**验证证据**：release.ps1: syntax OK（PS Parser）+ sync.sh: syntax OK（bash -n）
+
+**遗留**：sync.sh 首次服务器运行属真实环境验证（git pull/构建/重建/重载全链路）；后续可考虑把服务器地址/路径参数化
+
 ### 第一百四十七轮（2026-08-12）标签：Docker Compose 服务器部署执行、Alibaba Cloud Linux 3、corsheaders/STATIC_ROOT/UTF-16 修复、全链路验证
 
 **任务**：第一百四十六轮部署方案在服务器（dolphin-1，Alibaba Cloud Linux 3，172.18.148.11）上正式执行。

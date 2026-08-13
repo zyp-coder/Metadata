@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: ""
-title: 元数据建模与档案管理系统根工程
+title: 主数据管理系统（MetaData002）根编排层
 scope:
     - .ai/
     - scripts/

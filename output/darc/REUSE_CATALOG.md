@@ -56,6 +56,9 @@
 | auth/tests.py | backend/apps/auth/tests.py | 32 个测试（REQ-019）：登录体系/用户管理/角色管理/权限单点/档案三处投影端到端 |
 | auth_client() | modeling 与 archive tests.py 顶部 | 全局强制登录后测试客户端工厂：superuser force_authenticate（字段权限对 superuser 不生效，既有断言零改动）；新测试文件需要已登录客户端时复制此 helper |
 | check-all.ps1 | scripts/check-all.ps1 | 一键全量检查：Django check + 后端测试 + vue-tsc + vite build（注：测试计数随套件增长，现 104 条） |
+| dev.ps1 | scripts/dev.ps1 | 本地前后端一键启停（start/stop/status）：后台拉起 runserver :8000 + vite :3000，日志 output/logs/，端口幂等 |
+| release.ps1 | scripts/release.ps1 | 本地一键发布（第一百五十三轮）：npm run build（失败中止不提交）→git add -A→commit（-m 参数/交互输入）→push origin master |
+| sync.sh | deploy/sync.sh | 服务器一键同步（第一百五十三轮，/opt/metadata/deploy）：git pull→npm run build（无 node_modules 自动 install）→docker compose up -d --build backend（启动链自动 migrate）→nginx reload |
 | init_admin / init_test_account | backend/apps/auth/management/commands/ | 幂等初始化命令：init_admin 建 admin（MDM_ADMIN_PASSWORD，默认 admin123456）；init_test_account 建冒烟测试专用 smoke_test（MDM_TEST_PASSWORD，默认 test23456，挂管理员角色）——smoke 脚本一律用 smoke_test 登录，禁止用 admin | 
 | pre-push hook | .githooks/pre-push | Git 推送前自动跑后端测试 + 前端类型检查 |
 

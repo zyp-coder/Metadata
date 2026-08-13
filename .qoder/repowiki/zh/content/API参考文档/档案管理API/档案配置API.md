@@ -8,7 +8,15 @@
 - [backend/apps/archive/urls.py](file://backend/apps/archive/urls.py)
 - [backend/apps/modeling/models.py](file://backend/apps/modeling/models.py)
 - [backend/apps/modeling/urls.py](file://backend/apps/modeling/urls.py)
+- [backend/apps/modeling/migrations/0033_fieldmapping_join_type.py](file://backend/apps/modeling/migrations/0033_fieldmapping_join_type.py)
 </cite>
+
+## 更新摘要
+**变更内容**   
+- 增强了档案同步引擎的JOIN行为支持，_join_header_rows和_sync_detail_rows方法现在接受join_type参数实现不同的JOIN逻辑
+- 扩展了查询条件操作符支持'starts_with'和'contains'操作
+- 更新了FieldMapping模型的连接类型配置选项
+- 完善了预组合头表与明细表的关联关系处理
 
 ## 目录
 1. [简介](#简介)
@@ -23,7 +31,9 @@
 10. [附录](#附录)
 
 ## 简介
-本文件为 MetaData002 系统的“档案配置管理”提供完整的 API 文档，覆盖档案与记录的 CRUD、Schema 同步、数据刷新、版本回滚、一致性检查、变更批次与明细、以及档案对外数据服务 API 的配置。同时说明字段定义、验证规则、业务约束、档案与数据源的关联关系配置接口，并给出请求响应示例要点与状态流转、权限控制机制说明。
+本文件为 MetaData002 系统的"档案配置管理"提供完整的 API 文档，覆盖档案与记录的 CRUD、Schema 同步、数据刷新、版本回滚、一致性检查、变更批次与明细、以及档案对外数据服务 API 的配置。同时说明字段定义、验证规则、业务约束、档案与数据源的关联关系配置接口，并给出请求响应示例要点与状态流转、权限控制机制说明。
+
+**更新** 本次更新重点增强了档案同步引擎的JOIN行为支持和查询条件操作符功能。
 
 ## 项目结构
 后端采用 Django + DRF 的模块化设计：
@@ -72,7 +82,7 @@ M_urls --> M_models
 - [backend/apps/modeling/models.py:4-489](file://backend/apps/modeling/models.py#L4-L489)
 
 ## 架构总览
-档案系统围绕“域-表-字段-标准字段-计算字段”的建模体系，结合“双层存储+合并物化”的数据模型，实现从多源拉取、合并、人工覆盖、计算重算、版本回滚与一致性校验的全链路能力。
+档案系统围绕"域-表-字段-标准字段-计算字段"的建模体系，结合"双层存储+合并物化"的数据模型，实现从多源拉取、合并、人工覆盖、计算重算、版本回滚与一致性校验的全链路能力。
 
 ```mermaid
 classDiagram
@@ -277,7 +287,7 @@ Table --> DataSource : "外部数据源"
 章节来源
 - [backend/apps/archive/views.py:396-600](file://backend/apps/archive/views.py#L396-L600)
 - [backend/apps/archive/views.py:2203-2362](file://backend/apps/archive/views.py#L2203-L2362)
-- [backend/apps/archive/serializers.py:500-552](file://backend/apps/archive/serializers.py#L500-L552)
+- [backend/apps/archive/serializers.py:500-552](file://backend/apps/archive/serializers.py#L500-552)
 
 ### 变更批次与明细
 - 批次列表：GET /change-batches
@@ -304,7 +314,7 @@ Table --> DataSource : "外部数据源"
 - 过滤：archive, status
 
 章节来源
-- [backend/apps/archive/serializers.py:530-552](file://backend/apps/archive/serializers.py#L530-L552)
+- [backend/apps/archive/serializers.py:530-552](file://backend/apps/archive/serializers.py#L530-552)
 - [backend/apps/archive/urls.py:11](file://backend/apps/archive/urls.py#L11)
 
 ### 档案与数据源的关联关系配置
@@ -316,9 +326,60 @@ Table --> DataSource : "外部数据源"
   - 字段维护方 ownership：source（源系统维护，档案侧只读）/archive（档案维护，档案侧可编辑）
   - 标准字段 primary_field：组合字段的主字段决定数据源头与一致性检查口径
 
+**更新** 新增了连接类型（join_type）配置，支持LEFT JOIN和INNER JOIN两种模式。
+
 章节来源
 - [backend/apps/modeling/urls.py:1-20](file://backend/apps/modeling/urls.py#L1-L20)
 - [backend/apps/modeling/models.py:4-489](file://backend/apps/modeling/models.py#L4-L489)
+
+### 增强JOIN行为支持
+
+**新增功能** 档案同步引擎现在支持灵活的JOIN行为配置：
+
+#### JOIN类型配置
+- **LEFT JOIN**（默认）：保留无匹配的行，适用于需要完整数据集合的场景
+- **INNER JOIN**：仅保留匹配成功的行，适用于严格数据完整性要求的场景
+
+#### 预组合头表JOIN支持
+- `_join_header_rows` 方法现在接受 `join_type` 参数
+- 当 `join_type='inner'` 时，无匹配头表的明细行将被过滤掉
+- 当 `join_type='left'` 时，即使没有匹配的头表数据，明细行也会被保留
+
+#### 嵌套数据源JOIN支持
+- `_sync_detail_rows` 方法中的嵌套数据源加载也支持JOIN类型配置
+- 每个嵌套数据源可以独立配置JOIN类型，满足不同数据关联需求
+
+章节来源
+- [backend/apps/archive/views.py:1803-1840](file://backend/apps/archive/views.py#L1803-L1840)
+- [backend/apps/archive/views.py:1952-2033](file://backend/apps/archive/views.py#L1952-L2033)
+- [backend/apps/modeling/models.py:557-563](file://backend/apps/modeling/models.py#L557-L563)
+
+### 扩展查询条件操作符
+
+**新增功能** 查询条件操作符现在支持更多类型的匹配：
+
+#### 支持的操作符
+- **eq**：等于
+- **ne**：不等于  
+- **gt**：大于
+- **ge**：大于等于
+- **lt**：小于
+- **le**：小于等于
+- **in**：在列表中
+- **starts_with**：**新增** 以某值开头
+- **contains**：**新增** 包含某值
+
+#### 使用示例
+```json
+[
+  {"field": "name", "operator": "starts_with", "value": "张"},
+  {"field": "description", "operator": "contains", "value": "重要"}
+]
+```
+
+章节来源
+- [backend/apps/archive/views.py:1780-1798](file://backend/apps/archive/views.py#L1780-L1798)
+- [backend/apps/modeling/models.py:564-565](file://backend/apps/modeling/models.py#L564-L565)
 
 ## 依赖关系分析
 - 视图依赖模型与序列化器：ArchiveViewSet/RecordViewSet 等通过 serializers 进行输入输出校验与转换
@@ -360,8 +421,7 @@ View-->>Client : 档案详情 + sync_stats
 - 变更批次：零变更不建批次，减少噪声
 - 一致性检查：支持规则失效过滤，避免无效差异堆积
 - 计算字段重算：按执行顺序批量处理，失败不阻塞主流程
-
-[本节为通用指导，无需引用具体文件]
+- **JOIN优化**：INNER JOIN可减少不必要的数据传输，LEFT JOIN确保数据完整性
 
 ## 故障排查指南
 - 同步失败：查看 sync_stats.errors 与 ArchiveSyncLog.details，定位具体表或数据源问题
@@ -369,6 +429,7 @@ View-->>Client : 档案详情 + sync_stats
 - 回滚异常：确认目标版本存在且 version_after 映射有效；若缺失则降级到旧字段级恢复逻辑
 - 权限拒绝：记录创建被禁止（403），应通过源侧同步而非档案端新增
 - 计算字段重算失败：查看 warnings/errors，检查表达式依赖与执行顺序
+- **JOIN相关问题**：检查join_type配置是否符合预期，确认关联字段映射正确
 
 章节来源
 - [backend/apps/archive/views.py:930-1085](file://backend/apps/archive/views.py#L930-L1085)
@@ -376,9 +437,9 @@ View-->>Client : 档案详情 + sync_stats
 - [backend/apps/archive/views.py:1563-1603](file://backend/apps/archive/views.py#L1563-L1603)
 
 ## 结论
-档案配置 API 以“域-表-字段-标准字段-计算字段”为核心，结合“双层存储+合并物化”的数据模型，提供了完善的 CRUD、Schema 同步、数据刷新、版本回滚、一致性检查与变更追踪能力。通过数据源配置与字段维护方（ownership）控制，实现了源系统与档案侧的职责分离与数据治理。建议在生产环境配合权限控制与审计日志，确保数据安全与可追溯性。
+档案配置 API 以"域-表-字段-标准字段-计算字段"为核心，结合"双层存储+合并物化"的数据模型，提供了完善的 CRUD、Schema 同步、数据刷新、版本回滚、一致性检查与变更追踪能力。通过数据源配置与字段维护方（ownership）控制，实现了源系统与档案侧的职责分离与数据治理。
 
-[本节为总结，无需引用具体文件]
+**更新** 本次增强功能进一步提升了档案同步的灵活性和数据处理能力，特别是JOIN行为和查询操作符的扩展，使得系统能够更好地适应复杂的数据关联场景和查询需求。建议在生产环境配合权限控制与审计日志，确保数据安全与可追溯性。
 
 ## 附录
 
@@ -395,7 +456,7 @@ View-->>Client : 档案详情 + sync_stats
 章节来源
 - [backend/apps/archive/models.py:5-172](file://backend/apps/archive/models.py#L5-L172)
 - [backend/apps/archive/serializers.py:51-98](file://backend/apps/archive/serializers.py#L51-L98)
-- [backend/apps/archive/serializers.py:530-552](file://backend/apps/archive/serializers.py#L530-L552)
+- [backend/apps/archive/serializers.py:530-552](file://backend/apps/archive/serializers.py#L530-552)
 
 ### 请求响应示例要点
 - 创建档案
@@ -441,5 +502,77 @@ View-->>Client : 档案详情 + sync_stats
 章节来源
 - [backend/apps/archive/views.py:1563-1603](file://backend/apps/archive/views.py#L1563-L1603)
 - [backend/apps/archive/serializers.py:185-378](file://backend/apps/archive/serializers.py#L185-L378)
-- [backend/apps/archive/serializers.py:530-552](file://backend/apps/archive/serializers.py#L530-L552)
+- [backend/apps/archive/serializers.py:530-552](file://backend/apps/archive/serializers.py#L530-552)
 - [backend/apps/archive/views.py:2203-2362](file://backend/apps/archive/views.py#L2203-L2362)
+
+### JOIN类型配置示例
+
+**新增** 连接类型配置示例：
+
+#### FieldMapping JOIN类型配置
+```json
+{
+  "source_table": 1,
+  "source_field": 10,
+  "target_table": 2, 
+  "target_field": 20,
+  "relation_type": "reference",
+  "join_type": "left",  // 或 "inner"
+  "conditions": []
+}
+```
+
+#### 预组合头表JOIN配置
+```json
+{
+  "header_table": 1,
+  "detail_table": 2,
+  "header_link_field": 10,
+  "detail_link_field": 20,
+  "row_key_field": 25,
+  "display_sort_field": 26,
+  "display_sort_desc": true,
+  "conditions": [
+    {"field": "status", "operator": "eq", "value": "active"}
+  ]
+}
+```
+
+章节来源
+- [backend/apps/modeling/models.py:557-563](file://backend/apps/modeling/models.py#L557-L563)
+- [backend/apps/modeling/models.py:577-622](file://backend/apps/modeling/models.py#L577-L622)
+- [backend/apps/modeling/migrations/0033_fieldmapping_join_type.py:1-19](file://backend/apps/modeling/migrations/0033_fieldmapping_join_type.py#L1-L19)
+
+### 查询条件操作符示例
+
+**新增** 查询条件操作符使用示例：
+
+#### starts_with 操作符
+```json
+[
+  {"field": "name", "operator": "starts_with", "value": "张"}
+]
+```
+效果：匹配所有以"张"开头的姓名
+
+#### contains 操作符  
+```json
+[
+  {"field": "description", "operator": "contains", "value": "重要"}
+]
+```
+效果：匹配所有包含"重要"的描述
+
+#### 组合查询
+```json
+[
+  {"field": "status", "operator": "eq", "value": "active"},
+  {"field": "name", "operator": "starts_with", "value": "张"},
+  {"field": "description", "operator": "contains", "value": "重要"}
+]
+```
+效果：AND组合，同时满足三个条件
+
+章节来源
+- [backend/apps/archive/views.py:1780-1798](file://backend/apps/archive/views.py#L1780-L1798)
+- [backend/apps/modeling/models.py:564-565](file://backend/apps/modeling/models.py#L564-L565)
