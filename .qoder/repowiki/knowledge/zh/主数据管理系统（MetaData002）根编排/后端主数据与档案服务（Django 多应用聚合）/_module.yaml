@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: backend
-title: 主数据管理系统后端（Django REST API）
+title: 后端主数据与档案服务（Django 多应用聚合）
 scope:
     - backend/
 source_files: []

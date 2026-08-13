@@ -21,6 +21,22 @@
 data_dump.json 138 条记录覆盖全业务模型；docker-compose 语法验证通过
 ### 所需后续步骤
 ① 服务器安装 Docker + docker-compose；② 修改 deploy/.env 填入实际 IP 和密码；③ `cd frontend && npm ci && npm run build`；④ `cp -r dist/ ../deploy/nginx/html/ && cd ../deploy && docker compose up -d`；⑤ 浏览器验证 http://服务器IP
+
+### 实际部署执行（第一百四十六轮续，2026-08-12）
+- **服务器**：Alibaba Cloud Linux 3（dolphin-1），IP 172.18.148.11
+- **Docker**：yum 安装 Docker CE + docker compose
+- **Node.js**：v16→v20.20.2（Vite 5 兼容性修复，nodesource setup_20.x）
+- **前端构建**：npm ci + npm run build 成功（11.57s，3583 modules）
+- **数据导入**：138 条业务记录全量迁移到 PostgreSQL
+- **修复清单**：
+  - requirements.txt 补 django-cors-headers（local_settings 引用但缺包）
+  - settings.py 补 STATIC_ROOT（生产 collectstatic 必需）
+  - data_dump.json UTF-16→UTF-8 转码（PowerShell > 重定向的经典坑）
+  - .env ALLOWED_HOSTS 补 127.0.0.1（容器内 curl 需本地回环）
+- **启动成功**：migrate → loaddata 138 ➔ init_admin（admin 已存在）→ collectstatic 153 → gunicorn 4 workers @ 0.0.0.0:8000
+- **全链路验证**：Nginx(80) → Backend(8000) 登录 API 返回正常 token JSON
+- **访问地址**：http://172.18.148.11（浏览器打开即可登录）
+- **账号**：admin / admin123456
 ## 2026-08-11 关系管理列表直观性改进（第一百四十四轮，UX 方案A）
 ### 变更背景
 用户反馈关系管理列表「明细表和主表、普通表的关系不直观」。分析现状：detail 行只显示明细表名（预组合信息丢失）、主表地位无体现、普通关联是裸灰字区分度低。用户选方案A（表格增强）。

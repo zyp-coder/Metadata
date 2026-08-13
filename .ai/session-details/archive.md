@@ -1,8 +1,73 @@
 # 模块详情：archive
 
-### 第一百三十五轮（2026-08-10）标签：明细致子表批2、审计扩展、ChangeDetail扩展、DETAIL_SYNC、聚合变更日志、回滚
+### 第一百五十轮（2026-08-12）标签：全量同步实测、走通有数据、SQLite写锁、row_key去重
 
-**任务**：明细致子表批2（审计扩展）实施。方向判定表：四项不触及（数据流向/存储模型不涉及模型新增，仅扩展已有 ChangeDetail 字段；模块边界/核心交互范式不触及）。
+**任务**：用户要求「你能帮我测试一下先么？先走通有数据的」——实际走通同步流程，把真实数据写入系统。
+
+**过程**：
+- 写临时脚本 diag_full_sync.py 模拟前端全流程：refresh-preview 预检 → 确认 → POST sync-schema（预检发现 schema 有变化，走全量拉取+重建 schema 路径）
+- 600s 测试脚本超时被杀，但**后端同步线程仍在执行**（记录持续增长 ~200 条/s，客户端断开不终止服务端线程）
+- SQLite 被写锁锁死（database is locked），期间系统整体不可用；通过监控 dev.db-journal 判断写事务活跃度（autocommit 每条 save 单独事务，journal 短暂消失是事务间隙），连续 90s 无 journal 确认同步结束
+- AskUserQuestion 确认：用户选择「继续等同步跑完（推荐）」
+
+**结果（最终态）**：
+- ArchiveRecord = **209,123** 条（全部 active/synced），创建窗口约 18 分钟
+- ArchiveRecordDetail = **49,588** 条：mapping_id=3（价目表明细）24,794 + mapping_id=9 24,794（收尾阶段补入 8,041 条）
+- 主记录字段：部分记录 11 字段（含 PRICE/TO_QTY/PRICE_UNIT_ID/PRICE_BASE/FORBID_STATUS 代表行字段），其余仅 6 主表字段
+- 档案状态仍 draft、schema_version=1、schema 32 字段
+
+**变更文件**：无产品代码变更（临时诊断脚本 diag_*.py / diag_out*.txt 已全部清理；历史遗留 diag_fix*.py / diag_append_design.py 未动）
+
+**遗留问题（已定位未修复，待用户裁决）**：
+1. **变更批次/操作日志缺失**：ChangeBatch=0、操作日志仅 1 条 create——sync_schema 收尾（变更批次落库 + SCHEMA_SYNC 日志）未执行，疑似请求线程异常中断
+2. **物料分组明细 0 条**：cfg id=6 pk_physical_to_schema 为空——GROUP_ID 经 FieldMapping 中转映射不在 code_to_physical/match_channels 直接匹配通道，_sync_detail_rows 直接 return
+3. **row_key 配置错误**：cfg id=2 row_key_field=MATERIAL_ID 非唯一，价目明细 239,504 行去重为 24,794 条（每物料仅保留排序后最后一条）
+4. **NAME/DESCRIPTION（价目表头）0 值**：抽查 100 条 NAME 0/100，维度表中转写入未生效
+5. **代表行字段覆盖不均**：仅 24,794 条有价目明细的物料含 PRICE 等字段（架构预期：代表行只更新有明细的物料）
+
+**状态变更**：无（数据已就位，档案状态仍 draft）
+
+**验证**：API refresh-preview 实测 36s 返回 timeout=200、tables_checked=3、errors=[]、would_create=209123；最终数据态 shell 查询 209,123 / 49,588 / 0 / 0 / 1；同步期间及结束后系统恢复正常响应
+
+### 考古修正
+- **「变更批次缺失」实为误报**：版本快照（ArchiveRecordVersion） 209,125 条 update 记录证明昨天同步收尾实际完成（ChangeBatch id=1 10:15 UTC + OpLog id=2 10:27 UTC），只是我昨天验证时收尾未执行完（延迟~50分钟，batch_recalculate 耗时）
+- **「24,790 条主记录有 PRICE」实为误报**：209,125 条 update 版本快照中仅 3 条含 PRICE 字段——昨天的验证脚本查错了对象/口径
+- **真正缺陷**：代表行只写 `sorted_rows[0]`（全局首行），25,993 个有价目明细的物料中仅 1 个在主表有 PRICE；与第 133 轮「默认价=每物料」锁定语义不符
+
+### 第一百五十轮续（2026-08-13）标签：row_key修复、代表行分组修复
+
+**任务**：用户确认先修 row_key（DTC id=2 MATERIAL_ID→ENTRY_ID）+ 考古发现代表行缺陷后，用户确认「只管系统逻辑」
+
+**变更文件**：
+- `backend/apps/archive/views.py`（L2081-2092）：_sync_detail_rows 代表行改为按物料（rec_key）分组遍历——每组取排序后首行写主表，跳过已见过的同组键；注释更新对齐第 133 轮锁定语义
+
+**验证**：django check 0 issues；DetailSyncEngineTest 8/8 PASS；未重跑同步（用户确认「数据不用处理」）
+
+**状态变更**：
+- 遗留 row_key 配置错误 → 已修复 ✓
+- 代表行只写全局首行 → 已修复 ✓（待下次同步验证）
+- 变更批次缺失 → 已澄清（收尾延迟非缺失）
+- 遗留：物料分组明细 0 条（cfg id=6 pk_physical_to_schema 为空）、NAME/DESCRIPTION 0 值（待用户裁决）
+
+### 第一百四十九轮（2026-08-12）标签：续诊同步无反应、axios超时
+
+**任务**：用户续诊「不对，你debug一下，我等了很久也没有/」——后端预组合跳过已修复（36s返回），但用户仍然等不到响应。
+
+**诊断**：前端 axios 默认 timeout:30000ms（30s），后端 refresh-preview 耗时 36s，导致前端 30s 超时。用户看到的不是预检弹窗，而是 30s 后一闪而过的「预检失败」。这是双层问题：第1层后端预组合表跳过（已修复），第2层前端超时 < 后端耗时。
+
+**变更文件**：
+- `frontend/src/api/archive.ts`：refreshPreview 单独设 timeout:180000（180s），覆盖全局 30s 默认值
+- `frontend/src/views/archive/ArchiveList.vue`：catch 块区分 timeout 错误，提示「预检超时：源数据量较大（约20万条），请耐心等待60秒左右」
+
+**状态变更**：无
+
+**验证**：后端实测 36s 返回 timeout=200、tables_checked=3、errors=[]、would_create=209123；vue-tsc 0 errors；django check 0 issues
+
+**遗留问题**：37s 仍是远程 SQL Server 网络延迟 + 209K 行数据量的硬耗时，无法进一步优化
+
+### 第一百四十八轮（2026-08-12）标签：产品档案同步预检超时、预组合表跳过、loading
+
+**任务**：用户反馈产品档案同步"完全没反应"，怀疑预组合表导致。诊断定位：本机开发环境 archive 1（产品主数据档案）状态=draft、记录=0，点击同步调用 refresh-preview 因预组合明细子表被全量查询（239K+14K 行）而超时
 
 **变更文件**：
 - `backend/apps/archive/models.py`（M1）：ArchiveChangeDetail 扩展——`detail_group` FK（ArchiveRecordDetail，nullable，SET_NULL）+ `detail_row_key` CharField（max_length=200，行键值快照，解耦回滚）；新增 `ChangeType.DETAIL_SYNC = 'detail_sync', '明细同步'`

@@ -438,3 +438,56 @@
 ### 遗留
 - 无新增路径（全是改动现有端点），未加新测试用例
 - 存量 id=25 方向异常由 detail-check 提示 + 用户手动修正（用户已裁决并入交互改造统一修正）
+
+---
+
+## 2026-08-12 全量同步实测（用户要求「先走通有数据的」）
+
+### 测试方式
+- 临时脚本 diag_full_sync.py 模拟前端全流程：refresh-preview 预检 → 确认 → POST sync-schema（预检发现 schema 有变化，走全量拉取+重建 schema 路径）
+- 600s 测试脚本超时被杀，但**后端同步线程仍在执行**（客户端断开不终止服务端线程）；期间 SQLite 被写锁锁死（database is locked），系统整体不可用
+- 通过监控 dev.db-journal 文件判断写事务活跃度（autocommit 每条 save 单独事务，journal 短暂消失是事务间隙）；连续 90s 无 journal 确认同步结束
+
+### 结果（最终态，2026-08-12 验证）
+- ArchiveRecord = **209,123** 条（全部 active/synced），创建窗口约 18 分钟
+- ArchiveRecordDetail = **49,588** 条：mapping_id=3（价目表明细）24,794 + mapping_id=9 24,794（收尾阶段补入 8,041 条）
+- 主记录字段：部分记录 11 字段（含 PRICE/TO_QTY/PRICE_UNIT_ID/PRICE_BASE/FORBID_STATUS 代表行字段），其余仅 6 主表字段
+- 档案状态仍 draft、schema_version=1、schema 32 字段
+
+### 关键教训（测试环境行为，非产品代码缺陷）
+1. **客户端断开不终止服务端同步线程**：测试脚本被杀后同步继续跑完，是「点击后等很久」体验的另一层原因——全量同步本身 18 分钟+ 且期间 SQLite 单写者锁导致 API 全部排队
+2. 前端 axios 30s 超时 < 后端 36s 预检耗时（第 149 轮已修 refreshPreview 180s）
+
+### 遗留问题（已定位未修复，待用户裁决）
+1. **变更批次/操作日志缺失**：ChangeBatch=0、操作日志仅 1 条 create——sync_schema 收尾（变更批次落库 + SCHEMA_SYNC 日志）未执行，疑似请求线程异常中断
+2. **物料分组明细 0 条**：cfg id=6 pk_physical_to_schema 为空——GROUP_ID 经 FieldMapping 中转映射不在 code_to_physical/match_channels 直接匹配通道，_sync_detail_rows 直接 return
+3. **row_key 配置错误**：cfg id=2 row_key_field=MATERIAL_ID 非唯一，价目明细 239,504 行去重为 24,794 条（每物料仅保留排序后最后一条）
+4. **NAME/DESCRIPTION（价目表头）0 值**：抽查 100 条 NAME 0/100，维度表中转写入未生效
+5. **代表行字段覆盖不均**：仅 24,794 条有价目明细的物料含 PRICE 等字段，其余仅 6 主表字段（架构预期：代表行只更新有明细的物料）
+
+### 验证证据
+- API refresh-preview 实测：36s 返回 timeout=200、tables_checked=3、errors=[]、would_create=209123
+- 最终数据态 shell 查询：209,123 / 49,588 / 0 / 0 / 1
+- 临时诊断文件 diag_*.py、diag_out*.txt 已全部清理
+
+---
+
+## 2026-08-13 代表行写主表分组修复（对齐第133轮锁定语义）
+
+### 背景
+- 第 133 轮方向锁定语义：「默认价 = 每物料 EFFECTIVE_DATE 最新 + 行键最大」
+- 批1 实现错误：_sync_detail_rows 代表行只写 sorted_rows[0]（全局排序首行）→ 25,993 个有价目明细的物料中仅 1 个在主表有 PRICE
+- 版本快照实证：209,125 条 update 版本中仅 3 条含 PRICE 字段
+
+### 改动
+- `backend/apps/archive/views.py`（L2081-2092）：代表行改为按物料（rec_key）分组遍历——每组取排序后首次出现的行（= 首行），跳过已见过的同组键
+- 新行为：每 mapping/每次同步对 N 个有明细的物料各写 1 条代表行
+
+### 验证
+- django check 0 issues
+- archive DetailSyncEngineTest 8/8 PASS（0.043s）
+- 代码逻辑分析：多物料时 seen_keys 去重生效
+
+### 遗留
+- 本修正是逻辑修复，未重跑同步刷新数据（用户确认「数据不用处理，只管系统逻辑」）
+- 下次全量同步时代表行将正确按物料分组写入

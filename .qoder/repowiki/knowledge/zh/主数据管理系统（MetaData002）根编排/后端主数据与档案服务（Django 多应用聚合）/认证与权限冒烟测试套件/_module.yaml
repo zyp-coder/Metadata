@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: backend/auth
+title: 认证与权限冒烟测试套件
+scope:
+    - backend/apps/auth/
+    - backend/smoke_auth.py
+    - backend/smoke_permission_overview.py
+    - backend/smoke_src_owned.py
+source_files: []
+depends_on: []
+related_to: []

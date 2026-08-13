@@ -2,6 +2,33 @@
 
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
 
+### 第一百四十七轮（2026-08-12）标签：Docker Compose 服务器部署执行、Alibaba Cloud Linux 3、corsheaders/STATIC_ROOT/UTF-16 修复、全链路验证
+
+**任务**：第一百四十六轮部署方案在服务器（dolphin-1，Alibaba Cloud Linux 3，172.18.148.11）上正式执行。
+
+**读取/修改文件**：
+- `backend/requirements.txt`（补 django-cors-headers）
+- `backend/config/settings.py`（补 STATIC_ROOT）
+- `deploy/data_dump.json`（UTF-16 转 UTF-8）
+
+**执行摘要**：
+1. **环境准备**：yum 装 git + Docker CE（已有）+ Node.js v16→v20.20.2（nodesource setup_20.x）
+2. **代码克隆**：sudo git clone → git pull 增量更新
+3. **前端构建**：npm ci + npm run build ✓（3583 modules, 11.57s）
+4. **Docker 启动**：docker compose up -d（4 容器全 healthy）
+5. **3 项修复**：
+   - requirements.txt 补 django-cors-headers（local_settings 用 corsheaders 但缺包）
+   - settings.py 补 STATIC_ROOT（collectstatic → ImproperlyConfigured）
+   - data_dump.json UTF-16→UTF-8 转码（PowerShell `>` 重定向经典坑，0xff 0xfe BOM）
+   - .env ALLOWED_HOSTS 补 `127.0.0.1`（容器内 curl localhost 被 Django 拒）
+6. **启动链完整通过**：migrate → loaddata 138 → init_admin（admin 已存在）→ collectstatic 153 → gunicorn 4 workers
+7. **全链路验证**：Nginx(80) → Backend(8000) 登录 API 返回正常 token JSON
+
+**访问地址**：http://172.18.148.11（同事浏览器打开即可登录）
+**账号**：admin / admin123456
+
+**状态**：部署完成，系统可访问。
+
 ### 第一百四十五轮（2026-08-11）标签：局域网开放测试、防火墙、测试账号
 
 **任务**：用户问能否把本机 IP 放出去给别人测试（同一局域网）；vite.config.ts server.host:true + 手工后台起 runserver 0.0.0.0:8000 --noreload + npm run dev（dev.ps1 不动，测试完 stop+start 恢复本机监听）+ 建 tester（管理员，密码 qQLdeaCIu1）/manager（管理员，密码 i5IdOs5taN）两账号（UserProfile 无自动创建机制，需手工 get_or_create+挂角色，幂等脚本已删）。

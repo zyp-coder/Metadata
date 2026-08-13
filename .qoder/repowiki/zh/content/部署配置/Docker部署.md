@@ -4,6 +4,7 @@
 **本文引用的文件**   
 - [backend/Dockerfile](file://backend/Dockerfile)
 - [backend/docker-compose.yml](file://backend/docker-compose.yml)
+- [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
 - [backend/config/settings.py](file://backend/config/settings.py)
 - [backend/requirements.txt](file://backend/requirements.txt)
 - [backend/config/wsgi.py](file://backend/config/wsgi.py)
@@ -11,7 +12,16 @@
 - [backend/local_settings.py](file://backend/local_settings.py)
 - [frontend/package.json](file://frontend/package.json)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
+- [frontend/nginx.conf](file://frontend/nginx.conf)
 </cite>
+
+## 更新摘要
+**所做更改**
+- 增强了静态文件处理配置，重点说明STATIC_ROOT设置在容器化部署中的重要性
+- 更新了生产环境部署流程，包含collectstatic命令的执行时机和配置要求
+- 完善了Nginx静态文件服务配置说明
+- 增加了静态文件相关的故障排查指南
+- 优化了镜像构建和部署的最佳实践建议
 
 ## 目录
 1. [简介](#简介)
@@ -43,15 +53,19 @@ end
 subgraph "基础设施"
 F["PostgreSQL<br/>postgres:15"]
 G["Redis<br/>redis:7-alpine"]
+H["Nginx<br/>静态文件服务"]
 end
 subgraph "前端"
-H["Vue+Vite<br/>package.json / vite.config.ts"]
+I["Vue+Vite<br/>package.json / vite.config.ts"]
+J["Nginx配置<br/>nginx.conf"]
 end
-H --> A
+I --> A
 A --> F
 A --> G
 A --> B
 C --> A
+H --> I
+H --> J
 ```
 
 图表来源
@@ -62,10 +76,12 @@ C --> A
 - [backend/local_settings.py](file://backend/local_settings.py)
 - [frontend/package.json](file://frontend/package.json)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
+- [frontend/nginx.conf](file://frontend/nginx.conf)
 
 章节来源
 - [backend/Dockerfile](file://backend/Dockerfile)
 - [backend/docker-compose.yml](file://backend/docker-compose.yml)
+- [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
 - [backend/config/settings.py](file://backend/config/settings.py)
 - [backend/requirements.txt](file://backend/requirements.txt)
 - [backend/config/wsgi.py](file://backend/config/wsgi.py)
@@ -73,6 +89,7 @@ C --> A
 - [backend/local_settings.py](file://backend/local_settings.py)
 - [frontend/package.json](file://frontend/package.json)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
+- [frontend/nginx.conf](file://frontend/nginx.conf)
 
 ## 核心组件
 - 后端镜像构建：基于 python:3.12-slim，安装系统依赖与 Python 依赖，复制源码。
@@ -80,16 +97,18 @@ C --> A
 - 配置管理：通过环境变量注入数据库、缓存、调试开关等关键参数。
 - WSGI 入口：标准 Django WSGI 应用，便于后续替换为 gunicorn/uwsgi。
 - 前端开发：Vite 提供热重载与 API 代理到后端 8000 端口。
+- **静态文件处理**：生产环境通过 collectstatic 命令收集静态文件，Nginx 提供服务。
 
 章节来源
 - [backend/Dockerfile](file://backend/Dockerfile)
 - [backend/docker-compose.yml](file://backend/docker-compose.yml)
+- [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
 - [backend/config/settings.py](file://backend/config/settings.py)
 - [backend/config/wsgi.py](file://backend/config/wsgi.py)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
 
 ## 架构总览
-下图展示容器化后的服务交互：前端通过浏览器访问，开发时由 Vite 代理到后端；后端通过环境变量连接 PostgreSQL 与 Redis，并使用 django_redis 作为缓存后端。
+下图展示容器化后的服务交互：前端通过浏览器访问，开发时由 Vite 代理到后端；后端通过环境变量连接 PostgreSQL 与 Redis，并使用 django_redis 作为缓存后端。生产环境通过 Nginx 提供静态文件和反向代理。
 
 ```mermaid
 graph TB
@@ -98,16 +117,22 @@ Frontend["前端(Vite)<br/>端口:3000"]
 Backend["后端(Django)<br/>端口:8000"]
 DB["PostgreSQL<br/>端口:5432"]
 Cache["Redis<br/>端口:6379"]
+Nginx["Nginx<br/>端口:80"]
+StaticVol["静态文件卷<br/>/app/static"]
 Client --> Frontend
 Frontend --> |API代理| Backend
 Backend --> |DB连接| DB
 Backend --> |缓存| Cache
+Nginx --> |静态文件| StaticVol
+Nginx --> |API代理| Backend
 ```
 
 图表来源
 - [backend/docker-compose.yml](file://backend/docker-compose.yml)
+- [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
 - [backend/config/settings.py](file://backend/config/settings.py)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
+- [frontend/nginx.conf](file://frontend/nginx.conf)
 
 ## 详细组件分析
 
@@ -117,6 +142,8 @@ Backend --> |缓存| Cache
 - 系统依赖：安装 gcc、libpq-dev 以支持 psycopg2-binary 编译。
 - 依赖安装：先拷贝 requirements.txt 再 pip install，利用层缓存加速重复构建。
 - 源码拷贝：最后拷贝应用代码，避免破坏依赖层缓存。
+
+**更新** 生产环境启动命令包含 collectstatic 步骤，确保静态文件正确收集。
 
 优化建议（多阶段构建）
 - 第一阶段：仅安装系统依赖与 Python 依赖，生成只读镜像层。
@@ -137,19 +164,30 @@ Backend --> |缓存| Cache
   - 注入数据库与 Redis 相关环境变量。
   - depends_on 依赖 db 与 redis 的健康状态。
 
+生产环境编排（deploy/docker-compose.yml）
+- 包含 Nginx 反向代理服务，提供静态文件托管和 API 代理。
+- 使用环境变量文件管理敏感配置。
+- 配置数据卷持久化和重启策略。
+- **新增** 启动命令包含 collectstatic 步骤，确保静态文件正确收集到 /app/static 目录。
+
 生产建议
 - 将 runserver 替换为 gunicorn，提升并发与稳定性。
 - 增加资源限制（CPU/内存）与重启策略。
 - 使用 secrets 管理敏感信息，避免明文写在 compose 中。
+- **重要** 确保 STATIC_ROOT 配置正确，以便 collectstatic 命令正常工作。
 
 章节来源
 - [backend/docker-compose.yml](file://backend/docker-compose.yml)
+- [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
 
 ### 配置与环境变量（settings.py）
 - 数据库：ENGINE=postgresql，NAME/USER/PASSWORD/HOST/PORT 均从环境变量读取。
 - 缓存：django_redis.cache.RedisCache，LOCATION 由 REDIS_HOST/REDIS_PORT 拼接。
 - 调试与安全：DEBUG、SECRET_KEY、ALLOWED_HOSTS 可通过环境变量控制。
 - 其他：分页、过滤、OpenAPI 文档、AI 接口等配置项。
+- **静态文件配置**：STATIC_URL='static/'，STATIC_ROOT=os.path.join(BASE_DIR, 'static')
+
+**更新** 静态文件路径配置已完善，确保 collectstatic 命令能够正确收集所有静态文件到 /app/static 目录。
 
 章节来源
 - [backend/config/settings.py](file://backend/config/settings.py)
@@ -172,15 +210,32 @@ Backend --> |缓存| Cache
 
 ### 开发覆盖配置（local_settings.py）
 - 覆盖数据库为 SQLite3，缓存为 LocMemCache，便于本地快速开发。
-- 启用 CORS 中间件，允许跨域访问。
+- **新增** 启用 CORS 中间件，允许跨域访问，解决前后端分离开发时的跨域问题。
+- 配置 corsheaders 中间件和 CORS_ALLOW_ALL_ORIGINS = True，简化开发环境配置。
+
+**更新** 现在依赖 django-cors-headers 包，确保容器启动时不会因缺少依赖而失败。
 
 章节来源
 - [backend/local_settings.py](file://backend/local_settings.py)
 
+### Nginx 静态文件服务配置
+- 前端静态文件：serve /usr/share/nginx/html 下的构建产物
+- API 反向代理：将 /api 请求转发到后端服务
+- **静态文件代理**：配置 /static/admin/ 和 /static/rest_framework/ 路径映射到共享卷
+- SPA 支持：所有非文件、非 API 的请求返回 index.html
+- 缓存策略：静态资源设置7天缓存和不可变头部
+
+**更新** Nginx 配置已完善静态文件服务，通过共享卷获取 Django 收集的静态文件。
+
+章节来源
+- [frontend/nginx.conf](file://frontend/nginx.conf)
+
 ## 依赖关系分析
-- 后端依赖：Django、DRF、psycopg2-binary、redis、celery、gunicorn、openpyxl 等。
+- 后端依赖：Django、DRF、psycopg2-binary、redis、celery、gunicorn、openpyxl、**django-cors-headers** 等。
 - 运行时依赖：PostgreSQL 与 Redis 服务。
 - 前端依赖：Vue 3、Vite、Ant Design Vue、Axios 等。
+
+**更新** 现已包含 django-cors-headers 依赖，解决容器启动时的 CORS 相关错误。
 
 ```mermaid
 graph LR
@@ -192,6 +247,7 @@ RedisPkg["redis"]
 Celery["celery"]
 Gunicorn["gunicorn"]
 Openpyxl["openpyxl"]
+CorsHeaders["django-cors-headers"]
 Req --> Django
 Req --> DRF
 Req --> Psycopg
@@ -199,6 +255,7 @@ Req --> RedisPkg
 Req --> Celery
 Req --> Gunicorn
 Req --> Openpyxl
+Req --> CorsHeaders
 ```
 
 图表来源
@@ -212,7 +269,8 @@ Req --> Openpyxl
 - 数据库连接池：根据负载调整连接数与超时，避免连接耗尽。
 - 缓存策略：合理使用 Redis 缓存热点数据，注意键过期与一致性。
 - 资源限制：在 docker-compose 中为各服务设置 CPU/内存上限，防止单点资源争用。
-- 静态资源：生产环境应收集静态文件并通过 Nginx/Apache 或 CDN 分发。
+- **静态资源优化**：生产环境应收集静态文件并通过 Nginx/Apache 或 CDN 分发，减少应用服务器负载。
+- **卷挂载优化**：使用命名卷存储静态文件，支持多容器共享和持久化。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -226,6 +284,16 @@ Req --> Openpyxl
 
 ## 故障排查指南
 常见问题与处理步骤：
+- **静态文件相关问题**
+  - **新增** 确认 STATIC_ROOT 配置正确指向 /app/static 目录。
+  - 检查生产环境启动命令是否包含 `python manage.py collectstatic --noinput` 步骤。
+  - 验证 Nginx 配置中的静态文件路径映射是否正确。
+  - 确认静态文件卷挂载权限和路径一致。
+  - 检查 collectstatic 命令执行日志，查看是否有文件收集错误。
+- **CORS 相关错误**
+  - **新增** 确认 django-cors-headers 已正确添加到 requirements.txt 并随容器构建安装。
+  - 检查 local_settings.py 中的 CORS_ALLOW_ALL_ORIGINS 配置是否正确。
+  - 开发环境确认浏览器控制台无跨域错误提示。
 - 数据库连接失败
   - 检查 DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD 环境变量是否正确。
   - 确认 PostgreSQL 服务健康且端口可达。
@@ -242,10 +310,20 @@ Req --> Openpyxl
   - 开发环境确认 Vite 代理目标为 http://localhost:8000。
   - 生产环境检查反向代理与跨域配置。
 
+**更新** 重点增加了静态文件相关的故障排查步骤，包括 STATIC_ROOT 配置、collectstatic 命令执行、Nginx 静态文件服务等关键环节的检查和解决方法。
+
 章节来源
 - [backend/config/settings.py](file://backend/config/settings.py)
 - [backend/docker-compose.yml](file://backend/docker-compose.yml)
+- [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
+- [backend/local_settings.py](file://backend/local_settings.py)
+- [backend/requirements.txt](file://backend/requirements.txt)
+- [frontend/nginx.conf](file://frontend/nginx.conf)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
 
 ## 结论
-通过上述镜像构建优化、compose 编排、环境变量管理与健康检查，MetaData002 可在本地与生产环境中稳定运行。生产部署建议引入 gunicorn、Nginx、Prometheus、ELK/Loki 等组件，完善性能、监控与可观测性。遵循安全最佳实践，定期扫描镜像漏洞，保障系统安全与可靠性。
+通过上述镜像构建优化、compose 编排、环境变量管理与健康检查，MetaData002 可在本地与生产环境中稳定运行。**特别需要注意的是**，现已正确添加 django-cors-headers 依赖，确保容器启动时不会出现 CORS 相关错误。**更重要的是**，生产环境部署流程已完善静态文件处理机制，通过 collectstatic 命令和 Nginx 静态文件服务，确保前端资源和 Django 后台静态文件能够正确加载和提供服务。
+
+生产部署建议引入 gunicorn、Nginx、Prometheus、ELK/Loki 等组件，完善性能、监控与可观测性。遵循安全最佳实践，定期扫描镜像漏洞，保障系统安全与可靠性。**静态文件处理的改进使得生产环境部署更加稳定和高效，减少了因静态文件缺失导致的页面渲染问题。**
+
+**更新** 依赖管理和静态文件处理的改进使得容器启动和部署更加稳定，减少了因缺少依赖包和静态文件导致的部署失败问题。

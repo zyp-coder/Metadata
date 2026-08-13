@@ -55,6 +55,7 @@ quality ← auth
 | `frontend/nginx.conf` | Nginx 生产配置（serve 前端静态 + 反向代理 /api 到后端 gunicorn + SPA fallback） |
 | `deploy/docker-compose.yml` | 生产环境 Docker Compose 编排（nginx + backend:gunicorn + postgres15 + redis7） |
 | `deploy/.env` | 生产环境变量模板（DEBUG=0 + DB_PASSWORD + ALLOWED_HOSTS） |
+| `deploy/data_dump.json` | SQLite→PostgreSQL 数据迁移 dump（138 条，.gitignore），首次 docker compose up 时 loaddata 自动导入 |
 
 ### archive 模块
 

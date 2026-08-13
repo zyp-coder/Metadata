@@ -1082,6 +1082,19 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         new_keys = set()
         updates_by_key = {}  # 跨表累积已有记录的源字段更新
         for table in tables:
+            # ===== 跳过预组合/明细子表（与 _sync_data_from_sources 同口径）：
+            # 此类表数据不入主记录（ArchiveRecord），走 _sync_detail_rows 分支 =====
+            if table.data_source:
+                from apps.modeling.models import DetailTableConfig, FieldMapping
+                cfg = DetailTableConfig.objects.filter(domain=domain, table=table).first()
+                if cfg:
+                    continue  # 有子表注册，数据入 ArchiveRecordDetail
+                old_fm = FieldMapping.objects.filter(
+                    source_table=table,
+                    relation_type=FieldMapping.RelationType.DETAIL,
+                ).first()
+                if old_fm:
+                    continue  # 旧内嵌 detail 配置兼容
             try:
                 rows = self._query_local_table(table) if not table.data_source else self._query_external_table(table)
             except Exception as e:
@@ -2065,18 +2078,22 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 batch_size=2000,
             )
 
-        # —— 代表行写主表（排序后首行 = 生效日期最新 + 同日期行键最大；空值垫底后必为非空代表行）——
+        # —— 代表行写主表（按物料分组：每组排序首行 = 默认价；对齐第133轮方向锁定语义）——
         # 复用 _write_dimension_row 公共写入逻辑：本表非空映射字段 → source_data 合并 → 版本+1 + 变更明细
-        if sorted_rows and display_phys is not None:
-            rep_row = sorted_rows[0]
-            rep_key = _record_key_for_row(rep_row)
-            rep_existing = existing_records.get(rep_key)
-            if rep_existing:
-                self._write_dimension_row(
-                    rep_existing, rep_row, physical_to_schema, schema, field_name_map,
-                    source_table_name, rep_key, operated_by, stats, matched_ids,
-                    change_entries, created_in_this_batch, record_no_change,
-                )
+        if display_phys is not None and sorted_rows:
+            seen_keys = set()
+            for rep_row in sorted_rows:
+                rep_key = _record_key_for_row(rep_row)
+                if rep_key in seen_keys:
+                    continue
+                seen_keys.add(rep_key)
+                rep_existing = existing_records.get(rep_key)
+                if rep_existing:
+                    self._write_dimension_row(
+                        rep_existing, rep_row, physical_to_schema, schema, field_name_map,
+                        source_table_name, rep_key, operated_by, stats, matched_ids,
+                        change_entries, created_in_this_batch, record_no_change,
+                    )
 
         # 收尾：代表行变更的无差异记录批量落库
         if record_no_change:

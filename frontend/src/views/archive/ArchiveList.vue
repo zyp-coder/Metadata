@@ -26,7 +26,7 @@
             <a-divider type="vertical" />
             <a @click="goConsistency(record)">检查</a>
             <a-divider type="vertical" />
-            <a @click="doRefreshPreview(record)">同步</a>
+            <a :style="{ color: syncingId === record.id ? '#999' : undefined, cursor: syncingId === record.id ? 'wait' : 'pointer' }" @click="doRefreshPreview(record)">{{ syncingId === record.id ? '同步中...' : '同步' }}</a>
             <template v-if="isAdmin">
               <a-divider type="vertical" />
               <a @click="openPermissionOverview(record)">权限</a>
@@ -108,6 +108,7 @@ const createForm = ref<any>({ domain: null, name: '', description: '', created_b
 const previewModal = ref(false)
 const previewData = ref<any>(null)
 const previewArchive = ref<Archive | null>(null)
+const syncingId = ref<number | null>(null)  // 正在同步的档案ID，用于按钮 loading
 
 // 权限全景（仅管理员可见入口，后端另有 IsMdmAdmin 403 拦截）
 const isAdmin = ref(false)
@@ -208,6 +209,7 @@ async function handleCreate() {
 // 刷新预检工作流：先预检源与档案差异，有变化弹窗确认后再执行
 async function doRefreshPreview(archive: Archive) {
   previewArchive.value = archive
+  syncingId.value = archive.id
   try {
     const res = await archiveApi.refreshPreview(archive.id)
     previewData.value = res.data
@@ -224,7 +226,13 @@ async function doRefreshPreview(archive: Archive) {
     }
     previewModal.value = true
   } catch (e: any) {
-    message.error(extractApiError(e) || '预检失败')
+    if (e.message && e.message.includes('timeout')) {
+      message.error('预检超时：源数据量较大（约20万条），请耐心等待60秒左右')
+    } else {
+      message.error(extractApiError(e) || '预检失败')
+    }
+  } finally {
+    syncingId.value = null
   }
 }
 

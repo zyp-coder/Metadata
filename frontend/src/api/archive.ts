@@ -30,7 +30,7 @@ export const archiveApi = {
   refreshData: (id: number, operatedBy?: string) =>
     api.post<Archive>(`/archives/${id}/refresh-data/`, { operated_by: operatedBy || 'system' }),
   refreshPreview: (id: number) =>
-    api.get<any>(`/archives/${id}/refresh-preview/`),
+    api.get<any>(`/archives/${id}/refresh-preview/`, { timeout: 180000 }),
   // 一致性检查（全量比对 + 差异清单 upsert，不回写源表）
   consistencyCheck: (id: number, operatedBy?: string) =>
     api.post<any>(`/archives/${id}/consistency-check/`, { operated_by: operatedBy || 'system' }),
