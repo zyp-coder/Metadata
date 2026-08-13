@@ -1,5 +1,22 @@
 # 操作详情 — modeling 模块（倒序，最新在前）
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
+## 第一百五十八轮（2026-08-13）标签：诊断、部署未生效、--noreload、dist旧构建、编辑修改不行
+**任务**：用户反馈「为什么还是不行，我用编辑来修改不行」（第一百五十七轮挂载字段放宽+一对多落地后，编辑挂载仍失败）。
+**读取文件**：
+- `.ai/session.md`、`output/darc/dev-diary-archive.md`（用户改动已提交，无 diff）
+- `backend/apps/modeling/serializers.py`（L374-395 validate 已放宽，无主键校验）
+- `frontend/src/views/modeling/DomainFieldMapping.vue`（openEdit L1485-1526 回填正常；detail 分栏模板无禁选；handleSubmit 先建后删+detail PATCH 正常；dcModal 编辑模式 4 处 `dcEditingId ? field-item--disabled` 禁选为第一百四十二轮设计）
+- git show 6436c2c（第一百五十六轮）：serializers validate 仍含 `if target_f and not target_f.is_primary_key: raise '明细子表关系的目标字段必须是目标表的主键字段'`
+- 进程/端口/构建时间实证
+**变更摘要**：无代码变更（纯诊断轮）。证据链：
+1. 后端进程 35252（manage.py runserver 0.0.0.0:8000 **--noreload**）启动于 8/12 16:56:50 < serializers.py 最后修改 8/13 15:20:02 → **本地后端实际跑第一百五十六轮代码**（validate 仍强校验主键，选 GROUP_ID 保存必 400）
+2. frontend/dist 全部产物构建于 8/8 17:08:50 → 156/157 轮前端改动（非主键可选、左右分栏）未进入
+3. 本地端口全景：8000=Django（旧）、8080=edb Apache（无关）、无 nginx/vite/serve 服务 dist → **本地无本项目前端服务**
+4. git：157 轮改动 5f4d81c+c9fd200 于 8/13 15:29 已推送 origin master；deploy/sync.sh 路径已修正（b9a4a2f，/opt/metadata）
+**结论**：用户「编辑点不动/保存报主键错」= 旧代码必然现象，非功能缺失。代码本身已就绪。
+**验证**：无需测试（无代码变更）；部署验证待用户执行。
+**遗留**：用户确认访问服务器 + 将重新跑 deploy/sync.sh 后再试；若部署后仍不行再排查（需部署日志/报错信息）。**教训**：--noreload 后端改代码后必须手动重启、dist 必须重建，用户报「功能不行」先查运行版本再查代码。
+
 ## 第一百五十七轮（2026-08-13）标签：方向修正、挂载字段任意键、一对多归属、GROUP_ID、同步归属机制
 **任务**：用户方向性纠正——「为什么和预组合表的关联字段只能是主键呢？？？我们的设计应该是任何键啊」+ 拍板方案B「B，支持挂载的字段一对多啊。。场景很现实啊。。我的是物料主数据，物料表和物料分组预组合表的关联。。肯定是用GROUPID来关联的啊」；AskUserQuestion 确认一对多方向=明细行挂到所有同值主记录（推荐项）。
 **读取文件**：

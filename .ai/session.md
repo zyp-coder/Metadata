@@ -1,15 +1,16 @@
 # 会话接力 — 主文件（当前状态 + 功能索引）
 > 启动只读本文件（rule §3）。历史详情按模块存于 `.ai/session-details/<模块>.md`（archive / modeling / uxqa / project / early-logs），确认需求后按「模块+功能标签/第N轮」grep 加载，禁止全量读。
 ## 当前会话状态
-- **当前阶段**：第一百五十七轮（已完成）——方向修正：挂载字段放宽为任意键 + 同步按挂载字段一对多归属，105/105 测试 PASS
-- **活跃模块**：modeling、archive、frontend
+- **当前阶段**：第一百五十八轮（诊断完成）——「用编辑修改不行」根因=部署未生效（本地后端 8/12 --noreload 跑旧代码 + dist 8/8 旧构建 + 本地无前端服务）；用户确认访问服务器，将重新 sync 部署后再验证
+- **活跃模块**：modeling、archive、frontend、deploy
 ### 最近 3 轮详情（满 3 轮后最旧一轮下沉到详情文件）
-- **本次操作**：2026-08-13 — 第一百五十七轮：用户方向性纠正「为什么和预组合表的关联字段只能是主键？应该是任何键」+ 拍板方案B（同步按挂载字段归属）+ GROUP_ID 一对多场景——后端 _sync_detail_rows 归属机制改造（挂载字段 target_field 构建归属键+existing_records 多值索引+明细行循环全部同值主记录+代表行按挂载值分组共享）+ serializers 移除主键校验 + detail-check 简化 + 前端主表字段全可选（6 处）；新测试 DetailSyncOneToManyTest 3 条；105/105 PASS；constitution 已追加方向修正决策
-- **上次操作**：2026-08-13 — 第一百五十六轮：测试报告1问题（新建映射弹窗预组合关系表单无匹配字段点选、非左源右目标设计）——detail 分支 a-select 下拉（主表/预组合/关联字段）改为左右分栏：左侧预组合列表（点选+管理注册入口+行键小字）+关联字段列表（点选+推荐tag）、中间箭头、右侧主表列表（点选）+主表字段列表（点选仅主键可选，非主键disabled）；新增 selectDetailSourceField/selectDetailTargetField；配置摘要/主键警告保留；form 结构不变。验证：vue-tsc --noEmit 0 errors；已commit+push（ab4c32c）
-- **更早操作**：2026-08-13 — 第一百五十二轮：测试报告4问题，分批处理。批2+3（Issues 3-4）：③后端 FieldMapping 模型加 join_type（JoinType.LEFT/INNER，迁移0033）+ 序列化器暴露 + 同步引擎四场景适配（_join_header_rows 参数 join_type、_upsert_dimension_via_mapping `inner` 跳过无匹配、_sync_detail_rows nested_sources `inner` 跳过明细行）+ 前端 JOIN 类型选择器（关系类型右侧并列）+ 前端列表 join_type 列 + TypeScript 类型扩展 + ④弹窗宽度 640→960px + 引用表单左右分栏（源表+字段可点选列表 | 箭头 | 目标表+字段可点选列表）+ field-panel/field-item 样式。验证：vue-tsc 0 errors + django check 0 + 102 tests 0.716s PASS
+- **本次操作**：2026-08-13 — 第一百五十八轮（诊断轮）：用户反馈「为什么还是不行，我用编辑来修改不行」。排查证据链：后端进程 8/12 16:56 启动（--noreload 不热重载）→ 实际跑第一百五十六轮代码（validate 仍含「目标字段必须是主键」强校验）；frontend/dist 8/8 构建 → 156/157 轮前端改动全未进入；本地无任何前端服务进程（8080=edb Apache 无关）→ 用户实际访问服务器。结论：157 轮改动（5f4d81c，8/13 15:29 已推送）未部署，用户所遇「编辑点不动/保存报主键错」= 旧代码必然现象。用户确认访问服务器 + 将重新跑 deploy/sync.sh 验证
+- **上次操作**：2026-08-13 — 第一百五十七轮：方向修正（用户拍板B）：挂载字段放宽为任意键 + 同步按挂载字段值归属一对多（_sync_detail_rows 归属键改造+existing_records 多值索引+明细行循环全部同值主记录+代表行按挂载值分组共享）；serializers 移除主键校验+detail-check 简化+前端主表字段全可选；新测试 3 条；105/105 PASS；constitution 已追加决策（详见 session-details/modeling.md）
+- **更早操作**：2026-08-13 — 第一百五十六轮：测试报告1问题——detail 分支 a-select 下拉改为左右分栏（预组合列表+关联字段 | 箭头 | 主表+主表字段点选，非主键 disabled）；新增 selectDetailSourceField/selectDetailTargetField；vue-tsc 0 errors；commit+push（ab4c32c）（详见 session-details/modeling.md）
 ## 功能索引（倒序，每轮一行；完整性/确认点自本次迁移后开始记录）
 | 轮次 | 日期 | 模块 | 功能标签 | 一句话摘要 | 完整性 | 确认点 |
 |------|------|------|----------|------------|--------|--------|
+| 第一百五十八轮 | 2026-08-13 | modeling、archive、deploy | 诊断、部署未生效、--noreload、dist旧构建、sync.sh | 用户反馈「用编辑修改不行」：排查根因=部署未生效——本地后端 8/12 --noreload 启动（跑 156 轮代码，validate 仍强校验主键）+ dist 8/8 旧构建 + 本地无前端服务；157 轮改动（5f4d81c）已推送未部署；用户确认访问服务器，重新 sync 部署后验证 | N-A | 1问/0改向 |
 | 第一百五十七轮 | 2026-08-13 | modeling、archive、frontend | /modeling/domains/2/mappings、挂载字段、一对多、GROUP_ID、同步归属、方向修正 | 方向修正（用户拍板B）：挂载字段放宽为任意键（不限定主键）+ 同步按挂载字段值归属一对多（_sync_detail_rows 归属键改造+existing_records 多值索引+明细行循环全部同值主记录+代表行按挂载值分组共享）；serializers 移除主键校验+detail-check 简化+前端主表字段全可选；新测试 DetailSyncOneToManyTest 3 条；全套 105/105 PASS；constitution 已追加决策 | 闸✓记✓拓✓测✓ | 2问/0改向 |
 | 第一百五十六轮 | 2026-08-13 | modeling、frontend | /modeling/domains/2/mappings、测试报告、预组合关系表单、左右分栏、左源右目标 | 测试报告1问题：新建映射弹窗预组合关系（detail）表单由 a-select 下拉改为左右分栏——预组合列表+关联字段点选 | 箭头 | 主表列表+主表字段（仅主键可选），配置摘要保留；vue-tsc 0 errors；已commit+push（ab4c32c） | 闸✓记✓拓✓测✓ | 0问/0改向 |
 | 第一百五十三轮 | 2026-08-13 | project、deploy | release.ps1、sync.sh、一键发布、服务器同步、/opt/metadata | 新增本地一键发布脚本 scripts/release.ps1（build 前端→git add/commit/push，失败中止不提交）+ 服务器同步脚本 deploy/sync.sh（git pull→npm run build→重建 backend 自动 migrate→nginx reload）；服务器 /opt/metadata/deploy 有 Node/npm；双脚本语法验证通过（PS Parser + bash -n） | 闸✓记✓拓✓测✓（无新增路径） | 1问/0改向 |
