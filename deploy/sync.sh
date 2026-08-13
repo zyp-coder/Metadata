@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # sync.sh - MetaData002 服务器一键同步
-# Usage: bash /opt/MetaData002/deploy/sync.sh
+# Usage: bash /opt/metadata/deploy/sync.sh
 
-cd /opt/MetaData002
+cd /opt/metadata
 git pull origin master
 cd frontend && npm run build
 cd ../deploy

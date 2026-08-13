@@ -60,7 +60,7 @@ Pop-Location
 if ($pushCode -eq 0) {
     Write-Host '========================================' -ForegroundColor Cyan
     Write-Host 'Pushed OK.' -ForegroundColor Green
-    Write-Host 'Next : 服务器上执行 bash /opt/MetaData002/deploy/sync.sh' -ForegroundColor Cyan
+    Write-Host 'Next : 服务器上执行 bash /opt/metadata/deploy/sync.sh' -ForegroundColor Cyan
     Write-Host '========================================' -ForegroundColor Cyan
 } else {
     Write-Host 'PUSH FAILED (pre-push 测试未过或网络问题，commit 已生成未推送)' -ForegroundColor Red
