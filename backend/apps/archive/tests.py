@@ -1024,3 +1024,127 @@ class DetailSyncOneToManyTest(TestCase):
         stats = self._run_sync(rows)
         self.assertEqual(stats['details_created'], 0)
         self.assertEqual(ArchiveRecordDetail.objects.count(), 0)
+
+
+# ── 批1①/批2：conditions null 修复 + reference 筛选条件（2026-08-13）──
+
+class FieldMappingConditionsApiTest(TestCase):
+    """conditions 字段 API 契约：null 400 锁定（前端修复后不再发送 null）、空数组/列表 200。"""
+
+    def setUp(self):
+        self.client = auth_client()
+        self.domain = Domain.objects.create(name='条件测试域', code='COND_TEST')
+        self.t_src = Table.objects.create(domain=self.domain, name='源表', code='COND_SRC')
+        self.f_src = Field.objects.create(
+            table=self.t_src, name='物料ID', code='MATERIAL_ID',
+            is_primary_key=True, archive_category='base')
+        self.t_tgt = Table.objects.create(domain=self.domain, name='目标表', code='COND_TGT')
+        self.f_tgt = Field.objects.create(
+            table=self.t_tgt, name='物料ID', code='MATERIAL_ID',
+            is_primary_key=True, archive_category='base')
+        Field.objects.create(table=self.t_tgt, name='状态', code='STATUS',
+                             archive_category='base')
+        self.fm = FieldMapping.objects.create(
+            source_table=self.t_src, source_field=self.f_src,
+            target_table=self.t_tgt, target_field=self.f_tgt,
+            relation_type=FieldMapping.RelationType.REFERENCE,
+        )
+
+    def test_patch_conditions_null_400(self):
+        """后端模型 conditions 不接受 null（锁定：前端修复后不再发送 null）"""
+        resp = self.client.patch(f'/api/field-mappings/{self.fm.id}/',
+                                 {'conditions': None}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('不能为 null', resp.json().get('conditions', [''])[0])
+
+    def test_patch_conditions_empty_list_200(self):
+        """无条件 = 空数组（前端修复后的真实发送形态）"""
+        resp = self.client.patch(f'/api/field-mappings/{self.fm.id}/',
+                                 {'conditions': []}, format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.fm.refresh_from_db()
+        self.assertEqual(self.fm.conditions, [])
+
+    def test_patch_conditions_list_200(self):
+        """reference 筛选条件可写入（字段=目标表字段编码，白名单校验在同步期执行）"""
+        resp = self.client.patch(f'/api/field-mappings/{self.fm.id}/',
+                                 {'conditions': [{'field': 'STATUS', 'operator': 'eq', 'value': '启用'}]},
+                                 format='json')
+        self.assertEqual(resp.status_code, 200)
+        self.fm.refresh_from_db()
+        self.assertEqual(self.fm.conditions[0]['field'], 'STATUS')
+
+
+class ReferenceConditionsSyncTest(TestCase):
+    """批2：_upsert_dimension_via_mapping 对 reference 映射透传 conditions（detail 不传，行为不变）。"""
+
+    def setUp(self):
+        from apps.archive.views import ArchiveViewSet
+        from apps.modeling.models import DataSource
+        self.domain = Domain.objects.create(name='引用条件域', code='REFC')
+        self.ds = DataSource.objects.create(
+            name='引用条件数据源', db_type='postgresql', host='localhost', port=5432,
+            db_name='test_db', username='u', password='p')
+        self.t_src = Table.objects.create(domain=self.domain, name='源表', code='REFC_SRC')
+        self.f_src = Field.objects.create(
+            table=self.t_src, name='物料ID', code='MATERIAL_ID',
+            is_primary_key=True, archive_category='base')
+        self.t_tgt = Table.objects.create(domain=self.domain, name='目标表', code='REFC_TGT',
+                                          data_source=self.ds)
+        self.f_tgt = Field.objects.create(
+            table=self.t_tgt, name='物料ID', code='MATERIAL_ID',
+            is_primary_key=True, archive_category='base')
+        Field.objects.create(table=self.t_tgt, name='状态', code='STATUS',
+                             archive_category='base')
+        self.archive = Archive.objects.create(domain=self.domain, name='引用条件档案', schema=[
+            {'code': 'MATERIAL_ID', 'name': '物料ID', 'type': 'string'},
+            {'code': 'NAME', 'name': '名称', 'type': 'string'},
+        ])
+        self.fm = FieldMapping.objects.create(
+            source_table=self.t_src, source_field=self.f_src,
+            target_table=self.t_tgt, target_field=self.f_tgt,
+            relation_type=FieldMapping.RelationType.REFERENCE,
+            conditions=[{'field': 'STATUS', 'operator': 'eq', 'value': '启用'}],
+        )
+        self.viewset = ArchiveViewSet()
+
+    def _run(self):
+        from unittest.mock import patch
+        from apps.archive.views import ArchiveViewSet
+        captured = {}
+
+        def fake_query(table, order_by=None, conditions=None):
+            captured['conditions'] = conditions
+            return [{'MATERIAL_ID': 'M1', 'STATUS': '启用'}]
+
+        code_to_physical = {'MATERIAL_ID': [(self.t_src.id, 'MATERIAL_ID')]}
+        match_channels = {'MATERIAL_ID': [(self.t_src.id, 'MATERIAL_ID'), (self.t_tgt.id, 'MATERIAL_ID')]}
+        stats = {'records_created': 0, 'records_updated': 0, 'tables_synced': 0,
+                 'records_deactivated': 0, 'records_reactivated': 0,
+                 'details_created': 0, 'details_updated': 0, 'details_deactivated': 0,
+                 'errors': [], 'warnings': []}
+        with patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query):
+            self.viewset._upsert_dimension_via_mapping(
+                self.archive, self.t_src, [{'MATERIAL_ID': 'M1'}], code_to_physical,
+                {}, ['MATERIAL_ID'], match_channels, 'system', stats,
+            )
+        return captured
+
+    def test_reference_conditions_passed(self):
+        """reference 映射：筛选条件透传 _query_external_table（过滤目标表行）"""
+        captured = self._run()
+        self.assertEqual(captured['conditions'], self.fm.conditions)
+
+    def test_reference_no_conditions_passes_none(self):
+        """reference 无条件：传 None（不新增 WHERE，与既有路径一致）"""
+        self.fm.conditions = []
+        self.fm.save()
+        captured = self._run()
+        self.assertIsNone(captured['conditions'])
+
+    def test_detail_conditions_not_passed(self):
+        """detail 映射：conditions 不传（明细条件在 detail_config 上，目标表行不过滤）"""
+        self.fm.relation_type = FieldMapping.RelationType.DETAIL
+        self.fm.save()
+        captured = self._run()
+        self.assertIsNone(captured['conditions'])

@@ -1,5 +1,14 @@
 # 操作详情 — modeling 模块（倒序，最新在前）
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
+## 第一百五十九轮（2026-08-13）标签：列表筛选、关系类型下拉、普通关联筛选条件、conditions:null、refConditions、filteredMappings
+**任务**：用户指出「我告诉你什么问题。。我之前要求过这个界面增加一个筛选项的功能。。你还未加进去」——关系管理列表筛选 + reference 筛选条件 + conditions:null 400 修复。范围 AskUserQuestion 确认：批1+批2 一起做（1问/0改向）。
+**读取文件**：DomainFieldMapping.vue（列表模板 L34-83/mappingRows L798-900/弹窗 reference 分支 L446-541/保存逻辑 L1559-1734/openCreate+openEdit 回填 L1466-1526/dcConditions 先例 L253-281+1962-1968/handleDcSubmit 序列化 L1917-1924/onRelationTypeChange L2027-2042）；archive/views.py（_query_external_table L1660 已支持 conditions/_build_conditions_sql L1746 白名单+参数化/_upsert_dimension_via_mapping L2432-2530 L2503 未传/L1328 detail 路径 conditions 先例）；models.py（FieldMapping.conditions JSONField L564 无 null=True；RelationType.REFERENCE L532）；urls.py（field-mappings 路由）；tests.py（DetailSyncEngineTest.test_build_conditions_sql L798 先例）；package.json（build=vue-tsc -b && vite build）
+**变更摘要**：
+- 前端 DomainFieldMapping.vue 7 处：①列表卡片顶部筛选 UI（mappingSearch 搜索框+ mappingTypeFilter 类型下拉）②mappingSearch/mappingTypeFilter ref ③filteredMappings computed（grouping 前过滤，匹配表名/字段名/编码/detail_config_combo）④mappingRows 第一遍循环+第二遍 find 改用 filteredMappings（ER 图仍全量）⑤reference 弹窗 a-row 后行式条件构建器（字段 select=targetFields/操作符 9 种/值 input+in tags/✕/+添加；refConditions ref+addRefCondition/removeRefCondition；openCreate 清空/openEdit 回填 row.conditions/onRelationTypeChange 切换清空）⑥handleSubmit reference 分支重写：conditions:null → 按 refConditions 过滤空 field 行后序列化 {field,operator,value}（in 转数组），无条件传 []
+- 后端 archive/views.py L2503：_upsert_dimension_via_mapping 对 reference 映射透传 conditions（detail 不传，行为不变）
+**状态变更**：无数据迁移；conditions 语义=过滤目标表行（与 detail 的明细行过滤并列）
+**遗留问题**：本地后端 35252 仍跑旧代码（--noreload，未重启）；待用户 sync 部署服务器后验证（搜索框/类型下拉/条件构建器/编辑保存不再报 conditions null）
+
 ## 第一百五十八轮（2026-08-13）标签：诊断、部署未生效、--noreload、dist旧构建、编辑修改不行
 **任务**：用户反馈「为什么还是不行，我用编辑来修改不行」（第一百五十七轮挂载字段放宽+一对多落地后，编辑挂载仍失败）。
 **读取文件**：

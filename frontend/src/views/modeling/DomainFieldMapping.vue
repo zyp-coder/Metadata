@@ -32,6 +32,14 @@
 
     <!-- 映射列表（全屏ER图模式下隐藏） -->
     <a-card v-show="!erFullScreen" :loading="loading" :bordered="false">
+      <!-- 列表筛选（2026-08-13 批1②：搜索框 + 关系类型下拉，参考预组合弹窗 dcListSearch 模式） -->
+      <a-space style="margin-bottom: 12px" wrap>
+        <a-input v-model:value="mappingSearch" placeholder="搜索表名、字段名或编码..." allowClear style="width: 280px" />
+        <a-select v-model:value="mappingTypeFilter" placeholder="关系类型" allowClear style="width: 170px">
+          <a-select-option value="reference">普通关联</a-select-option>
+          <a-select-option value="detail">明细子表（预组合）</a-select-option>
+        </a-select>
+      </a-space>
       <a-table
         :dataSource="mappingRows"
         :columns="mappingColumns"
@@ -538,6 +546,32 @@
                 :description="(hasCompositeSourceKey ? '源表联合主键：' + compositeKeyLabel : '') + (hasCompositeSourceKey && hasCompositeTargetKey ? ' | ' : '') + (hasCompositeTargetKey ? '目标表联合主键：' + targetCompositeKeyLabel : '')" />
             </a-col>
           </a-row>
+          <!-- 筛选条件（2026-08-13 批2：普通关联支持过滤目标表行，复用预组合行式条件构建器，字段=目标表字段） -->
+          <a-form-item label="筛选条件（可选）" help="仅同步满足条件的目标表行，多条件同时满足（AND 关系）">
+            <div style="margin-bottom: 4px">
+              字段 操作符 值（多条件同时满足，自动转为 AND 查询）
+            </div>
+            <div v-for="(cond, idx) in refConditions" :key="idx" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center">
+              <a-select v-model:value="cond.field" style="width: 200px" show-search placeholder="选择字段">
+                <a-select-option v-for="f in targetFields" :key="f.id" :value="f.code">{{ f.name }} ({{ f.code }})</a-select-option>
+              </a-select>
+              <a-select v-model:value="cond.operator" style="width: 130px" placeholder="操作符">
+                <a-select-option value="eq">等于 (=)</a-select-option>
+                <a-select-option value="ne">不等于 (!=)</a-select-option>
+                <a-select-option value="gt">大于 (&gt;)</a-select-option>
+                <a-select-option value="ge">大于等于 (&gt;=)</a-select-option>
+                <a-select-option value="lt">小于 (&lt;)</a-select-option>
+                <a-select-option value="le">小于等于 (&lt;=)</a-select-option>
+                <a-select-option value="in">在列表中</a-select-option>
+                <a-select-option value="starts_with">开头是</a-select-option>
+                <a-select-option value="contains">包含</a-select-option>
+              </a-select>
+              <a-input v-if="cond.operator !== 'in'" v-model:value="cond.value" style="flex: 1" placeholder="值" />
+              <a-select v-else v-model:value="cond.value" mode="tags" style="flex: 1" placeholder="输入值后回车" />
+              <a-button type="text" danger @click="removeRefCondition(idx)" size="small" style="flex-shrink: 0">✕</a-button>
+            </div>
+            <a-button size="small" @click="addRefCondition">+ 添加条件</a-button>
+          </a-form-item>
         </template>
       </a-form>
     </a-modal>
@@ -646,6 +680,9 @@ const domainTables = ref<Table[]>([])
 const sourceFields = ref<any[]>([])
 const targetFields = ref<any[]>([])
 const mappings = ref<any[]>([])
+// 列表筛选（2026-08-13 批1②：搜索词 + 关系类型）
+const mappingSearch = ref('')
+const mappingTypeFilter = ref<string | undefined>(undefined)
 const loading = ref(false)
 const aiMappingLoading = ref(false)
 const modalVisible = ref(false)
@@ -685,6 +722,8 @@ const dcForm = ref<any>({
   display_sort_desc: true, join_type: 'left', conditionsText: '',
 })
 const dcConditions = ref<{ field: string; operator: string; value: any; fieldSource: string }[]>([])
+// 普通关联筛选条件行（2026-08-13 批2：字段=目标表字段，序列化存 FieldMapping.conditions）
+const refConditions = ref<{ field: string; operator: string; value: any }[]>([])
 const dcSourceFields = ref<any[]>([])
 const dcHeaderFields = ref<any[]>([])
 const dcDetectingRowKey = ref(false)
@@ -794,6 +833,23 @@ const dcColumns = [
   { title: '操作', key: 'action', width: 110 },
 ]
 
+// 列表筛选后的映射（2026-08-13 批1②：grouping 前过滤，避免复合行拆散；ER 图仍用全量 mappings）
+const filteredMappings = computed(() => {
+  const q = mappingSearch.value.trim().toLowerCase()
+  const t = mappingTypeFilter.value
+  return mappings.value.filter((m: any) => {
+    if (t && (m.relation_type || 'reference') !== t) return false
+    if (!q) return true
+    const hay = [
+      m.source_table_name, m.target_table_name,
+      m.source_field_name, m.target_field_name,
+      m.source_table_code, m.target_table_code,
+      m.detail_config_combo,
+    ].filter(Boolean).join(' ').toLowerCase()
+    return hay.includes(q)
+  })
+})
+
 // 映射列表数据：同一对表的映射合并为一行（联合字段=一行，独立关系=一行）
 const mappingRows = computed(() => {
   // 构建 PK 字段 ID 集合（用于判断字段是否为主键）
@@ -807,7 +863,7 @@ const mappingRows = computed(() => {
   // 第一遍：按 (source_table, target_table) 分组
   const groups: Record<string, any> = {}
   const groupOrder: string[] = []
-  for (const m of mappings.value) {
+  for (const m of filteredMappings.value) {
     const key = `${m.source_table}-${m.target_table}`
     if (!groups[key]) {
       groups[key] = {
@@ -887,7 +943,7 @@ const mappingRows = computed(() => {
       }
     } else {
       // 单条映射（普通映射 或 多对一/一对多但不跨多字段）
-      const m = mappings.value.find((mm) => mm.source_table === g.source_table && mm.target_table === g.target_table)!
+      const m = filteredMappings.value.find((mm) => mm.source_table === g.source_table && mm.target_table === g.target_table)!
       return {
         ...m,
         is_composite: false,
@@ -1479,6 +1535,7 @@ function openCreate() {
   }
   sourceFields.value = []
   targetFields.value = []
+  refConditions.value = []
   modalVisible.value = true
 }
 
@@ -1508,6 +1565,10 @@ async function openEdit(row: any) {
       form.value.conditionsText = JSON.stringify(row.conditions)
     } catch { /* 保持空 */ }
   }
+  // 回填引用筛选条件行（结构化 -> 可视化行列表）
+  refConditions.value = row.conditions?.length
+    ? row.conditions.map((c: any) => ({ field: c.field, operator: c.operator, value: c.value ?? '' }))
+    : []
   
   // 加载源字段和目标字段
   await Promise.all([loadSourceFields(), loadTargetFields()])
@@ -1706,17 +1767,26 @@ async function handleSubmit() {
           await fieldMappingApi.update(id, detailData)
         }
       } else {
-        // 引用类型，清除可能遗留的 detail 配置
+        // 引用类型，清除可能遗留的 detail 配置（2026-08-13 批1①修复 conditions:null 400：
+        // 后端 JSONField 不接受 null，无条件时传空数组；批2：按条件行序列化传值）
+        const refData: Record<string, any> = {
+          relation_type: 'reference',
+          join_type: form.value.join_type,
+          detail_config: null,
+          row_key_field: null,
+          display_sort_field: null,
+          display_sort_desc: false,
+        }
+        const validConditions = refConditions.value.filter(c => c.field)
+        refData.conditions = validConditions.length > 0
+          ? validConditions.map(c => ({
+              field: c.field,
+              operator: c.operator,
+              value: c.operator === 'in' ? (Array.isArray(c.value) ? c.value : []) : c.value,
+            }))
+          : []
         for (const id of createdIds) {
-          await fieldMappingApi.update(id, {
-            relation_type: 'reference',
-            join_type: form.value.join_type,
-            detail_config: null,
-            row_key_field: null,
-            display_sort_field: null,
-            display_sort_desc: false,
-            conditions: null,
-          })
+          await fieldMappingApi.update(id, refData)
         }
       }
     }
@@ -1967,6 +2037,14 @@ function removeDcCondition(idx: number) {
   dcConditions.value.splice(idx, 1)
 }
 
+function addRefCondition() {
+  refConditions.value.push({ field: '', operator: 'eq', value: '' })
+}
+
+function removeRefCondition(idx: number) {
+  refConditions.value.splice(idx, 1)
+}
+
 function onDetailConfigChange(configId: number | undefined) {
   form.value.detail_config = configId || null
   const cfg = configId ? domainDetailConfigs.value.find((c: any) => c.id === configId) : null
@@ -2031,6 +2109,8 @@ function onRelationTypeChange(value: string) {
     form.value.display_sort_desc = true
     form.value.conditionsText = ''
     form.value.detail_config = null
+    // 切换关系类型时清空引用筛选条件（detail 条件在子表行上、reference 条件在目标表行上，语义不同）
+    refConditions.value = []
   } else {
     // 明细子表：源表/源字段由子表决定，清空待选
     form.value.source_table = null

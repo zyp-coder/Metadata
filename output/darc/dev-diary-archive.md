@@ -2,6 +2,22 @@
 
 > 记录 archive 模块编码实现的关键数据流与实现要点，供后续影响分析使用。
 
+## 2026-08-13 — 普通关联筛选条件接入同步引擎（第一百五十九轮）
+
+### 变更背景
+批2③：reference 映射支持筛选条件（前端弹窗条件构建器 → FieldMapping.conditions），同步时过滤目标表行。
+
+### 关键实现（_upsert_dimension_via_mapping）
+- **L2503 接入点**：`trows = self._query_external_table(target, order_by=t_order_by)` → 增加 conditions 透传：仅 `fm.relation_type == RelationType.REFERENCE and fm.conditions` 时传 conditions；detail 不传（明细条件在 detail_config 上、目标表行不过滤，行为不变）
+- `_query_external_table`/`_build_conditions_sql` 零改动（2026-08-08 已支持 conditions，白名单+参数化防注入）
+
+### 新增测试（backend/apps/archive/tests.py）
+- `FieldMappingConditionsApiTest`（域 COND_TEST）：PATCH conditions=null → 400「不能为 null」（锁定模型契约，前端修复后不再发送）；conditions=[] → 200；conditions 列表 → 200 落库
+- `ReferenceConditionsSyncTest`（域 REFC，mock _query_external_table）：reference 带条件 → 透传 conditions；reference 无条件 → None；detail → None（行为不变）
+
+### 验证
+新增 6/6 PASS + apps.archive 全套 60/60 PASS
+
 ## 2026-08-13 — 同步引擎挂载归属改造：按挂载字段一对多（第一百五十七轮）
 
 ### 变更背景

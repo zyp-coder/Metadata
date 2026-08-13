@@ -1,15 +1,16 @@
 # 会话接力 — 主文件（当前状态 + 功能索引）
 > 启动只读本文件（rule §3）。历史详情按模块存于 `.ai/session-details/<模块>.md`（archive / modeling / uxqa / project / early-logs），确认需求后按「模块+功能标签/第N轮」grep 加载，禁止全量读。
 ## 当前会话状态
-- **当前阶段**：第一百五十八轮（诊断完成）——「用编辑修改不行」根因=部署未生效（本地后端 8/12 --noreload 跑旧代码 + dist 8/8 旧构建 + 本地无前端服务）；用户确认访问服务器，将重新 sync 部署后再验证
-- **活跃模块**：modeling、archive、frontend、deploy
+- **当前阶段**：第一百五十九轮（编码完成）——批1①conditions:null bug 修复 + 批1②关系管理列表筛选（搜索框+类型下拉） + 批2③普通关联筛选条件（前端弹窗条件构建器+后端同步透传）；新增 6 测试 + archive 全套 60/60 PASS + vue-tsc 0 + build 通过；待提交推送 + 用户 sync 部署验证
+- **活跃模块**：modeling、archive、frontend
 ### 最近 3 轮详情（满 3 轮后最旧一轮下沉到详情文件）
-- **本次操作**：2026-08-13 — 第一百五十八轮（诊断轮）：用户反馈「为什么还是不行，我用编辑来修改不行」。排查证据链：后端进程 8/12 16:56 启动（--noreload 不热重载）→ 实际跑第一百五十六轮代码（validate 仍含「目标字段必须是主键」强校验）；frontend/dist 8/8 构建 → 156/157 轮前端改动全未进入；本地无任何前端服务进程（8080=edb Apache 无关）→ 用户实际访问服务器。结论：157 轮改动（5f4d81c，8/13 15:29 已推送）未部署，用户所遇「编辑点不动/保存报主键错」= 旧代码必然现象。用户确认访问服务器 + 将重新跑 deploy/sync.sh 验证
-- **上次操作**：2026-08-13 — 第一百五十七轮：方向修正（用户拍板B）：挂载字段放宽为任意键 + 同步按挂载字段值归属一对多（_sync_detail_rows 归属键改造+existing_records 多值索引+明细行循环全部同值主记录+代表行按挂载值分组共享）；serializers 移除主键校验+detail-check 简化+前端主表字段全可选；新测试 3 条；105/105 PASS；constitution 已追加决策（详见 session-details/modeling.md）
-- **更早操作**：2026-08-13 — 第一百五十六轮：测试报告1问题——detail 分支 a-select 下拉改为左右分栏（预组合列表+关联字段 | 箭头 | 主表+主表字段点选，非主键 disabled）；新增 selectDetailSourceField/selectDetailTargetField；vue-tsc 0 errors；commit+push（ab4c32c）（详见 session-details/modeling.md）
+- **本次操作**：2026-08-13 — 第一百五十九轮：用户指出「之前要求过这个界面增加筛选项未加」（留痕漏洞已承认）；批1① handleSubmit reference 清理分支 conditions:null → 按 refConditions 序列化/[]（后端 JSONField 无 null=True 必 400）；批1② 列表卡片顶部搜索框+关系类型下拉（filteredMappings 在 grouping 前过滤，ER 图不受影响）；批2③ 弹窗 reference 分支加行式条件构建器（字段=目标表字段）+ 后端 _upsert_dimension_via_mapping 透传 conditions（仅 reference）；新增 6 测试 + archive 60/60 PASS
+- **上次操作**：2026-08-13 — 第一百五十八轮（诊断轮）：用户反馈「为什么还是不行，我用编辑来修改不行」。排查证据链：后端进程 8/12 16:56 启动（--noreload 不热重载）→ 实际跑第一百五十六轮代码（validate 仍含「目标字段必须是主键」强校验）；frontend/dist 8/8 构建 → 156/157 轮前端改动全未进入；本地无任何前端服务进程（8080=edb Apache 无关）→ 用户实际访问服务器。结论：157 轮改动（5f4d81c，8/13 15:29 已推送）未部署，用户所遇「编辑点不动/保存报主键错」= 旧代码必然现象。用户确认访问服务器 + 将重新跑 deploy/sync.sh 验证
+- **更早操作**：2026-08-13 — 第一百五十七轮：方向修正（用户拍板B）：挂载字段放宽为任意键 + 同步按挂载字段值归属一对多（_sync_detail_rows 归属键改造+existing_records 多值索引+明细行循环全部同值主记录+代表行按挂载值分组共享）；serializers 移除主键校验+detail-check 简化+前端主表字段全可选；新测试 3 条；105/105 PASS；constitution 已追加决策（详见 session-details/modeling.md）
 ## 功能索引（倒序，每轮一行；完整性/确认点自本次迁移后开始记录）
 | 轮次 | 日期 | 模块 | 功能标签 | 一句话摘要 | 完整性 | 确认点 |
 |------|------|------|----------|------------|--------|--------|
+| 第一百五十九轮 | 2026-08-13 | modeling、archive、frontend | /modeling/domains/2/mappings、列表筛选、关系类型下拉、普通关联筛选条件、conditions:null、_upsert_dimension_via_mapping | 用户指出「之前要求过这个界面增加筛选项未加」；批1①修复 handleSubmit reference 分支 conditions:null→序列化/[]（后端 JSONField 无 null=True 必 400，146 轮引入）；批1②列表卡片加搜索框（表名/字段名/编码）+关系类型下拉（filteredMappings grouping 前过滤，ER 图不受影响）；批2③弹窗 reference 分支加行式条件构建器（字段=目标表字段，存 FieldMapping.conditions）+后端 _upsert_dimension_via_mapping L2503 透传 conditions（仅 reference，detail 行为不变）；新增 6 测试（PATCH null 400 锁定/[] 200/列表 200/透传/无条件 None/detail 不传）+archive 全套 60/60 PASS + vue-tsc 0 + build 通过 | 闸✓记✓拓✓测✓ | 1问/0改向 |
 | 第一百五十八轮 | 2026-08-13 | modeling、archive、deploy | 诊断、部署未生效、--noreload、dist旧构建、sync.sh | 用户反馈「用编辑修改不行」：排查根因=部署未生效——本地后端 8/12 --noreload 启动（跑 156 轮代码，validate 仍强校验主键）+ dist 8/8 旧构建 + 本地无前端服务；157 轮改动（5f4d81c）已推送未部署；用户确认访问服务器，重新 sync 部署后验证 | N-A | 1问/0改向 |
 | 第一百五十七轮 | 2026-08-13 | modeling、archive、frontend | /modeling/domains/2/mappings、挂载字段、一对多、GROUP_ID、同步归属、方向修正 | 方向修正（用户拍板B）：挂载字段放宽为任意键（不限定主键）+ 同步按挂载字段值归属一对多（_sync_detail_rows 归属键改造+existing_records 多值索引+明细行循环全部同值主记录+代表行按挂载值分组共享）；serializers 移除主键校验+detail-check 简化+前端主表字段全可选；新测试 DetailSyncOneToManyTest 3 条；全套 105/105 PASS；constitution 已追加决策 | 闸✓记✓拓✓测✓ | 2问/0改向 |
 | 第一百五十六轮 | 2026-08-13 | modeling、frontend | /modeling/domains/2/mappings、测试报告、预组合关系表单、左右分栏、左源右目标 | 测试报告1问题：新建映射弹窗预组合关系（detail）表单由 a-select 下拉改为左右分栏——预组合列表+关联字段点选 | 箭头 | 主表列表+主表字段（仅主键可选），配置摘要保留；vue-tsc 0 errors；已commit+push（ab4c32c） | 闸✓记✓拓✓测✓ | 0问/0改向 |

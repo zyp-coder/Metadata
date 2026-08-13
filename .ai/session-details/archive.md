@@ -1,5 +1,13 @@
 # 模块详情：archive
 
+### 第一百五十九轮（2026-08-13）标签：普通关联筛选条件、_upsert_dimension_via_mapping、conditions透传、FieldMappingConditionsApiTest、ReferenceConditionsSyncTest
+
+**任务**：批2③ reference 映射筛选条件接入同步引擎（配合前端弹窗条件构建器）。
+**变更摘要**：`_upsert_dimension_via_mapping` L2503 `trows = self._query_external_table(target, order_by=t_order_by)` → 增加 `conds`（仅 `fm.relation_type == RelationType.REFERENCE and fm.conditions` 时传，detail 不传——明细条件在 detail_config 上、目标表行不过滤，行为不变）；`_query_external_table`/`_build_conditions_sql` 零改动（2026-08-08 已支持）。
+**新增测试**：FieldMappingConditionsApiTest（PATCH null 400 锁定「不能为 null」/[] 200/列表 200 落库）+ ReferenceConditionsSyncTest（reference 带条件透传/无条件 None/detail None，mock _query_external_table）。
+**验证**：新增 6/6 PASS + apps.archive 全套 60/60 PASS。
+**遗留**：同步实际过滤效果待服务器部署后全量同步验证（条件字段=目标表字段编码，白名单校验在同步期执行，非法字段会进 stats.errors）。
+
 ### 第一百五十轮（2026-08-12）标签：全量同步实测、走通有数据、SQLite写锁、row_key去重
 
 **任务**：用户要求「你能帮我测试一下先么？先走通有数据的」——实际走通同步流程，把真实数据写入系统。

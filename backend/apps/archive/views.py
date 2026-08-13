@@ -2500,7 +2500,11 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 table=target, is_primary_key=True, status=MField.Status.ACTIVE
             ).first()
             t_order_by = t_pk_field.physical_name or t_pk_field.code if t_pk_field else None
-            trows = self._query_external_table(target, order_by=t_order_by)
+            # 2026-08-13 批2：普通关联支持筛选条件（仅 reference 生效，detail 行为不变）
+            conds = None
+            if fm.relation_type == FieldMapping.RelationType.REFERENCE and fm.conditions:
+                conds = fm.conditions
+            trows = self._query_external_table(target, order_by=t_order_by, conditions=conds)
             if trows is None:
                 continue
             tindex = {}

@@ -2,6 +2,13 @@
 
 > 记录 modeling 模块的 Bug 根因、修复方式与已知耦合点，供后续影响分析使用。
 
+## BUG-2026-0813-01 编辑普通关联点保存报「conditions: 该字段不能为 null」
+- **现象**：用户编辑 EDS_K3_物料 → EDS_K3_物料信息 普通关联，点保存报 `conditions: 该字段不能为 null`；新建也是半成功（create 落库 + 后续清理 PATCH 失败）
+- **根因**：前端 DomainFieldMapping.vue handleSubmit reference 清理分支（146 轮 13a8ac5 引入）`conditions: null`——后端 `FieldMapping.conditions = JSONField(default=list)` 无 null=True → DRF 400；同类排查全前端唯一一处（dcModal detail_config 链路无此问题）
+- **修复**：reference 分支改为按 refConditions 行序列化传值（无条件传 `[]` 不传 null）；顺带批2 落地普通关联筛选条件（见 dev-diary 第一百五十九轮）
+- **验证**：PATCH null 400 锁定测试 + PATCH [] 200 + PATCH 列表 200（FieldMappingConditionsApiTest 3/3）；archive 全套 60/60
+- **教训**：JSONField 传 null 是高频 400 来源——前端清理分支一律传 `[]`（默认值形态），不传 null；
+
 ## BUG-2026-0811-02 关系创建报「字段 source_table, source_field, target_table, target_field 必须能构成唯一集合」
 - **现象**：新建字段映射（物料主表与物料信息表普通关联）点 OK 报 DRF 默认唯一性模板错误，用户不知被哪条已存在关系占用
 - **根因**：FieldMapping `unique_together=(source_table, source_field, target_table, target_field)`（models.py L563），FieldMappingSerializer 无自定义校验器 → DRF UniqueTogetherValidator 默认模板；前端无预检；存量 3 条映射（id=3 销售价目表明细→物料 detail / id=4 物料分组→物料 detail / id=5 物料→物料信息 reference），用户建的四元组与 id=5 重复（AskUserQuestion 确认场景=普通字段关联）

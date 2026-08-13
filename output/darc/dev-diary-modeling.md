@@ -1,6 +1,18 @@
 # 开发日记 - 主数据建模引擎（modeling）
 > 记录 modeling 模块开发过程中的关键实现决策和技术细节。
 ---
+## 2026-08-13 关系管理列表筛选 + 普通关联筛选条件 + conditions:null 修复（第一百五十九轮）
+### 变更背景
+用户指出「之前要求过这个界面增加一个筛选项的功能」未加（留痕漏洞已承认）。范围确认（AskUserQuestion）：批1①conditions:null bug 修复 + 批1②列表筛选 + 批2③普通关联（reference）筛选条件，一起做。
+### 关键实现（DomainFieldMapping.vue，7 处）
+- **批1① conditions:null 修复**：handleSubmit reference 清理分支 `conditions: null` → 按 refConditions 序列化传值（过滤空 field 行；in 操作符 value 转数组），无条件时传 `[]`——后端 JSONField default=list 无 null=True，传 null 必 400（146 轮 13a8ac5 引入，新建半成功/编辑全失败）
+- **批1② 列表筛选**：卡片顶部搜索框（mappingSearch，匹配源/目标表名、字段名、编码、detail_config_combo）+ 关系类型下拉（mappingTypeFilter）；filteredMappings computed 在 mappingRows grouping 前过滤（避免复合行拆散）；mappingRows 第一遍循环+第二遍 find 均改用 filteredMappings；ER 图仍用全量 mappings 不受影响
+- **批2③ reference 筛选条件**：弹窗 reference 分支 a-row 后加行式条件构建器（复用 dcConditions 模式：字段 select=targetFields（目标表字段）/操作符 eq~contains/值 input+in tags/✕/+ 添加条件）；refConditions ref 数组 + addRefCondition/removeRefCondition；openCreate 清空、openEdit 回填（row.conditions → 行）；onRelationTypeChange 切换时清空（detail 条件在子表行、reference 条件在目标表行，语义不同）；保存序列化 `{field, operator, value}`（field=目标表字段 code）
+### 变更文件清单
+- `frontend/src/views/modeling/DomainFieldMapping.vue`（7 处）
+### 验证
+vue-tsc 0 errors + vite build 通过；后端 PATCH 契约测试（null 400/[] 200/列表 200）与同步透传测试见 dev-diary-archive 第一百五十九轮
+
 ## 2026-08-13 挂载字段放宽为任意键（方向修正，第一百五十七轮）
 ### 变更背景
 用户方向性纠正：detail 挂载的主表端关联字段不应限定主键，应是任何键——物料主数据场景：物料表↔物料分组预组合表用 GROUP_ID 关联（分组头 GROUP_ID 非主键业务键，一组合多物料=一对多）。用户拍板方案B（同步按挂载字段归属），AskUserQuestion 确认一对多=明细行挂到所有同值主记录。
