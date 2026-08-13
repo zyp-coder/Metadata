@@ -7,16 +7,18 @@
 - [backend/apps/archive/serializers.py](file://backend/apps/archive/serializers.py)
 - [backend/apps/archive/urls.py](file://backend/apps/archive/urls.py)
 - [backend/apps/modeling/models.py](file://backend/apps/modeling/models.py)
+- [backend/apps/modeling/serializers.py](file://backend/apps/modeling/serializers.py)
 - [backend/apps/modeling/urls.py](file://backend/apps/modeling/urls.py)
 - [backend/apps/modeling/migrations/0033_fieldmapping_join_type.py](file://backend/apps/modeling/migrations/0033_fieldmapping_join_type.py)
+- [backend/apps/modeling/migrations/0034_detailtableconfig_join_type.py](file://backend/apps/modeling/migrations/0034_detailtableconfig_join_type.py)
 </cite>
 
 ## 更新摘要
 **变更内容**   
-- 增强了档案同步引擎的JOIN行为支持，_join_header_rows和_sync_detail_rows方法现在接受join_type参数实现不同的JOIN逻辑
-- 扩展了查询条件操作符支持'starts_with'和'contains'操作
-- 更新了FieldMapping模型的连接类型配置选项
-- 完善了预组合头表与明细表的关联关系处理
+- 为DetailTableConfig模型新增JOIN类型配置选项，支持LEFT JOIN和INNER JOIN两种模式
+- 增强了预组合头表与明细表的连接行为控制，用于同步过程中的数据关联策略
+- 更新了FieldMapping模型的连接类型配置选项，保持一致的JOIN行为控制
+- 完善了嵌套数据源JOIN支持，每个嵌套数据源可独立配置JOIN类型
 
 ## 目录
 1. [简介](#简介)
@@ -33,7 +35,7 @@
 ## 简介
 本文件为 MetaData002 系统的"档案配置管理"提供完整的 API 文档，覆盖档案与记录的 CRUD、Schema 同步、数据刷新、版本回滚、一致性检查、变更批次与明细、以及档案对外数据服务 API 的配置。同时说明字段定义、验证规则、业务约束、档案与数据源的关联关系配置接口，并给出请求响应示例要点与状态流转、权限控制机制说明。
 
-**更新** 本次更新重点增强了档案同步引擎的JOIN行为支持和查询条件操作符功能。
+**更新** 本次更新重点增强了档案同步引擎的JOIN行为支持和查询条件操作符功能，特别是DetailTableConfig的JOIN类型配置选项。
 
 ## 项目结构
 后端采用 Django + DRF 的模块化设计：
@@ -51,12 +53,14 @@ A_urls["urls.py"]
 end
 subgraph "建模模块"
 M_models["models.py"]
+M_serializers["serializers.py"]
 M_urls["urls.py"]
 end
 A_views --> A_models
 A_views --> A_serializers
 A_urls --> A_views
 M_urls --> M_models
+M_models --> M_serializers
 ```
 
 图表来源
@@ -76,10 +80,11 @@ M_urls --> M_models
 - 数据服务 API ArchiveApi：对外暴露档案数据的接口配置（路径、暴露字段、筛选条件、角色授权）
 - 变更批次与明细：ArchiveChangeBatch / ArchiveChangeDetail：统一记录源侧同步与档案侧编辑的变更
 - 一致性检查：ConsistencyIssue / ConsistencyCheckRule / ConsistencyIssueHistory：支持组合字段成员一致性、档案与源差异、孤立源记录、Schema 漂移四类检查
+- **DetailTableConfig**：明细子表注册配置，支持预组合头表+明细表的JOIN类型配置
 
 章节来源
 - [backend/apps/archive/models.py:5-379](file://backend/apps/archive/models.py#L5-L379)
-- [backend/apps/modeling/models.py:4-489](file://backend/apps/modeling/models.py#L4-L489)
+- [backend/apps/modeling/models.py:4-625](file://backend/apps/modeling/models.py#L4-L625)
 
 ## 架构总览
 档案系统围绕"域-表-字段-标准字段-计算字段"的建模体系，结合"双层存储+合并物化"的数据模型，实现从多源拉取、合并、人工覆盖、计算重算、版本回滚与一致性校验的全链路能力。
@@ -131,6 +136,28 @@ class ComputedField {
 +execution_order
 +output_type
 +release_to_archive
+}
+class DetailTableConfig {
++domain
++table
++header_table
++header_link_field
++detail_link_field
++row_key_field
++display_sort_field
++display_sort_desc
++join_type
++conditions
+}
+class FieldMapping {
++source_table
++source_field
++target_table
++target_field
++relation_type
++detail_config
++join_type
++conditions
 }
 class Archive {
 +domain
@@ -188,11 +215,17 @@ Field --> Table : "属于表"
 StandardField --> Domain : "所属域"
 StandardField --> Field : "成员"
 ComputedField --> Domain : "所属域"
+DetailTableConfig --> Domain : "所属域"
+DetailTableConfig --> Table : "明细子表"
+DetailTableConfig --> Table : "头表(可选)"
+FieldMapping --> Table : "源表/目标表"
+FieldMapping --> Field : "源字段/目标字段"
+FieldMapping --> DetailTableConfig : "子表配置"
 Table --> DataSource : "外部数据源"
 ```
 
 图表来源
-- [backend/apps/modeling/models.py:4-489](file://backend/apps/modeling/models.py#L4-L489)
+- [backend/apps/modeling/models.py:4-625](file://backend/apps/modeling/models.py#L4-L625)
 - [backend/apps/archive/models.py:5-379](file://backend/apps/archive/models.py#L5-L379)
 
 ## 详细组件分析
@@ -326,11 +359,50 @@ Table --> DataSource : "外部数据源"
   - 字段维护方 ownership：source（源系统维护，档案侧只读）/archive（档案维护，档案侧可编辑）
   - 标准字段 primary_field：组合字段的主字段决定数据源头与一致性检查口径
 
-**更新** 新增了连接类型（join_type）配置，支持LEFT JOIN和INNER JOIN两种模式。
+**更新** 新增了连接类型（join_type）配置，支持LEFT JOIN和INNER JOIN两种模式，特别针对DetailTableConfig的预组合场景。
 
 章节来源
 - [backend/apps/modeling/urls.py:1-20](file://backend/apps/modeling/urls.py#L1-L20)
-- [backend/apps/modeling/models.py:4-489](file://backend/apps/modeling/models.py#L4-L489)
+- [backend/apps/modeling/models.py:4-625](file://backend/apps/modeling/models.py#L4-L625)
+
+### DetailTableConfig JOIN类型配置
+
+**新增功能** DetailTableConfig模型现在支持灵活的JOIN行为配置，用于控制预组合头表与明细表在同步过程中的连接方式：
+
+#### JOIN类型配置选项
+- **LEFT JOIN**（默认）：保留无匹配头表的明细行，适用于需要完整数据集合的场景
+- **INNER JOIN**：仅保留有匹配头表的明细行，适用于严格数据完整性要求的场景
+
+#### 预组合头表JOIN支持
+- `_join_header_rows` 方法接受 `join_type` 参数控制连接行为
+- 当 `join_type='inner'` 时，无匹配头表的明细行将被过滤掉
+- 当 `join_type='left'` 时，即使没有匹配的头表数据，明细行也会被保留
+
+#### 嵌套数据源JOIN支持
+- `_sync_detail_rows` 方法中的嵌套数据源加载也支持JOIN类型配置
+- 每个嵌套数据源可以独立配置JOIN类型，满足不同数据关联需求
+
+#### DetailTableConfig字段定义
+```json
+{
+  "domain": "所属域ID",
+  "table": "明细子表ID", 
+  "header_table": "头表ID（可选）",
+  "header_link_field": "头表关联字段ID",
+  "detail_link_field": "明细表关联字段ID",
+  "row_key_field": "明细行键列ID",
+  "display_sort_field": "代表行排序字段ID",
+  "display_sort_desc": "代表行降序标志",
+  "join_type": "left|inner", // 新增：JOIN类型配置
+  "conditions": "筛选条件数组"
+}
+```
+
+章节来源
+- [backend/apps/modeling/models.py:577-625](file://backend/apps/modeling/models.py#L577-L625)
+- [backend/apps/modeling/serializers.py:257-302](file://backend/apps/modeling/serializers.py#L257-L302)
+- [backend/apps/archive/views.py:1803-1840](file://backend/apps/archive/views.py#L1803-L1840)
+- [backend/apps/modeling/migrations/0034_detailtableconfig_join_type.py:1-19](file://backend/apps/modeling/migrations/0034_detailtableconfig_join_type.py#L1-L19)
 
 ### 增强JOIN行为支持
 
@@ -378,7 +450,7 @@ Table --> DataSource : "外部数据源"
 ```
 
 章节来源
-- [backend/apps/archive/views.py:1780-1798](file://backend/apps/archive/views.py#L1780-L1798)
+- [backend/apps/archive/views.py:1780-1798](file://backend/apps/archive/views.py#L1780-1798)
 - [backend/apps/modeling/models.py:564-565](file://backend/apps/modeling/models.py#L564-L565)
 
 ## 依赖关系分析
@@ -386,6 +458,7 @@ Table --> DataSource : "外部数据源"
 - 数据同步依赖建模模块：_sync_data_from_sources/_query_external_table 调用 DataSource 配置与跨库连接
 - 计算字段重算依赖 computed_service：batch_recalculate/recalculate_affected
 - 一致性检查依赖 StandardField/Field/Table 的结构信息
+- **DetailTableConfig依赖**：预组合场景下依赖头表和明细表的关联关系配置
 
 ```mermaid
 sequenceDiagram
@@ -395,11 +468,14 @@ participant View as "ArchiveViewSet"
 participant Model as "Archive/ArchiveRecord"
 participant DS as "DataSource(建模)"
 participant Calc as "ComputedService"
+participant DTC as "DetailTableConfig"
 Client->>Router : POST /archives/{id}/sync-schema
 Router->>View : sync_schema(pk)
 View->>Model : 生成新schema并保存(schema_version+1)
 View->>DS : 查询本地/外部表数据
 DS-->>View : 返回行数据
+View->>DTC : 获取预组合JOIN配置
+DTC-->>View : 返回join_type配置
 View->>Model : 换底(source_data)+合并(data)+血缘(lineage)
 View->>Calc : 批量重算计算字段
 Calc-->>View : 重算结果
@@ -412,7 +488,7 @@ View-->>Client : 档案详情 + sync_stats
 
 章节来源
 - [backend/apps/archive/views.py:246-329](file://backend/apps/archive/views.py#L246-L329)
-- [backend/apps/modeling/models.py:4-489](file://backend/apps/modeling/models.py#L4-L489)
+- [backend/apps/modeling/models.py:4-625](file://backend/apps/modeling/models.py#L4-L625)
 
 ## 性能考虑
 - 数据拉取限制：外部表查询默认 LIMIT/TOP 1000，避免大表拖慢
@@ -422,6 +498,7 @@ View-->>Client : 档案详情 + sync_stats
 - 一致性检查：支持规则失效过滤，避免无效差异堆积
 - 计算字段重算：按执行顺序批量处理，失败不阻塞主流程
 - **JOIN优化**：INNER JOIN可减少不必要的数据传输，LEFT JOIN确保数据完整性
+- **预组合优化**：DetailTableConfig的JOIN类型配置可优化预组合场景的性能表现
 
 ## 故障排查指南
 - 同步失败：查看 sync_stats.errors 与 ArchiveSyncLog.details，定位具体表或数据源问题
@@ -430,6 +507,7 @@ View-->>Client : 档案详情 + sync_stats
 - 权限拒绝：记录创建被禁止（403），应通过源侧同步而非档案端新增
 - 计算字段重算失败：查看 warnings/errors，检查表达式依赖与执行顺序
 - **JOIN相关问题**：检查join_type配置是否符合预期，确认关联字段映射正确
+- **预组合问题**：验证DetailTableConfig的头表与明细表关联字段配置是否正确
 
 章节来源
 - [backend/apps/archive/views.py:930-1085](file://backend/apps/archive/views.py#L930-L1085)
@@ -439,7 +517,7 @@ View-->>Client : 档案详情 + sync_stats
 ## 结论
 档案配置 API 以"域-表-字段-标准字段-计算字段"为核心，结合"双层存储+合并物化"的数据模型，提供了完善的 CRUD、Schema 同步、数据刷新、版本回滚、一致性检查与变更追踪能力。通过数据源配置与字段维护方（ownership）控制，实现了源系统与档案侧的职责分离与数据治理。
 
-**更新** 本次增强功能进一步提升了档案同步的灵活性和数据处理能力，特别是JOIN行为和查询操作符的扩展，使得系统能够更好地适应复杂的数据关联场景和查询需求。建议在生产环境配合权限控制与审计日志，确保数据安全与可追溯性。
+**更新** 本次增强功能进一步提升了档案同步的灵活性和数据处理能力，特别是DetailTableConfig的JOIN类型配置和查询操作符的扩展，使得系统能够更好地适应复杂的数据关联场景和查询需求。建议在生产环境配合权限控制与审计日志，确保数据安全与可追溯性。
 
 ## 附录
 
@@ -452,11 +530,16 @@ View-->>Client : 档案详情 + sync_stats
   - 验证：source 字段不可编辑；计算字段不允许人工覆盖；合并时按 ownership 优先级
 - 数据服务 API ArchiveApi
   - 字段：archive、name、path（唯一）、exposed_fields（空=全部）、filter_conditions、auth_roles、status（enabled/disabled）
+- **DetailTableConfig**
+  - 字段：domain、table、header_table（可选）、header_link_field、detail_link_field、row_key_field、display_sort_field、display_sort_desc、join_type、conditions
+  - 验证：预组合必须同时配置头表、头表关联字段、明细表关联字段；关联字段必须属于对应表
 
 章节来源
 - [backend/apps/archive/models.py:5-172](file://backend/apps/archive/models.py#L5-L172)
 - [backend/apps/archive/serializers.py:51-98](file://backend/apps/archive/serializers.py#L51-L98)
 - [backend/apps/archive/serializers.py:530-552](file://backend/apps/archive/serializers.py#L530-552)
+- [backend/apps/modeling/models.py:577-625](file://backend/apps/modeling/models.py#L577-L625)
+- [backend/apps/modeling/serializers.py:284-302](file://backend/apps/modeling/serializers.py#L284-L302)
 
 ### 请求响应示例要点
 - 创建档案
@@ -509,6 +592,22 @@ View-->>Client : 档案详情 + sync_stats
 
 **新增** 连接类型配置示例：
 
+#### DetailTableConfig JOIN类型配置
+```json
+{
+  "domain": 1,
+  "table": 2,
+  "header_table": 3,
+  "header_link_field": 10,
+  "detail_link_field": 20,
+  "row_key_field": 25,
+  "display_sort_field": 26,
+  "display_sort_desc": true,
+  "join_type": "left",  // 或 "inner"
+  "conditions": []
+}
+```
+
 #### FieldMapping JOIN类型配置
 ```json
 {
@@ -539,9 +638,9 @@ View-->>Client : 档案详情 + sync_stats
 ```
 
 章节来源
-- [backend/apps/modeling/models.py:557-563](file://backend/apps/modeling/models.py#L557-L563)
-- [backend/apps/modeling/models.py:577-622](file://backend/apps/modeling/models.py#L577-L622)
+- [backend/apps/modeling/models.py:557-625](file://backend/apps/modeling/models.py#L557-L625)
 - [backend/apps/modeling/migrations/0033_fieldmapping_join_type.py:1-19](file://backend/apps/modeling/migrations/0033_fieldmapping_join_type.py#L1-L19)
+- [backend/apps/modeling/migrations/0034_detailtableconfig_join_type.py:1-19](file://backend/apps/modeling/migrations/0034_detailtableconfig_join_type.py#L1-L19)
 
 ### 查询条件操作符示例
 
@@ -574,5 +673,5 @@ View-->>Client : 档案详情 + sync_stats
 效果：AND组合，同时满足三个条件
 
 章节来源
-- [backend/apps/archive/views.py:1780-1798](file://backend/apps/archive/views.py#L1780-L1798)
+- [backend/apps/archive/views.py:1780-1798](file://backend/apps/archive/views.py#L1780-1798)
 - [backend/apps/modeling/models.py:564-565](file://backend/apps/modeling/models.py#L564-L565)

@@ -3,7 +3,7 @@ schema_version: 1
 locale: zh-CN
 branch: master
 nodes_managed: true
-exported_at: "2026-08-13T06:08:20Z"
+exported_at: "2026-08-13T06:38:51Z"
 modules:
     "":
         dir_name: 元数据建模与档案平台（Django + Vue3 双端编排）

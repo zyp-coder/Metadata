@@ -1,5 +1,21 @@
 # 操作详情 — modeling 模块（倒序，最新在前）
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
+## 第一百五十五轮（2026-08-13）标签：测试报告3问题、dcModal左右分栏、JOIN类型、dcList搜索、条件构建器头表字段、UXQA巡检
+**任务**：用户新测试报告3个问题修复，全部在 /modeling/domains/2/mappings 页面，按4批处理。
+**读取文件**：
+- `frontend/src/views/modeling/DomainFieldMapping.vue`（核心修改）
+- `backend/apps/modeling/models.py`（DetailTableConfig 加 join_type）
+- `backend/apps/modeling/serializers.py`（字段列表加 join_type）
+- `backend/apps/modeling/migrations/0034_detailtableconfig_join_type.py`（新增迁移）
+
+**变更摘要**：
+- 批1（dcModal左右分栏 + JOIN类型）：弹窗 640px→860px；顶栏关系类型 tag + JOIN type 选择器（LEFT/INNER）；主体左-中-右分栏——左侧头表列表(8col)+头表字段列表(16col)、中间↔箭头+检测按钮、右侧明细表列表(8col)+明细表字段列表(16col)；新增 selectDcHeaderTable/selectDcDetailTable；编辑模式 field-item--disabled 禁选；后端 DetailTableConfig 模型加 join_type 字段（迁移0034）+ 序列化器暴露
+- 批2（dcList搜索筛选）：Alert 下方加 a-input 搜索框（dcListSearch）；a-table dataSource 改为 filteredDetailConfigs computed（按头表名/明细表名/编码过滤）
+- 批3（条件构建器头表字段）：条件行加"字段来源" a-select（明细/头表）；字段列表按 fieldSource 切换 dcHeaderFields/dcSourceFields；后端存储 field_source 标记；存量兼容默认 'detail'
+- 批4（UXQA全页巡检）：映射表加 :scroll="{ x: 1160 }" 防列宽溢出
+**验证**：vue-tsc --noEmit 0 errors（批3/批4各验证一次）；已 commit+push（640ff5a）
+**遗留**：无。
+
 ### 第一百五十四轮（2026-08-13）标签：测试报告8问题、预组合改名、表列表点选、按钮去重、ER预组合标签
 **任务**：测试报告8个问题修复，全部在 /modeling/domains/2/mappings 页面，按4批处理。
 **读取文件**：

@@ -1,6 +1,23 @@
 # 开发日记 - 主数据建模引擎（modeling）
 > 记录 modeling 模块开发过程中的关键实现决策和技术细节。
 ---
+## 2026-08-13 测试报告3问题4批修复（第一百五十五轮）
+### 变更背景
+用户新测试报告3个问题：①编辑预组合弹窗改为左右分栏+JOIN类型 ②预组合管理列表搜索筛选+条件构建器支持头表字段 ③全页UXQA。按4批处理。
+### 关键实现
+- **批1 dcModal左右分栏+JOIN类型**：弹窗 640px→860px；顶栏关系类型 tag + JOIN type 选择器（LEFT/INNER）；主体左-中-右分栏——左侧头表列表(8col)+头表字段列表(16col)、中间↔箭头+检测按钮(padding-top:180px)、右侧明细表列表(8col)+明细表字段列表(16col)；可点选切换（新建模式）vs 只读禁用（编辑模式）；明细表已注册标记（dcRegisteredMap）；新增 selectDcHeaderTable/selectDcDetailTable 辅助函数
+- **后端 JoinType**：DetailTableConfig 加 `join_type` 字段（CharField max_length=10, choices=FieldMapping.JoinType.LEFT/INNER, 迁移0034）；DetailTableConfigSerializer fields 追加 'join_type'
+- **批2 dcList搜索筛选**：Alert 下方 a-input 搜索框 v-model:value="dcListSearch"；filteredDetailConfigs 按头表名/明细表名/编码过滤（全部 toLowerCase 无视大小写）
+- **批3 条件构建器头表字段**：条件行首加"字段来源" a-select（明细/头表）；字段列表按 `cond.fieldSource === 'header' ? dcHeaderFields : dcSourceFields` 切换；后端存储追加 `field_source: c.fieldSource || 'detail'`；老数据回填默认 'detail'
+- **批4 UXQA**：映射表加 :scroll="{ x: 1160 }" 防止列宽溢出
+### 变更文件清单
+- `backend/apps/modeling/models.py`：DetailTableConfig 加 join_type
+- `backend/apps/modeling/migrations/0034_detailtableconfig_join_type.py`：新增迁移
+- `backend/apps/modeling/serializers.py`：DetailTableConfigSerializer fields 加 join_type
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：dcModal 重写（左右分栏+860px+JOIN选）+ dcListSearch+filteredDetailConfigs + 条件行 fieldSource + 映射表 scroll x
+### 验证
+vue-tsc --noEmit 0 errors（批3/批4各验证一次）；已 commit+push（640ff5a）
+
 ## 2026-08-13 测试报告4问题修复批1（第一百五十一轮续）
 ### 变更背景
 测试报告4个问题，分批处理。批1（本次）：Issue 1 明细检查按钮无异常时不显示 + Issue 2 ER图全屏改用浏览器 Fullscreen API。

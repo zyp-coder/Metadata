@@ -343,24 +343,92 @@
             description="选择下方子表配置完成挂载；未注册的子表请先点击「管理注册」创建"
             style="margin-bottom: 16px"
           />
-          <a-form-item label="主表" required help="被挂载明细子表的主记录表">
-            <a-select v-model:value="form.target_table" style="width: 100%" show-search @change="loadTargetFields">
-              <a-select-option v-for="t in targetTableOptions" :key="t.id" :value="t.id">{{ t.name }} ({{ t.code }})</a-select-option>
-            </a-select>
-          </a-form-item>
-          <a-form-item label="预组合（子表）" required help="选择已注册的预组合体——注册（头表+明细表先组合）与挂载（本弹窗建立与主表的关系）是两步">
-            <a-space style="width: 100%">
-              <a-select v-model:value="form.detail_config" style="flex: 1" show-search allowClear placeholder="请选择已注册的预组合" @change="onDetailConfigChange">
-                <a-select-option v-for="cfg in domainDetailConfigs" :key="cfg.id" :value="cfg.id">
-                  {{ cfg.header_table_name ? cfg.header_table_name + ' + ' : '' }}{{ cfg.table_name }}
-                  ({{ cfg.header_table_code ? cfg.header_table_code + '+' : '' }}{{ cfg.table_code }})
-                  {{ cfg.row_key_field_name ? ' · 行键:' + cfg.row_key_field_name : '' }}
-                </a-select-option>
-              </a-select>
-              <a-button size="small" @click="openDetailConfigList()">管理注册</a-button>
-            </a-space>
-          </a-form-item>
-          <a-form-item v-if="selectedDetailConfig" label="配置摘要" help="组合配置由注册统一管理，编辑映射时不可修改">
+          <!-- 左右分栏：预组合（源） ↔ 主表（目标） -->
+          <a-row :gutter="16">
+            <!-- 左侧：预组合列表 + 关联字段列表 -->
+            <a-col :span="12">
+              <a-row :gutter="8">
+                <a-col :span="8">
+                  <div class="field-panel">
+                    <div class="field-panel__header" style="display: flex; justify-content: space-between; align-items: center">
+                      <span>预组合（点击选择）</span>
+                      <a style="font-size: 12px" @click.stop="openDetailConfigList()">管理注册</a>
+                    </div>
+                    <div class="field-panel__list">
+                      <div v-for="cfg in domainDetailConfigs" :key="cfg.id"
+                           class="field-item"
+                           :class="{'field-item--selected': form.detail_config === cfg.id}"
+                           @click="onDetailConfigChange(cfg.id)">
+                        <div style="font-weight: 500; font-size: 12px">{{ cfg.header_table_name ? cfg.header_table_name + ' + ' : '' }}{{ cfg.table_name }}</div>
+                        <div style="font-size: 11px; color: #999; margin-top: 2px">{{ cfg.header_table_code ? cfg.header_table_code + '+' : '' }}{{ cfg.table_code }}</div>
+                        <div v-if="cfg.row_key_field_name" style="font-size: 11px; color: #faad14; margin-top: 2px">行键:{{ cfg.row_key_field_name }}</div>
+                      </div>
+                      <div v-if="domainDetailConfigs.length === 0" class="field-panel__empty">暂无注册，请先管理注册</div>
+                    </div>
+                  </div>
+                </a-col>
+                <a-col :span="16">
+                  <div class="field-panel">
+                    <div class="field-panel__header">关联字段（点击选择）</div>
+                    <div class="field-panel__list">
+                      <div v-for="f in sourceFields" :key="f.id"
+                           class="field-item"
+                           :class="{'field-item--selected': form.source_field === f.id}"
+                           @click="selectDetailSourceField(f.id)">
+                        <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                        {{ f.name }} ({{ f.code }})
+                        <a-tag v-if="f.id === detailRecommendedFieldId" color="green" style="margin-left: 6px">推荐</a-tag>
+                      </div>
+                      <div v-if="sourceFields.length === 0" class="field-panel__empty">请先选择预组合</div>
+                    </div>
+                  </div>
+                </a-col>
+              </a-row>
+            </a-col>
+            <!-- 中间：箭头 -->
+            <a-col :span="1" style="text-align: center; padding-top: 200px">
+              <span style="font-size: 28px; color: #bbb">→</span>
+            </a-col>
+            <!-- 右侧：主表列表 + 主表字段列表 -->
+            <a-col :span="11">
+              <a-row :gutter="8">
+                <a-col :span="8">
+                  <div class="field-panel">
+                    <div class="field-panel__header">主表（点击选择）</div>
+                    <div class="field-panel__list">
+                      <div v-for="t in targetTableOptions" :key="t.id"
+                           class="field-item"
+                           :class="{'field-item--selected': form.target_table === t.id}"
+                           @click="selectTargetTable(t.id)">
+                        <div style="font-weight: 500; font-size: 12px">{{ t.name }}</div>
+                        <div style="font-size: 11px; color: #999; margin-top: 2px">{{ t.code }}</div>
+                      </div>
+                      <div v-if="targetTableOptions.length === 0" class="field-panel__empty">暂无表</div>
+                    </div>
+                  </div>
+                </a-col>
+                <a-col :span="16">
+                  <div class="field-panel">
+                    <div class="field-panel__header">主表字段（仅主键可选）</div>
+                    <div class="field-panel__list">
+                      <div v-for="f in targetFields" :key="f.id"
+                           class="field-item"
+                           :class="{
+                             'field-item--selected': form.target_field === f.id,
+                             'field-item--disabled': !f.is_primary_key
+                           }"
+                           @click="selectDetailTargetField(f.id)">
+                        <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 2px">⚿</span>
+                        {{ f.name }} ({{ f.code }})
+                      </div>
+                      <div v-if="targetFields.length === 0" class="field-panel__empty">请先选择主表</div>
+                    </div>
+                  </div>
+                </a-col>
+              </a-row>
+            </a-col>
+          </a-row>
+          <a-form-item v-if="selectedDetailConfig" label="配置摘要" help="组合配置由注册统一管理，编辑映射时不可修改" style="margin-bottom: 12px">
             <div style="background: #f5f5f5; padding: 8px 12px; border-radius: 4px; font-size: 13px; line-height: 1.8">
               <div v-if="selectedDetailConfig.header_table_name">
                 <strong>预组合：</strong>{{ selectedDetailConfig.header_table_name }} + {{ selectedDetailConfig.table_name }}
@@ -374,14 +442,6 @@
               <div v-if="selectedDetailConfig.mapping_count > 0">
                 <strong>挂载数：</strong>{{ selectedDetailConfig.mapping_count }} 个映射</div>
             </div>
-          </a-form-item>
-          <a-form-item label="关联字段" required help="子表中与主表关联的字段（自动推荐可改，系统自动按 子表→主表 方向挂载）">
-            <a-select v-model:value="form.source_field" style="width: 100%" show-search allowClear placeholder="请选择关联字段" @change="onDetailSourceFieldChange">
-              <a-select-option v-for="f in sourceFields" :key="f.id" :value="f.id">
-                <span v-if="f.is_primary_key" style="color: #faad14; margin-right: 4px">⚿</span>{{ f.name }} ({{ f.code }})
-                <a-tag v-if="f.id === detailRecommendedFieldId" color="green" style="margin-left: 6px">推荐</a-tag>
-              </a-select-option>
-            </a-select>
           </a-form-item>
           <a-alert
             v-if="detailTargetNoPk"
@@ -1938,6 +1998,19 @@ function onDetailConfigChange(configId: number | undefined) {
 
 function onDetailSourceFieldChange() {
   sourceFieldTouched.value = true
+}
+
+// 关联字段点击选择（标记 touched，防止自动推荐覆盖用户选择）
+function selectDetailSourceField(fieldId: number) {
+  form.value.source_field = fieldId
+  onDetailSourceFieldChange()
+}
+
+// 主表字段点击选择（挂载目标固定为主表单一主键，非主键禁选）
+function selectDetailTargetField(fieldId: number) {
+  const f = targetFields.value.find((x: any) => x.id === fieldId)
+  if (!f || !f.is_primary_key) return
+  form.value.target_field = fieldId
 }
 
 function applyDetailRecommendation() {
