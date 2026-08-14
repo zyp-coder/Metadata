@@ -1148,3 +1148,429 @@ class ReferenceConditionsSyncTest(TestCase):
         self.fm.save()
         captured = self._run()
         self.assertIsNone(captured['conditions'])
+
+
+# ── 2026-08-14 预组合过滤：header/detail 条件拆分 + inner 挂载 kept 交集 → 主记录行级过滤 ──
+
+class PrecombineFilterSyncTest(TestCase):
+    """预组合过滤引擎改造（第一百六十二轮）：对齐域 2 真实结构——主表物料信息 + 分组预组合
+    （inner，detail 条件 FULL_PARENT_ID）+ 价目预组合（inner，header 条件 NAME eq 新明码实价）
+    + 异名挂载（分组 FID→物料 MATERIAL_GROUP 物理列在第三张表）+ 主表 upsert 行级过滤
+    （防 stale 复活死循环）。
+    """
+
+    def setUp(self):
+        from apps.modeling.models import DetailTableConfig, DataSource, FieldMapping
+        self.domain = Domain.objects.create(name='预组合过滤域', code='PRECOMB')
+        self.ds = DataSource.objects.create(
+            name='预组合数据源', db_type='postgresql', host='localhost', port=5432,
+            db_name='test_db', username='u', password='p')
+        # 主表：物料信息（物料_L）
+        self.t_main = Table.objects.create(
+            domain=self.domain, name='物料信息', code='PCM_MAIN', is_primary=True,
+            data_source=self.ds)
+        self.f_mid = Field.objects.create(
+            table=self.t_main, name='物料ID', code='MATERIAL_ID',
+            is_primary_key=True, archive_category='base')
+        Field.objects.create(table=self.t_main, name='所属分组', code='MATERIAL_GROUP',
+                             archive_category='base')
+        # 明细表：分组头（FULL_PARENT_ID 条件命中列）
+        self.t_grp = Table.objects.create(
+            domain=self.domain, name='分组头', code='PCM_GRP', data_source=self.ds)
+        self.f_gid = Field.objects.create(
+            table=self.t_grp, name='分组ID', code='FID',
+            is_primary_key=True, archive_category='base')
+        self.f_fp = Field.objects.create(
+            table=self.t_grp, name='父分组路径', code='FULL_PARENT_ID', archive_category='base')
+        Field.objects.create(table=self.t_grp, name='分组名', code='GROUP_NAME', archive_category='base')
+        self.f_entry = Field.objects.create(
+            table=self.t_grp, name='行号', code='ENTRY_ID', archive_category='base')
+        # 头表：分组_L（预组合头）
+        self.t_grp_l = Table.objects.create(
+            domain=self.domain, name='分组_L', code='PCM_GRP_L', data_source=self.ds)
+        Field.objects.create(table=self.t_grp_l, name='分组ID', code='FID',
+                             is_primary_key=True, archive_category='base')
+        # 第三张表：物料（MATERIAL_GROUP 物理列所在，桥接用）
+        self.t_mat = Table.objects.create(
+            domain=self.domain, name='物料', code='PCM_MAT', data_source=self.ds)
+        Field.objects.create(table=self.t_mat, name='物料ID', code='MATERIAL_ID',
+                             is_primary_key=True, archive_category='base')
+        Field.objects.create(table=self.t_mat, name='所属分组', code='MATERIAL_GROUP',
+                             archive_category='base')
+        # 明细表：价目表明细
+        self.t_price = Table.objects.create(
+            domain=self.domain, name='价目明细', code='PCM_PRC', data_source=self.ds)
+        Field.objects.create(table=self.t_price, name='价目ID', code='FID', archive_category='base')
+        Field.objects.create(table=self.t_price, name='物料ID', code='MATERIAL_ID',
+                             archive_category='base')
+        Field.objects.create(table=self.t_price, name='行号', code='ENTRY_ID', archive_category='base')
+        Field.objects.create(table=self.t_price, name='单价', code='PRICE', archive_category='base')
+        # 头表：价目表头（NAME 条件命中列）
+        self.t_price_h = Table.objects.create(
+            domain=self.domain, name='价目表头', code='PCM_PRC_H', data_source=self.ds)
+        self.f_phid = Field.objects.create(
+            table=self.t_price_h, name='价目ID', code='FID',
+            is_primary_key=True, archive_category='base')
+        Field.objects.create(table=self.t_price_h, name='名称', code='NAME', archive_category='base')
+        # 档案 + 主记录
+        self.archive = Archive.objects.create(domain=self.domain, name='预组合档案', schema=[
+            {'code': 'MATERIAL_ID', 'name': '物料ID', 'type': 'string', 'ownership': 'source'},
+            {'code': 'MATERIAL_GROUP', 'name': '所属分组', 'type': 'string', 'ownership': 'source'},
+            {'code': 'GROUP_NAME', 'name': '分组名', 'type': 'string', 'ownership': 'source'},
+        ])
+        # 子表注册（cfg6 式：分组头 + 头表分组_L，detail 条件 FULL_PARENT_ID）
+        self.cfg_grp = DetailTableConfig.objects.create(
+            domain=self.domain, table=self.t_grp, header_table=self.t_grp_l,
+            header_link_field=self.f_gid, detail_link_field=self.f_gid,
+            join_type='inner',
+            conditions=[{'field': 'FULL_PARENT_ID', 'operator': 'starts_with',
+                         'value': '.101041'}],
+        )
+        # 子表注册（cfg2 式：价目明细 + 头表价目表头，header 条件 NAME）
+        self.cfg_price = DetailTableConfig.objects.create(
+            domain=self.domain, table=self.t_price, header_table=self.t_price_h,
+            header_link_field=self.f_phid, detail_link_field=self.f_gid,
+            join_type='inner',
+            conditions=[{'field': 'NAME', 'operator': 'eq', 'value': '新明码实价',
+                         'field_source': 'header'}],
+        )
+        # 挂载：分组头→物料（异名：FID→MATERIAL_GROUP）
+        f_grp_field = Field.objects.get(table=self.t_main, code='MATERIAL_GROUP')
+        self.fm_grp = FieldMapping.objects.create(
+            source_table=self.t_grp, source_field=self.f_gid,
+            target_table=self.t_main, target_field=f_grp_field,
+            relation_type=FieldMapping.RelationType.DETAIL,
+            detail_config=self.cfg_grp, join_type='inner',
+            row_key_field=self.f_entry, display_sort_field=self.f_entry,
+            display_sort_desc=True,
+        )
+        # 挂载：价目明细→物料（MATERIAL_ID→MATERIAL_ID）
+        f_price_mid = Field.objects.get(table=self.t_price, code='MATERIAL_ID')
+        f_price_entry = Field.objects.get(table=self.t_price, code='ENTRY_ID')
+        self.fm_price = FieldMapping.objects.create(
+            source_table=self.t_price, source_field=f_price_mid,
+            target_table=self.t_main, target_field=self.f_mid,
+            relation_type=FieldMapping.RelationType.DETAIL,
+            detail_config=self.cfg_price, join_type='inner',
+            row_key_field=f_price_entry, display_sort_field=f_price_entry,
+            display_sort_desc=True,
+        )
+
+    def _stats(self):
+        return {'records_created': 0, 'records_updated': 0, 'tables_synced': 0,
+                'records_deactivated': 0, 'records_reactivated': 0,
+                'details_created': 0, 'details_updated': 0, 'details_deactivated': 0,
+                'errors': [], 'warnings': []}
+
+    def _code_to_physical(self):
+        return {
+            'MATERIAL_ID': [(self.t_main.id, 'MATERIAL_ID'), (self.t_mat.id, 'MATERIAL_ID'),
+                            (self.t_price.id, 'MATERIAL_ID')],
+            'MATERIAL_GROUP': [(self.t_mat.id, 'MATERIAL_GROUP')],
+            'GROUP_NAME': [(self.t_grp.id, 'GROUP_NAME')],
+        }
+
+    def _tables(self):
+        return [self.t_main, self.t_grp, self.t_grp_l, self.t_mat, self.t_price, self.t_price_h]
+
+    def test_split_conditions_by_field_source(self):
+        """条件按 field_source 拆分：header 条件 → 头表查询，detail/无标记 → 明细表查询"""
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        conds = [
+            {'field': 'NAME', 'operator': 'eq', 'value': '新明码实价', 'field_source': 'header'},
+            {'field': 'FULL_PARENT_ID', 'operator': 'starts_with', 'value': '.101041'},
+            {'field': 'PRICE', 'operator': 'gt', 'value': 0, 'field_source': 'detail'},
+        ]
+        header_conds, detail_conds = viewset._split_conditions(conds)
+        self.assertEqual(header_conds, [conds[0]])
+        self.assertEqual(detail_conds, [conds[1], conds[2]])
+        # 无条件 → (None, None)
+        h2, d2 = viewset._split_conditions([])
+        self.assertIsNone(h2)
+        self.assertIsNone(d2)
+
+    def test_join_header_rows_passes_header_conditions(self):
+        """_join_header_rows 将 header 条件透传头表查询（mock 捕获）"""
+        from unittest.mock import patch
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        captured = {}
+
+        def fake_query(table, order_by=None, conditions=None):
+            captured['table'] = table.code
+            captured['conditions'] = conditions
+            return [{'FID': 'G1'}]
+
+        rows = [{'FID': 'G1', 'GROUP_NAME': 'x'}]
+        with patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query):
+            out = viewset._join_header_rows(
+                self.t_grp, self.cfg_grp, rows, 'inner',
+                conditions=[{'field': 'NAME', 'operator': 'eq', 'value': '新明码实价'}])
+        self.assertEqual(captured['table'], 'PCM_GRP_L')
+        self.assertEqual(captured['conditions'][0]['field'], 'NAME')
+        self.assertEqual(len(out), 1)  # inner 匹配头表 → 保留
+
+    def test_precombine_kept_intersection_and_filter(self):
+        """inner 挂载 kept 交集（对齐用户 SQL 多 INNER JOIN）：分组条件∩价目条件 → 仅 M1"""
+        from unittest.mock import patch
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        stats = self._stats()
+
+        def fake_query(table, order_by=None, conditions=None):
+            if table.code == 'PCM_GRP':
+                # detail 条件（FULL_PARENT_ID starts_with .101041）已过滤 → 仅 G1
+                return [{'FID': 'G1', 'FULL_PARENT_ID': '.101041001',
+                         'GROUP_NAME': '主分组', 'ENTRY_ID': 1}]
+            if table.code == 'PCM_GRP_L':
+                return [{'FID': 'G1'}, {'FID': 'G2'}]
+            if table.code == 'PCM_MAIN':
+                # 桥接表：target 主表 MATERIAL_GROUP → MATERIAL_ID（主表行自带列时桥接查主表）
+                return [{'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'},
+                        {'MATERIAL_ID': 'M2', 'MATERIAL_GROUP': 'G2'}]
+            if table.code == 'PCM_MAT':
+                # 桥接表：MATERIAL_GROUP → MATERIAL_ID
+                return [{'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'},
+                        {'MATERIAL_ID': 'M2', 'MATERIAL_GROUP': 'G2'}]
+            if table.code == 'PCM_PRC':
+                return [{'FID': 'P1', 'MATERIAL_ID': 'M1', 'ENTRY_ID': 1, 'PRICE': 10},
+                        {'FID': 'P2', 'MATERIAL_ID': 'M2', 'ENTRY_ID': 2, 'PRICE': 20}]
+            if table.code == 'PCM_PRC_H':
+                # header 条件（NAME eq 新明码实价）已过滤 → 仅 P1
+                return [{'FID': 'P1', 'NAME': '新明码实价'}]
+            return []
+
+        with patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query):
+            filters = viewset._build_precombine_filters(
+                self.domain, self._tables(), ['MATERIAL_ID'],
+                self._code_to_physical(), {}, stats)
+        self.assertIn(self.t_main.id, filters)
+        f = filters[self.t_main.id]
+        self.assertTrue(f({'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'}))
+        self.assertFalse(f({'MATERIAL_ID': 'M2', 'MATERIAL_GROUP': 'G2'}))
+        self.assertEqual(stats['warnings'], [])
+
+    def test_precombine_all_empty_kept_skips_filter(self):
+        """所有 inner 挂载条件未命中 → 跳过主记录过滤 + warning（防误全量停用）"""
+        from unittest.mock import patch
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        stats = self._stats()
+
+        def fake_query(table, order_by=None, conditions=None):
+            return []  # 全部无命中
+
+        with patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query):
+            filters = viewset._build_precombine_filters(
+                self.domain, self._tables(), ['MATERIAL_ID'],
+                self._code_to_physical(), {}, stats)
+        self.assertEqual(filters, {})
+        self.assertTrue(any('跳过主记录过滤' in w for w in stats['warnings']))
+
+    def test_precombine_single_empty_kept_skips_that_mount(self):
+        """单个挂载条件未命中 → warning + 该挂载不参与过滤，其余挂载正常过滤"""
+        from unittest.mock import patch
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        stats = self._stats()
+
+        def fake_query(table, order_by=None, conditions=None):
+            if table.code == 'PCM_GRP':
+                return [{'FID': 'G1', 'FULL_PARENT_ID': '.101041001',
+                         'GROUP_NAME': '主分组', 'ENTRY_ID': 1}]
+            if table.code == 'PCM_GRP_L':
+                return [{'FID': 'G1'}, {'FID': 'G2'}]
+            if table.code == 'PCM_MAIN':
+                return [{'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'},
+                        {'MATERIAL_ID': 'M2', 'MATERIAL_GROUP': 'G2'}]
+            if table.code == 'PCM_MAT':
+                return [{'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'},
+                        {'MATERIAL_ID': 'M2', 'MATERIAL_GROUP': 'G2'}]
+            if table.code == 'PCM_PRC':
+                return [{'FID': 'P1', 'MATERIAL_ID': 'M1', 'ENTRY_ID': 1, 'PRICE': 10}]
+            return []  # PCM_PRC_H 无命中 → 价目挂载不参与
+
+        with patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query):
+            filters = viewset._build_precombine_filters(
+                self.domain, self._tables(), ['MATERIAL_ID'],
+                self._code_to_physical(), {}, stats)
+        self.assertIn(self.t_main.id, filters)  # 分组挂载仍生效
+        f = filters[self.t_main.id]
+        self.assertTrue(f({'MATERIAL_ID': 'M1'}))
+        self.assertFalse(f({'MATERIAL_ID': 'M2'}))
+        self.assertTrue(any('价目明细' in w and '不参与过滤' in w for w in stats['warnings']))
+
+    def test_upsert_row_filter_creates_only_matching(self):
+        """主表 upsert 行级过滤：不满足条件的行不创建"""
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        stats = self._stats()
+        rows = [{'MATERIAL_ID': 'M1'}, {'MATERIAL_ID': 'M2'}]
+        code_to_physical = {'MATERIAL_ID': [(self.t_main.id, 'MATERIAL_ID')]}
+        viewset._upsert_records_from_rows(
+            self.archive, self.t_main, rows, code_to_physical, {},
+            ['MATERIAL_ID'], 'system', stats, is_primary_table=True,
+            row_filter=lambda row: row.get('MATERIAL_ID') == 'M1')
+        self.assertEqual(stats['records_created'], 1)
+        rec = ArchiveRecord.objects.get(archive=self.archive)
+        self.assertEqual(rec.data.get('MATERIAL_ID'), 'M1')
+
+    def test_upsert_row_filter_prevents_stale_reactivation(self):
+        """过滤后源行不再命中 stale 记录（防复活死循环）：M2 停用后带过滤同步 → 不复活"""
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        code_to_physical = {'MATERIAL_ID': [(self.t_main.id, 'MATERIAL_ID')]}
+        rows = [{'MATERIAL_ID': 'M1'}, {'MATERIAL_ID': 'M2'}]
+        # 第一轮：全量创建 M1/M2
+        stats1 = self._stats()
+        viewset._upsert_records_from_rows(
+            self.archive, self.t_main, rows, code_to_physical, {},
+            ['MATERIAL_ID'], 'system', stats1, is_primary_table=True)
+        self.assertEqual(stats1['records_created'], 2)
+        # 模拟：M2 不满足条件被停用（sync_status=stale）
+        ArchiveRecord.objects.filter(data__MATERIAL_ID='M2').update(
+            status=ArchiveRecord.Status.DELETED, sync_status='stale')
+        # 第二轮：带过滤同步（源行仍含 M2，但行级过滤不处理）
+        stats2 = self._stats()
+        viewset._upsert_records_from_rows(
+            self.archive, self.t_main, rows, code_to_physical, {},
+            ['MATERIAL_ID'], 'system', stats2, is_primary_table=True,
+            row_filter=lambda row: row.get('MATERIAL_ID') == 'M1')
+        self.assertEqual(stats2['records_reactivated'], 0)
+        m2 = ArchiveRecord.objects.get(archive=self.archive, data__MATERIAL_ID='M2')
+        self.assertEqual(m2.status, ArchiveRecord.Status.DELETED)
+        m1 = ArchiveRecord.objects.get(archive=self.archive, data__MATERIAL_ID='M1')
+        self.assertEqual(m1.status, ArchiveRecord.Status.ACTIVE)
+
+
+class DetailSyncHeteronymMountTest(TestCase):
+    """2026-08-14 异名挂载补洞：挂载字段物理列在第三张表（分组头 FID→物料 MATERIAL_GROUP），
+    target_physical_to_schema 原为空 → warning return 静默失效；补洞后用 source_field 物理列
+    作行内取值通道（用户 SQL 的 ON MTL1.MATERIAL_GROUP=GG.FID 语义）。
+    """
+
+    def setUp(self):
+        from apps.modeling.models import DataSource, FieldMapping
+        self.domain = Domain.objects.create(name='异名挂载域', code='HETERO')
+        self.ds = DataSource.objects.create(
+            name='异名挂载数据源', db_type='postgresql', host='localhost', port=5432,
+            db_name='test_db', username='u', password='p')
+        self.t_main = Table.objects.create(
+            domain=self.domain, name='物料信息', code='HET_MAIN', is_primary=True)
+        self.f_mid = Field.objects.create(
+            table=self.t_main, name='物料ID', code='MATERIAL_ID',
+            is_primary_key=True, archive_category='base')
+        self.f_grp = Field.objects.create(
+            table=self.t_main, name='所属分组', code='MATERIAL_GROUP', archive_category='base')
+        self.t_detail = Table.objects.create(domain=self.domain, name='分组头', code='HET_DET')
+        self.f_fid = Field.objects.create(
+            table=self.t_detail, name='分组ID', code='FID',
+            is_primary_key=True, archive_category='base')
+        Field.objects.create(table=self.t_detail, name='分组名', code='GROUP_NAME',
+                             archive_category='base')
+        self.f_entry = Field.objects.create(
+            table=self.t_detail, name='行号', code='ENTRY_ID', archive_category='base')
+        # 第三张表：物料（MATERIAL_GROUP 物理列所在，桥接用）
+        self.t_mat = Table.objects.create(
+            domain=self.domain, name='物料', code='HET_MAT', data_source=self.ds)
+        Field.objects.create(table=self.t_mat, name='物料ID', code='MATERIAL_ID',
+                             is_primary_key=True, archive_category='base')
+        Field.objects.create(table=self.t_mat, name='所属分组', code='MATERIAL_GROUP',
+                             archive_category='base')
+        self.archive = Archive.objects.create(domain=self.domain, name='异名挂载档案', schema=[
+            {'code': 'MATERIAL_ID', 'name': '物料ID', 'type': 'string', 'ownership': 'source'},
+            {'code': 'MATERIAL_GROUP', 'name': '所属分组', 'type': 'string', 'ownership': 'source'},
+            {'code': 'GROUP_NAME', 'name': '分组名', 'type': 'string', 'ownership': 'source'},
+        ])
+        self.rec_m1 = ArchiveRecord.objects.create(
+            archive=self.archive,
+            source_data={'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'},
+            data={'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'}, created_by='system')
+        self.fm = FieldMapping.objects.create(
+            source_table=self.t_detail, source_field=self.f_fid,
+            target_table=self.t_main, target_field=self.f_grp,
+            relation_type=FieldMapping.RelationType.DETAIL,
+            row_key_field=self.f_entry,
+            display_sort_field=self.f_entry,
+            display_sort_desc=True,
+        )
+
+    def _run_sync(self, rows):
+        from apps.archive.views import ArchiveViewSet
+        viewset = ArchiveViewSet()
+        stats = {'records_created': 0, 'records_updated': 0, 'tables_synced': 0,
+                 'records_deactivated': 0, 'records_reactivated': 0,
+                 'details_created': 0, 'details_updated': 0, 'details_deactivated': 0,
+                 'errors': [], 'warnings': []}
+        # MATERIAL_GROUP 物理列只在第三张表（HET_MAT）——异名挂载场景
+        code_to_physical = {
+            'MATERIAL_ID': [(self.t_main.id, 'MATERIAL_ID'), (self.t_mat.id, 'MATERIAL_ID')],
+            'MATERIAL_GROUP': [(self.t_mat.id, 'MATERIAL_GROUP')],
+            'GROUP_NAME': [(self.t_detail.id, 'GROUP_NAME')],
+        }
+        match_channels = {}
+        viewset._sync_detail_rows(
+            self.archive, self.t_detail, rows, self.fm, code_to_physical,
+            ['MATERIAL_ID'], match_channels, 'system', stats, set(), [], set(), set(),
+        )
+        return stats
+
+    def test_heteronym_mount_matches_via_source_field(self):
+        """挂载字段无本表物理列 → source_field 取值归属（FID=G1 → 主记录 MATERIAL_GROUP=G1）"""
+        rows = [{'ENTRY_ID': 1, 'FID': 'G1', 'GROUP_NAME': '默认分组'}]
+        stats = self._run_sync(rows)
+        self.assertEqual(stats['details_created'], 1)
+        self.assertEqual(stats['warnings'], [])  # 不再静默失效
+        d = ArchiveRecordDetail.objects.get(record=self.rec_m1)
+        self.assertEqual(d.row_key, '1')
+        self.assertEqual(d.data.get('GROUP_NAME'), '默认分组')
+
+    def test_heteronym_mount_unmatched_skipped(self):
+        """source_field 值未匹配主记录 → 明细行跳过（不创建）"""
+        rows = [{'ENTRY_ID': 2, 'FID': 'G9', 'GROUP_NAME': '未知分组'}]
+        stats = self._run_sync(rows)
+        self.assertEqual(stats['details_created'], 0)
+        self.assertEqual(ArchiveRecordDetail.objects.count(), 0)
+
+    def test_bridge_mount_when_key_not_in_schema(self):
+        """挂载键不在档案 schema（主记录 data 无该键，对齐真实域 2）→ 桥接 target_field
+        所在表 {主键值 → 挂载键值} 索引归属（明细行 FID 值 ↔ 物料表 MATERIAL_GROUP）。"""
+        from unittest.mock import patch
+        from apps.archive.views import ArchiveViewSet
+        # 模拟真实域 2：schema 与主记录 data 均无 MATERIAL_GROUP，
+        # 且挂载 target_field 指向物料表（HET_MAT）字段（主表物理无此列）
+        f_mat_grp = Field.objects.get(table=self.t_mat, code='MATERIAL_GROUP')
+        self.fm.target_field = f_mat_grp
+        self.fm.save(update_fields=['target_field'])
+        self.archive.schema = [
+            {'code': 'MATERIAL_ID', 'name': '物料ID', 'type': 'string', 'ownership': 'source'},
+            {'code': 'GROUP_NAME', 'name': '分组名', 'type': 'string', 'ownership': 'source'},
+        ]
+        self.archive.save(update_fields=['schema'])
+        self.rec_m1.source_data = {'MATERIAL_ID': 'M1'}
+        self.rec_m1.data = {'MATERIAL_ID': 'M1'}
+        self.rec_m1.save(update_fields=['source_data', 'data'])
+        viewset = ArchiveViewSet()
+        stats = {'records_created': 0, 'records_updated': 0, 'tables_synced': 0,
+                 'records_deactivated': 0, 'records_reactivated': 0,
+                 'details_created': 0, 'details_updated': 0, 'details_deactivated': 0,
+                 'errors': [], 'warnings': []}
+        code_to_physical = {
+            'MATERIAL_ID': [(self.t_main.id, 'MATERIAL_ID'), (self.t_mat.id, 'MATERIAL_ID')],
+            'GROUP_NAME': [(self.t_detail.id, 'GROUP_NAME')],
+        }
+        rows = [{'ENTRY_ID': 1, 'FID': 'G1', 'GROUP_NAME': '默认分组'}]
+
+        def fake_query(table, order_by=None, conditions=None):
+            # 桥接查物料表（HET_MAT）：MATERIAL_ID → MATERIAL_GROUP
+            return [{'MATERIAL_ID': 'M1', 'MATERIAL_GROUP': 'G1'}]
+
+        with patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query):
+            viewset._sync_detail_rows(
+                self.archive, self.t_detail, rows, self.fm, code_to_physical,
+                ['MATERIAL_ID'], {}, 'system', stats, set(), [], set(), set())
+        self.assertEqual(stats['details_created'], 1)
+        d = ArchiveRecordDetail.objects.get(record=self.rec_m1)
+        self.assertEqual(d.row_key, '1')
+        self.assertEqual(d.data.get('GROUP_NAME'), '默认分组')

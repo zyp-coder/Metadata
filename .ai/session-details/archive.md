@@ -484,3 +484,27 @@
 **验证**：import 通过。
 
 **回执**：闸✓ 记✓ 拓✓ 测✓（无新增路径）
+
+### 第一百六十二轮（2026-08-14）标签：预组合过滤、inner join、筛选条件、kept预扫、row_filter、桥接挂载、FULL_PARENT_ID、eq明码实价
+
+**任务**：用户反馈「预组合表设置了筛选条件 + inner join，同步结果数据量未收敛」，贴期望 SQL（价目明细 NAME LIKE 明码实价 INNER JOIN 物料 INNER JOIN 分组 FULL_PARENT_ID LIKE '.101041%'）。
+
+**方向锁定**：constitution 决策块 + adqa 回执行（质✓5条/伪✓/锁✓确认5暂定0否决0）；用户拍板：主记录要过滤；cfg6 PARENT_ID→FULL_PARENT_ID（用户自认配置错）；数据量口径按配置 eq；服务器 data_dump 暂缓只改本机。
+
+**变更文件**：
+- `backend/apps/archive/views.py`（7 改动点）：`_split_conditions` 新（conditions 按 field_source 拆 header/detail，header 透传 `_join_header_rows`——原 header 字段不在明细表白名单 → ValueError 整表跳过 = 筛选静默失效根因）；`_build_precombine_filters` 新（129 行，inner detail 挂载预扫 kept_keys 主键值集合，多挂载交集 → row_filter）；`_upsert_records_from_rows` 加 row_filter 行级过滤（不进 seen_keys/不 upsert/不创建，防 stale 复活死循环）；`_join_header_rows` 加 conditions 透传；`_sync_detail_rows` 异名挂载补洞 + target_code 标准字段解析 + existing_records 桥接索引
+- `backend/apps/archive/tests.py`：PrecombineFilterSyncTest 7 条 + DetailSyncHeteronymMountTest 3 条（含新增 test_bridge_mount_when_key_not_in_schema）；fake_query 补 PCM_MAIN 分支
+- `backend/dev.db`：cfg2 conditions 改 eq「明码实价」；cfg6 conditions 改 FULL_PARENT_ID starts_with .101041
+
+**首跑未生效根因链（探针定位）**：① target_code 用挂载字段 code（MATERIAL_ID/MATERIAL_GROUP）非 schema code（MTL_ID）→ code_to_physical 解析 None；② 预扫 phys_cols 依赖 code_to_physical → 全空 → kept 空 → 过滤静默跳过。修复：kept 改**明细行 source_field 物理列行内取值**（src_values），主记录侧按「同域直取（tf_phys==target 表主键）or 桥接 target_field.table（{主键值→挂载键值}）」收敛为主键值集合；`_sync_detail_rows` target_code 走 standard_field.standard_code 优先；挂载键不在 schema → 桥接建 {主键值→挂载键值} 索引。
+
+**数据事实（域 2）**：eq 新明码实价 838 物料（7 位 ID）全不在物料表（209,123 行 6 位 ID）→ 与分组交集 0；eq 明码实价 955（6 位 ID 全在 .101041 组）→ 用户确认改 eq 明码实价。
+
+**验证**：实跑同步（12 分钟）records_updated=955、records_deactivated=208,168、details_created=117,549、tables_synced=6、errors=[]——主记录 209,123→955 精确命中用户 SQL 口径；新测试 10/10 + archive 全套 70/70 PASS。
+
+**遗留问题**：
+1. existing_records 遍历全部记录（含将停用 stale）→ 分组头明细挂到 116,594 个将停用记录上（details_created 117,549 中约 116,594 属此类）；active 记录（955）明细正常；如需只挂 active 后续单独处理
+2. 服务器 data_dump.json 配置暂缓（用户裁决），服务器 cfg2/cfg6 条件发布时需同步
+3. 物料分组未配置代表行排序字段（既有 warning）
+
+**回执**：闸✓ 记✓ 拓✓ 测✓（新测试 10 条 + 实跑 955 验证）

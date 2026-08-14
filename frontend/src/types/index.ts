@@ -141,6 +141,16 @@ export interface DetailTableConfig {
   updated_at: string
 }
 
+// 预组合数据预览响应（2026-08-14 第一百六十三轮）：统计数字 + 样例行（含 __hdr__ 头表字段）
+export interface DetailConfigPreview {
+  detail_total: number | null
+  detail_hit: number | null
+  header_total: number | null
+  header_matched: number | null
+  rows: Array<Record<string, any>>
+  truncated: boolean
+}
+
 // ===== 档案模块类型 =====
 export interface Archive {
   id: number

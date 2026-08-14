@@ -8,7 +8,8 @@ from django.urls import reverse
 from rest_framework.test import APIClient, APITestCase
 
 from apps.modeling.models import (
-    DataSource, Domain, Table, Field, FieldGroup, StandardField, ComputedField, ConfigTable
+    DataSource, Domain, Table, Field, FieldGroup, StandardField, ComputedField, ConfigTable,
+    DetailTableConfig
 )
 from django.contrib.auth.models import User
 
@@ -564,3 +565,139 @@ class ConfigTableSyncTest(APITestCase):
         self.assertIn('data_source_name', resp.data)
         self.assertEqual(resp.data['data_source'], self.ds.id)
         self.assertEqual(resp.data['data_source_name'], 'test_pg')
+
+
+# ── 预组合数据预览（2026-08-14 第一百六十三轮）──
+
+class DetailTableConfigPreviewTest(TestCase):
+    """预组合数据预览端点：统计（明细全量/条件命中/头表匹配）+ 样例行（mock 外部查询）。"""
+
+    def setUp(self):
+        from unittest.mock import patch
+        self._patch = patch
+        self.client = auth_client()
+        self.domain = Domain.objects.create(name='预览域', code='PREV')
+        self.ds = DataSource.objects.create(
+            name='预览数据源', db_type='postgresql', host='localhost',
+            port=5432, db_name='test_db')
+        self.detail_table = Table.objects.create(
+            domain=self.domain, name='预览明细表', code='PDT', data_source=self.ds)
+        self.header_table = Table.objects.create(
+            domain=self.domain, name='预览头表', code='PHT', data_source=self.ds)
+        self.detail_link = Field.objects.create(
+            table=self.detail_table, name='明细关联键', code='FID', physical_name='FID')
+        self.header_pk = Field.objects.create(
+            table=self.header_table, name='头表主键', code='ID', physical_name='ID',
+            is_primary_key=True)
+        self.cfg = DetailTableConfig.objects.create(
+            domain=self.domain, table=self.detail_table, header_table=self.header_table,
+            header_link_field=self.header_pk, detail_link_field=self.detail_link,
+            conditions=[
+                {'field': 'NAME', 'operator': 'eq', 'value': 'x', 'field_source': 'header'},
+                {'field': 'PRICE', 'operator': 'gt', 'value': 10},
+            ])
+
+    def _detail_rows(self, n=120):
+        return [{'MATERIAL_ID': str(i), 'NAME': f'名称{i}', 'PRICE': i} for i in range(n)]
+
+    def test_preview_stats_and_sample(self):
+        """统计数字 + 样例行 + truncated 标记（默认 limit=50）"""
+        detail_rows = self._detail_rows()
+        def fake_query(table, order_by=None, conditions=None, count_only=False):
+            if table.id == self.header_table.id:
+                return [{'ID': '1', 'NAME': 'x'}, {'ID': '2', 'NAME': 'x'}] if not count_only else 2
+            if count_only:
+                return 200 if conditions is None else 120
+            return detail_rows
+        def fake_join(table, cfg, rows, join_type='left', conditions=None, header_rows=None):
+            out = []
+            for i, r in enumerate(rows):
+                merged = dict(r)
+                if i % 2 == 0:
+                    merged['__hdr__ID'] = '1'
+                out.append(merged)
+            return out
+        from apps.archive.views import ArchiveViewSet
+        with self._patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query), \
+             self._patch.object(ArchiveViewSet, '_join_header_rows', side_effect=fake_join):
+            resp = self.client.get(f'/api/detail-configs/{self.cfg.id}/preview/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['detail_total'], 200)
+        self.assertEqual(data['detail_hit'], 120)
+        self.assertEqual(data['header_total'], 2)
+        self.assertEqual(data['header_matched'], 60)  # 120 行中偶数行匹配
+        self.assertEqual(len(data['rows']), 50)
+        self.assertTrue(data['truncated'])
+        self.assertIn('__hdr__ID', data['rows'][0])
+
+    def test_preview_limit_all_rows(self):
+        """limit 覆盖全部命中行时 truncated=False"""
+        detail_rows = self._detail_rows(30)
+        def fake_query(table, order_by=None, conditions=None, count_only=False):
+            if table.id == self.header_table.id:
+                return [{'ID': '1', 'NAME': 'x'}]
+            if count_only:
+                return 30 if conditions is None else 30
+            return detail_rows
+        from apps.archive.views import ArchiveViewSet
+        with self._patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query):
+            resp = self.client.get(f'/api/detail-configs/{self.cfg.id}/preview/?limit=200')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data['rows']), 30)
+        self.assertFalse(data['truncated'])
+
+    def test_preview_without_header_config(self):
+        """无头表配置的旧注册：header_total/header_matched 为 None，不查头表"""
+        self.cfg.header_table = None
+        self.cfg.header_link_field = None
+        self.cfg.detail_link_field = None
+        self.cfg.save()
+        detail_rows = self._detail_rows(5)
+        def fake_query(table, order_by=None, conditions=None, count_only=False):
+            if count_only:
+                return 5 if conditions is None else 5
+            return detail_rows
+        from apps.archive.views import ArchiveViewSet
+        with self._patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query) as m:
+            resp = self.client.get(f'/api/detail-configs/{self.cfg.id}/preview/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIsNone(data['header_total'])
+        self.assertIsNone(data['header_matched'])
+        self.assertEqual(len(data['rows']), 5)
+
+    def test_preview_detail_query_failed(self):
+        """明细表查询失败 → 400 + 错误信息"""
+        from apps.archive.views import ArchiveViewSet
+        with self._patch.object(ArchiveViewSet, '_query_external_table', return_value=None):
+            resp = self.client.get(f'/api/detail-configs/{self.cfg.id}/preview/')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('查询失败', resp.json()['error'])
+
+    def test_preview_header_query_failed(self):
+        """头表查询失败 → 降级：header_total/header_matched None，样例无 __hdr__ 字段"""
+        detail_rows = self._detail_rows(5)
+        def fake_query(table, order_by=None, conditions=None, count_only=False):
+            if table.id == self.header_table.id:
+                return None
+            if count_only:
+                return 5
+            return detail_rows
+        from apps.archive.views import ArchiveViewSet
+        with self._patch.object(ArchiveViewSet, '_query_external_table', side_effect=fake_query):
+            resp = self.client.get(f'/api/detail-configs/{self.cfg.id}/preview/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIsNone(data['header_total'])
+        self.assertIsNone(data['header_matched'])
+        self.assertTrue(all(not k.startswith('__hdr__') for r in data['rows'] for k in r))
+
+    def test_preview_without_data_source(self):
+        """明细表未配置数据源 → 400"""
+        self.detail_table.data_source = None
+        self.detail_table.save()
+        resp = self.client.get(f'/api/detail-configs/{self.cfg.id}/preview/')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('未配置数据源', resp.json()['error'])

@@ -10,6 +10,8 @@
 - [backend/config/wsgi.py](file://backend/config/wsgi.py)
 - [backend/manage.py](file://backend/manage.py)
 - [backend/local_settings.py](file://backend/local_settings.py)
+- [backend/apps/modeling/distinct_cache.py](file://backend/apps/modeling/distinct_cache.py)
+- [backend/scripts/diag_sqlserver_activity.py](file://backend/scripts/diag_sqlserver_activity.py)
 - [frontend/package.json](file://frontend/package.json)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
 - [frontend/nginx.conf](file://frontend/nginx.conf)
@@ -17,11 +19,12 @@
 
 ## 更新摘要
 **所做更改**
-- 增强了静态文件处理配置，重点说明STATIC_ROOT设置在容器化部署中的重要性
-- 更新了生产环境部署流程，包含collectstatic命令的执行时机和配置要求
-- 完善了Nginx静态文件服务配置说明
-- 增加了静态文件相关的故障排查指南
-- 优化了镜像构建和部署的最佳实践建议
+- 增强了Docker镜像构建配置，新增完整的Microsoft SQL Server数据库支持
+- 添加了Microsoft ODBC Driver 18的安装链，包括GPG密钥验证、EULA接受和UnixODBC开发库安装
+- 更新了依赖管理，新增mssql-django包以支持SQL Server连接
+- 完善了多数据库支持的架构说明，包括PostgreSQL、MySQL、Oracle和SQL Server
+- 增加了SQL Server相关的故障排查指南和性能调优建议
+- 优化了容器化部署的最佳实践，支持多种数据库后端
 
 ## 目录
 1. [简介](#简介)
@@ -36,10 +39,10 @@
 10. [结论](#结论)
 
 ## 简介
-本文件为 MetaData002 系统的完整 Docker 容器化部署文档，覆盖镜像构建、多阶段优化、缓存策略、安全扫描、docker-compose 编排、服务间通信（PostgreSQL、Redis）、健康检查、资源限制、监控与日志收集、以及常见问题的排障与调优建议。读者可据此在本地或生产环境快速搭建并稳定运行系统。
+本文件为 MetaData002 系统的完整 Docker 容器化部署文档，覆盖镜像构建、多阶段优化、缓存策略、安全扫描、docker-compose 编排、服务间通信（PostgreSQL、Redis、SQL Server）、健康检查、资源限制、监控与日志收集、以及常见问题的排障与调优建议。系统现已支持多种数据库后端，包括PostgreSQL、MySQL、Oracle和Microsoft SQL Server，读者可据此在本地或生产环境快速搭建并稳定运行系统。
 
 ## 项目结构
-后端基于 Django + DRF，使用 PostgreSQL 作为数据库、Redis 作为缓存；前端为 Vue 3 + Vite。当前仓库已包含后端 Dockerfile 与 docker-compose 基础编排，用于开发环境快速启动。
+后端基于 Django + DRF，支持多种数据库后端：PostgreSQL作为默认数据库、Redis作为缓存；前端为 Vue 3 + Vite。当前仓库已包含后端 Dockerfile 与 docker-compose 基础编排，用于开发环境快速启动。
 
 ```mermaid
 graph TB
@@ -49,23 +52,30 @@ B["WSGI入口<br/>config/wsgi.py"]
 C["命令行工具<br/>manage.py"]
 D["依赖清单<br/>requirements.txt"]
 E["开发覆盖配置<br/>local_settings.py"]
+F["多数据库支持<br/>distinct_cache.py"]
 end
 subgraph "基础设施"
-F["PostgreSQL<br/>postgres:15"]
-G["Redis<br/>redis:7-alpine"]
-H["Nginx<br/>静态文件服务"]
+G["PostgreSQL<br/>postgres:15"]
+H["Redis<br/>redis:7-alpine"]
+I["Nginx<br/>静态文件服务"]
+J["Microsoft SQL Server<br/>可选数据库"]
+K["MySQL<br/>可选数据库"]
+L["Oracle<br/>可选数据库"]
 end
 subgraph "前端"
-I["Vue+Vite<br/>package.json / vite.config.ts"]
-J["Nginx配置<br/>nginx.conf"]
+M["Vue+Vite<br/>package.json / vite.config.ts"]
+N["Nginx配置<br/>nginx.conf"]
 end
-I --> A
-A --> F
+M --> A
 A --> G
+A --> H
+A --> J
+A --> K
+A --> L
 A --> B
 C --> A
-H --> I
-H --> J
+I --> M
+I --> N
 ```
 
 图表来源
@@ -74,6 +84,7 @@ H --> J
 - [backend/manage.py](file://backend/manage.py)
 - [backend/requirements.txt](file://backend/requirements.txt)
 - [backend/local_settings.py](file://backend/local_settings.py)
+- [backend/apps/modeling/distinct_cache.py](file://backend/apps/modeling/distinct_cache.py)
 - [frontend/package.json](file://frontend/package.json)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
 - [frontend/nginx.conf](file://frontend/nginx.conf)
@@ -87,12 +98,14 @@ H --> J
 - [backend/config/wsgi.py](file://backend/config/wsgi.py)
 - [backend/manage.py](file://backend/manage.py)
 - [backend/local_settings.py](file://backend/local_settings.py)
+- [backend/apps/modeling/distinct_cache.py](file://backend/apps/modeling/distinct_cache.py)
 - [frontend/package.json](file://frontend/package.json)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
 - [frontend/nginx.conf](file://frontend/nginx.conf)
 
 ## 核心组件
 - 后端镜像构建：基于 python:3.12-slim，安装系统依赖与 Python 依赖，复制源码。
+- **多数据库支持**：通过 mssql-django 包和 Microsoft ODBC Driver 18 支持 SQL Server 连接。
 - 服务编排：PostgreSQL、Redis、Django 后端三服务，含健康检查与数据卷持久化。
 - 配置管理：通过环境变量注入数据库、缓存、调试开关等关键参数。
 - WSGI 入口：标准 Django WSGI 应用，便于后续替换为 gunicorn/uwsgi。
@@ -105,10 +118,11 @@ H --> J
 - [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
 - [backend/config/settings.py](file://backend/config/settings.py)
 - [backend/config/wsgi.py](file://backend/config/wsgi.py)
+- [backend/apps/modeling/distinct_cache.py](file://backend/apps/modeling/distinct_cache.py)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
 
 ## 架构总览
-下图展示容器化后的服务交互：前端通过浏览器访问，开发时由 Vite 代理到后端；后端通过环境变量连接 PostgreSQL 与 Redis，并使用 django_redis 作为缓存后端。生产环境通过 Nginx 提供静态文件和反向代理。
+下图展示容器化后的服务交互：前端通过浏览器访问，开发时由 Vite 代理到后端；后端通过环境变量连接 PostgreSQL 与 Redis，并使用 django_redis 作为缓存后端。生产环境通过 Nginx 提供静态文件和反向代理。**新增** 系统现支持连接外部 SQL Server、MySQL、Oracle 数据库进行数据同步和分析。
 
 ```mermaid
 graph TB
@@ -119,10 +133,16 @@ DB["PostgreSQL<br/>端口:5432"]
 Cache["Redis<br/>端口:6379"]
 Nginx["Nginx<br/>端口:80"]
 StaticVol["静态文件卷<br/>/app/static"]
+SQLServer["SQL Server<br/>可选数据库"]
+MySQL["MySQL<br/>可选数据库"]
+Oracle["Oracle<br/>可选数据库"]
 Client --> Frontend
 Frontend --> |API代理| Backend
 Backend --> |DB连接| DB
 Backend --> |缓存| Cache
+Backend --> |外部连接| SQLServer
+Backend --> |外部连接| MySQL
+Backend --> |外部连接| Oracle
 Nginx --> |静态文件| StaticVol
 Nginx --> |API代理| Backend
 ```
@@ -131,6 +151,7 @@ Nginx --> |API代理| Backend
 - [backend/docker-compose.yml](file://backend/docker-compose.yml)
 - [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
 - [backend/config/settings.py](file://backend/config/settings.py)
+- [backend/apps/modeling/distinct_cache.py](file://backend/apps/modeling/distinct_cache.py)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
 - [frontend/nginx.conf](file://frontend/nginx.conf)
 
@@ -139,7 +160,13 @@ Nginx --> |API代理| Backend
 ### 镜像构建与优化（Dockerfile）
 - 基础镜像：python:3.12-slim，减小体积。
 - 环境变量：关闭字节码写入、启用非缓冲输出，利于日志采集。
-- 系统依赖：安装 gcc、libpq-dev 以支持 psycopg2-binary 编译。
+- **系统依赖增强**：安装 gcc、libpq-dev 以支持 psycopg2-binary 编译，同时安装 curl 和 gnupg2 用于拉取微软 ODBC 源。
+- **Microsoft SQL Server 支持**：
+  - 添加 Microsoft GPG 密钥验证
+  - 配置 Microsoft SQL Server 软件源
+  - 安装 Microsoft ODBC Driver 18 for SQL Server
+  - 安装 unixodbc-dev 开发库
+  - 接受 EULA 许可协议
 - 依赖安装：先拷贝 requirements.txt 再 pip install，利用层缓存加速重复构建。
 - 源码拷贝：最后拷贝应用代码，避免破坏依赖层缓存。
 
@@ -151,7 +178,7 @@ Nginx --> |API代理| Backend
 - 安全扫描：集成 Trivy 或 Snyk 扫描镜像漏洞，阻断高危漏洞发布。
 
 章节来源
-- [backend/Dockerfile](file://backend/Dockerfile)
+- [backend/Dockerfile:8-24](file://backend/Dockerfile#L8-L24)
 - [backend/requirements.txt](file://backend/requirements.txt)
 
 ### 服务编排与健康检查（docker-compose）
@@ -175,6 +202,7 @@ Nginx --> |API代理| Backend
 - 增加资源限制（CPU/内存）与重启策略。
 - 使用 secrets 管理敏感信息，避免明文写在 compose 中。
 - **重要** 确保 STATIC_ROOT 配置正确，以便 collectstatic 命令正常工作。
+- **新增** 如需连接外部 SQL Server，需在网络层面允许后端容器访问目标 SQL Server 实例。
 
 章节来源
 - [backend/docker-compose.yml](file://backend/docker-compose.yml)
@@ -191,6 +219,21 @@ Nginx --> |API代理| Backend
 
 章节来源
 - [backend/config/settings.py](file://backend/config/settings.py)
+
+### 多数据库支持配置
+- **引擎映射**：通过 ENGINE_MAP 定义不同数据库类型对应的 Django 数据库引擎。
+- **SQL Server 特殊配置**：
+  - 使用 mssql 引擎连接 SQL Server
+  - 配置 ODBC Driver 18 for SQL Server
+  - 设置 Encrypt=no 参数禁用加密以提高性能
+  - 支持 dbo schema 命名约定
+- **动态连接创建**：运行时根据数据源类型动态创建数据库连接。
+
+**更新** 新增对 SQL Server 的完整支持，包括连接配置、查询语法适配和错误处理。
+
+章节来源
+- [backend/apps/modeling/distinct_cache.py:7-13](file://backend/apps/modeling/distinct_cache.py#L7-L13)
+- [backend/apps/modeling/distinct_cache.py:66-72](file://backend/apps/modeling/distinct_cache.py#L66-L72)
 
 ### WSGI 与命令行入口
 - WSGI：标准 Django WSGI 应用，设置 DJANGO_SETTINGS_MODULE 为 config.settings。
@@ -231,11 +274,11 @@ Nginx --> |API代理| Backend
 - [frontend/nginx.conf](file://frontend/nginx.conf)
 
 ## 依赖关系分析
-- 后端依赖：Django、DRF、psycopg2-binary、redis、celery、gunicorn、openpyxl、**django-cors-headers** 等。
-- 运行时依赖：PostgreSQL 与 Redis 服务。
+- 后端依赖：Django、DRF、psycopg2-binary、redis、celery、gunicorn、openpyxl、**django-cors-headers**、**mssql-django** 等。
+- 运行时依赖：PostgreSQL 与 Redis 服务，可选的外部 SQL Server、MySQL、Oracle 数据库。
 - 前端依赖：Vue 3、Vite、Ant Design Vue、Axios 等。
 
-**更新** 现已包含 django-cors-headers 依赖，解决容器启动时的 CORS 相关错误。
+**更新** 现已包含 mssql-django 依赖和 django-cors-headers 依赖，解决容器启动时的 CORS 相关错误和 SQL Server 连接问题。
 
 ```mermaid
 graph LR
@@ -248,6 +291,7 @@ Celery["celery"]
 Gunicorn["gunicorn"]
 Openpyxl["openpyxl"]
 CorsHeaders["django-cors-headers"]
+MSSQL["mssql-django"]
 Req --> Django
 Req --> DRF
 Req --> Psycopg
@@ -256,6 +300,7 @@ Req --> Celery
 Req --> Gunicorn
 Req --> Openpyxl
 Req --> CorsHeaders
+Req --> MSSQL
 ```
 
 图表来源
@@ -271,6 +316,10 @@ Req --> CorsHeaders
 - 资源限制：在 docker-compose 中为各服务设置 CPU/内存上限，防止单点资源争用。
 - **静态资源优化**：生产环境应收集静态文件并通过 Nginx/Apache 或 CDN 分发，减少应用服务器负载。
 - **卷挂载优化**：使用命名卷存储静态文件，支持多容器共享和持久化。
+- **SQL Server 连接优化**：
+  - 使用 ODBC Driver 18 以获得最佳性能
+  - 合理配置连接池大小
+  - 考虑在网络延迟较高的环境中启用连接复用
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -279,6 +328,7 @@ Req --> CorsHeaders
 - 结构化日志：统一 JSON 格式输出，便于集中采集与分析。
 - 日志收集：推荐接入 ELK/EFK 或 Loki，按服务与级别分类存储。
 - 健康检查：已在 compose 中为 db 与 redis 配置健康检查，后端可扩展自定义健康端点。
+- **SQL Server 监控**：提供诊断脚本 diag_sqlserver_activity.py 用于监控 SQL Server 活动请求和性能。
 
 [本节为通用指导，不直接分析具体文件]
 
@@ -294,6 +344,12 @@ Req --> CorsHeaders
   - **新增** 确认 django-cors-headers 已正确添加到 requirements.txt 并随容器构建安装。
   - 检查 local_settings.py 中的 CORS_ALLOW_ALL_ORIGINS 配置是否正确。
   - 开发环境确认浏览器控制台无跨域错误提示。
+- **SQL Server 连接问题**
+  - **新增** 确认 Microsoft ODBC Driver 18 已正确安装在容器中。
+  - 检查网络连接是否允许后端容器访问目标 SQL Server 实例。
+  - 验证 SQL Server 防火墙规则和安全配置。
+  - 使用提供的诊断脚本 diag_sqlserver_activity.py 测试连接和查询性能。
+  - 确认 ODBC Driver 名称 'ODBC Driver 18 for SQL Server' 与实际安装版本匹配。
 - 数据库连接失败
   - 检查 DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD 环境变量是否正确。
   - 确认 PostgreSQL 服务健康且端口可达。
@@ -310,7 +366,7 @@ Req --> CorsHeaders
   - 开发环境确认 Vite 代理目标为 http://localhost:8000。
   - 生产环境检查反向代理与跨域配置。
 
-**更新** 重点增加了静态文件相关的故障排查步骤，包括 STATIC_ROOT 配置、collectstatic 命令执行、Nginx 静态文件服务等关键环节的检查和解决方法。
+**更新** 重点增加了 SQL Server 相关的故障排查步骤，包括 ODBC Driver 安装验证、网络连接检查、连接配置验证和性能诊断等关键环节。
 
 章节来源
 - [backend/config/settings.py](file://backend/config/settings.py)
@@ -318,12 +374,15 @@ Req --> CorsHeaders
 - [deploy/docker-compose.yml](file://deploy/docker-compose.yml)
 - [backend/local_settings.py](file://backend/local_settings.py)
 - [backend/requirements.txt](file://backend/requirements.txt)
+- [backend/scripts/diag_sqlserver_activity.py](file://backend/scripts/diag_sqlserver_activity.py)
 - [frontend/nginx.conf](file://frontend/nginx.conf)
 - [frontend/vite.config.ts](file://frontend/vite.config.ts)
 
 ## 结论
-通过上述镜像构建优化、compose 编排、环境变量管理与健康检查，MetaData002 可在本地与生产环境中稳定运行。**特别需要注意的是**，现已正确添加 django-cors-headers 依赖，确保容器启动时不会出现 CORS 相关错误。**更重要的是**，生产环境部署流程已完善静态文件处理机制，通过 collectstatic 命令和 Nginx 静态文件服务，确保前端资源和 Django 后台静态文件能够正确加载和提供服务。
+通过上述镜像构建优化、compose 编排、环境变量管理与健康检查，MetaData002 可在本地与生产环境中稳定运行。**特别需要注意的是**，现已正确添加 mssql-django 依赖和 Microsoft ODBC Driver 18，确保容器能够连接 SQL Server 数据库。**更重要的是**，生产环境部署流程已完善静态文件处理机制，通过 collectstatic 命令和 Nginx 静态文件服务，确保前端资源和 Django 后台静态文件能够正确加载和提供服务。
 
-生产部署建议引入 gunicorn、Nginx、Prometheus、ELK/Loki 等组件，完善性能、监控与可观测性。遵循安全最佳实践，定期扫描镜像漏洞，保障系统安全与可靠性。**静态文件处理的改进使得生产环境部署更加稳定和高效，减少了因静态文件缺失导致的页面渲染问题。**
+系统现已支持多种数据库后端，包括 PostgreSQL、MySQL、Oracle 和 Microsoft SQL Server，为不同的业务场景提供了灵活的数据库选择。**新增的 SQL Server 支持使得企业用户可以无缝集成现有的 Microsoft 技术栈，同时保持与其他数据库系统的兼容性。**
 
-**更新** 依赖管理和静态文件处理的改进使得容器启动和部署更加稳定，减少了因缺少依赖包和静态文件导致的部署失败问题。
+生产部署建议引入 gunicorn、Nginx、Prometheus、ELK/Loki 等组件，完善性能、监控与可观测性。遵循安全最佳实践，定期扫描镜像漏洞，保障系统安全与可靠性。**多数据库支持和完善的故障排查机制使得系统在各种部署环境下都能保持稳定可靠的运行。**
+
+**更新** 依赖管理和 SQL Server 支持的改进使得容器启动和部署更加稳定，减少了因缺少依赖包和数据库驱动导致的部署失败问题。新增的诊断工具和监控能力为生产环境的运维提供了有力支持。

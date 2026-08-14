@@ -468,7 +468,7 @@ export const fieldOptionApi = {
 }
 
 // 明细子表注册
-import type { DetailTableConfig } from '@/types'
+import type { DetailTableConfig, DetailConfigPreview } from '@/types'
 
 export const detailConfigApi = {
   list: (params?: any) => api.get<PaginatedResponse<DetailTableConfig>>('/detail-configs/', { params: withFullPage(params) }),
@@ -481,6 +481,8 @@ export const detailConfigApi = {
   detectRowKey: (id: number) =>
     api.post<{ candidate: string; total_rows: number; note?: string }>(
       `/detail-configs/${id}/detect-row-key/`, {}),
+  preview: (id: number, params?: { limit?: number }) =>
+    api.get<DetailConfigPreview>(`/detail-configs/${id}/preview/`, { params }),
 }
 
 // 字段映射

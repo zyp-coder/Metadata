@@ -1322,6 +1322,11 @@ class ArchiveViewSet(viewsets.ModelViewSet):
 
         is_primary_id = primary_table.id if primary_table else None
 
+        # 预组合过滤预扫（2026-08-14）：inner detail 挂载条件交集 → 主记录行级过滤
+        # （主表优先全量入档后无法收敛——主表 upsert 必须发生在过滤之后）
+        precombine_filters = self._build_precombine_filters(
+            domain, tables, pk_fields, code_to_physical, match_channels, stats)
+
         # 处理每个表
         for table in tables:
             is_primary_table = (table.id == is_primary_id)
@@ -1334,7 +1339,8 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                         self._upsert_records_from_rows(
                             archive, table, rows, code_to_physical, schema_type_map, 
                             pk_fields, operated_by, stats, matched_ids, change_entries, created_in_this_batch,
-                            sync_exclude_codes, match_channels, is_primary_table
+                            sync_exclude_codes, match_channels, is_primary_table,
+                            row_filter=precombine_filters.get(table.id),
                         )
                         self._collect_check_values(table, rows, code_checks, pk_fields,
                                                    code_to_physical, cc_primary_values, cc_member_values)
@@ -1380,12 +1386,16 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                     conds = cfg.conditions
                 elif first_fm.conditions:
                     conds = first_fm.conditions
-                rows = self._query_external_table(table, order_by=order_by, conditions=conds)
+                # 2026-08-14：条件按 field_source 拆分——header 条件应用到预组合头表查询
+                # （header 字段不在明细表白名单，原实现 ValueError 整表跳过=筛选条件静默失效）
+                header_conds, detail_conds = self._split_conditions(conds)
+                rows = self._query_external_table(table, order_by=order_by, conditions=detail_conds)
                 if rows is not None:
                     # 预组合平铺（2026-08-11 第三轮）：注册配了头表时，头表全量 JOIN 进明细行
                     # （头表字段以 __hdr__ 前缀并入，一行=一条明细+头字段重复）
                     if cfg and cfg.header_table_id and cfg.header_link_field_id and cfg.detail_link_field_id:
-                        rows = self._join_header_rows(table, cfg, rows, first_fm.join_type)
+                        rows = self._join_header_rows(table, cfg, rows, first_fm.join_type,
+                                                      conditions=header_conds)
                     for detail_fm in detail_fms:
                         try:
                             self._sync_detail_rows(
@@ -1407,7 +1417,8 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                         self._upsert_records_from_rows(
                             archive, table, rows, code_to_physical, schema_type_map,
                             pk_fields, operated_by, stats, matched_ids, change_entries, created_in_this_batch,
-                            sync_exclude_codes, match_channels, is_primary_table
+                            sync_exclude_codes, match_channels, is_primary_table,
+                            row_filter=precombine_filters.get(table.id),
                         )
                         self._collect_check_values(table, rows, code_checks, pk_fields,
                                                    code_to_physical, cc_primary_values, cc_member_values)
@@ -1712,12 +1723,15 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         except Exception:
             return None
 
-    def _query_external_table(self, table, order_by=None, conditions=None):
+    def _query_external_table(self, table, order_by=None, conditions=None, count_only=False):
         """查询外部数据源表数据（全量，无行数截断）。order_by 为物理列名时附加确定性排序（取首条折叠用）。
 
         conditions（2026-08-08 新增）：结构化 ON/WHERE 筛选条件（AND 组合），
         每项 {"field": 物理列名或字段编码, "operator": "eq/ne/gt/ge/lt/le/in", "value": 值}；
         字段名白名单校验（仅本表 active 字段的 physical_name/code），值全部参数化，禁 SQL 拼接注入。
+
+        count_only（2026-08-14 新增）：True 时发 SELECT COUNT(*) 快速返回行数（int，秒级），
+        供预组合数据预览等只需统计的场景，避免全量物化。
 
         2026-08-08：去除 TOP 1000 截断——多表各取前 N 行且物理序不一致，导致不同表匹配不同批次记录
         （真实根因：表 28↔表 22 截断交集为 0 致 NAME/PRICE 全空、表 24 与表 22 截断批次分裂致 1334 漂移）。
@@ -1777,15 +1791,24 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             with conn.cursor() as cursor:
                 if ds.db_type == 'sqlserver':
                     full_table = f'[{schema}].[{ext_table}]'
-                    cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
                 elif ds.db_type == 'oracle':
                     owner = schema.upper() if schema else ''
                     full_table = f'"{owner}"."{ext_table}"' if owner else f'"{ext_table}"'
-                    cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
                 elif ds.db_type == 'mysql':
-                    cursor.execute(f'SELECT * FROM `{ext_table}`{where_sql}{order_sql}', where_params)
+                    full_table = f'`{ext_table}`'
                 else:
                     full_table = f'"{schema}"."{ext_table}"'
+                if count_only:
+                    cursor.execute(f'SELECT COUNT(*) FROM {full_table}{where_sql}', where_params)
+                    row = cursor.fetchone()
+                    return int(row[0]) if row and row[0] is not None else 0
+                if ds.db_type == 'sqlserver':
+                    cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
+                elif ds.db_type == 'oracle':
+                    cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
+                elif ds.db_type == 'mysql':
+                    cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
+                else:
                     cursor.execute(f'SELECT * FROM {full_table}{where_sql}{order_sql}', where_params)
                 columns = [desc[0] for desc in cursor.description]
                 rows = []
@@ -1797,6 +1820,20 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 return rows
         finally:
             connections.databases.pop(alias, None)
+
+    def _split_conditions(self, conditions):
+        """按 field_source 拆分条件（2026-08-14）：header 条件应用到头表查询（预组合平铺），
+        detail 条件应用到明细表查询；无 field_source 标记的条件视为 detail 侧（存量兼容）。
+
+        背景：预组合的筛选条件可能命中头表字段（如价目表 NAME），原实现无条件拼到明细表查询，
+        header 字段不在明细表白名单 → ValueError 整表跳过（条件静默失效根因）。"""
+        header_conds, detail_conds = [], []
+        for cond in conditions or []:
+            if cond.get('field_source') == 'header':
+                header_conds.append(cond)
+            else:
+                detail_conds.append(cond)
+        return (header_conds or None), (detail_conds or None)
 
     def _build_conditions_sql(self, table, conditions, db_type):
         """结构化条件 → 方言化 WHERE 子句（字段白名单校验 + 值参数化，禁拼接注入）。"""
@@ -1855,13 +1892,18 @@ class ArchiveViewSet(viewsets.ModelViewSet):
             return '', []
         return ' WHERE ' + ' AND '.join(clauses), params
 
-    def _join_header_rows(self, table, cfg, rows, join_type='left'):
+    def _join_header_rows(self, table, cfg, rows, join_type='left', conditions=None, header_rows=None):
         """预组合平铺（2026-08-11 第三轮）：头表全量拉取，按 header_link_field↔detail_link_field
         JOIN 进明细行。头表字段以 `__hdr__{物理列名}` 前缀并入（与明细字段重名不冲突）；
         头表查询失败或未命中时降级保留纯明细行（不阻断同步）。
         同值多行取排序后最后一条（确定性，与 nested_sources 一致）。
 
-        2026-08-13 Issue 3：join_type='inner' 时无匹配头表的明细行不保留。"""
+        2026-08-13 Issue 3：join_type='inner' 时无匹配头表的明细行不保留。
+        2026-08-14：conditions 透传头表查询（header 侧筛选条件，如价目表 NAME eq 新明码实价）；
+        条件命中后头表只拉满足行 → inner 语义天然过滤无匹配明细行（等价用户 SQL INNER JOIN + WHERE）。
+
+        header_rows（2026-08-14 新增）：调用方已拉取头表行时传入复用（顺带可拿头表命中统计），
+        避免重复查询；None 时内部照旧自拉。"""
         from apps.modeling.models import Field as MField
         header_table = cfg.header_table
         h_link = cfg.header_link_field
@@ -1870,8 +1912,10 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         d_phys = d_link.physical_name or d_link.code
         t_pk = MField.objects.filter(
             table=header_table, is_primary_key=True, status=MField.Status.ACTIVE).first()
-        header_rows = self._query_external_table(
-            header_table, order_by=(t_pk.physical_name or t_pk.code) if t_pk else None)
+        if header_rows is None:
+            header_rows = self._query_external_table(
+                header_table, order_by=(t_pk.physical_name or t_pk.code) if t_pk else None,
+                conditions=conditions)
         if header_rows is None:
             return rows  # 头表查询失败：降级为纯明细（头字段缺失，同步不阻断）
         hindex = {}
@@ -1893,6 +1937,138 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 out.append(row)
             # join_type='inner' 时不保留未匹配头表的行
         return out
+
+    def _build_precombine_filters(self, domain, tables, pk_fields, code_to_physical, match_channels, stats):
+        """预组合过滤预扫（2026-08-14）：join_type=inner 的 detail 挂载在同步前预扫 kept_keys
+        （满足全部挂载条件的主记录主键值集合），返回 {表id: row_filter} 供主表/直连表 upsert 行级过滤。
+
+        - 每个 inner 挂载：带条件查明细表（+头表按 header 条件 inner 过滤）→ 挂载字段值集合；
+        - 挂载字段物理列不在明细/头表（异名挂载，如 FID→MATERIAL_GROUP 物理列在第三张表）→
+          桥接查询挂载字段所在表：source_field 值 → 主表主键值（对齐用户 SQL 多表 INNER JOIN 语义）；
+        - 多挂载取交集（AND，对齐用户 SQL 多个 INNER JOIN）；
+        - kept 空 → warning 该挂载不参与过滤；全部剔除/交集空 → 跳过过滤（warning，防误全量停用）；
+        - 仅 upsert 阶段行级过滤（防 stale 复活死循环）：detail 挂载/中转路径天然只命中已过滤的主记录。
+        """
+        from apps.modeling.models import DetailTableConfig, FieldMapping, Field as MField
+        precombine_filters = {}
+        if not pk_fields:
+            return precombine_filters
+        primary_table = next((t for t in tables if t.is_primary), None)
+        if not primary_table:
+            return precombine_filters
+        # 主表主键物理列（各表各自的物理列名）
+        pk_phys_by_table = {}
+        for pk in pk_fields:
+            for tbl_id, phys in list(code_to_physical.get(pk, [])) + list(match_channels.get(pk, [])):
+                pk_phys_by_table.setdefault(tbl_id, phys)
+        if not pk_phys_by_table.get(primary_table.id):
+            return precombine_filters
+
+        kept_sets = []
+        for table in tables:
+            if not table.data_source:
+                continue
+            cfg = DetailTableConfig.objects.filter(domain=domain, table=table).first()
+            fms = []
+            if cfg:
+                fms = list(FieldMapping.objects.filter(
+                    detail_config=cfg, source_field__status='active',
+                ).select_related('source_field', 'target_field', 'detail_config'))
+            else:
+                fms = list(FieldMapping.objects.filter(
+                    source_table=table, relation_type=FieldMapping.RelationType.DETAIL,
+                    source_field__status='active',
+                ).select_related('source_field', 'target_field', 'detail_config'))
+            for fm in fms:
+                if fm.join_type != 'inner':
+                    continue  # 仅 inner 挂载参与主记录过滤（left 不收敛数据）
+                target_code = fm.target_field.code if fm.target_field else None
+                if not target_code:
+                    continue
+                conds = None
+                if cfg and cfg.conditions:
+                    conds = cfg.conditions
+                elif fm.conditions:
+                    conds = fm.conditions
+                header_conds, detail_conds = self._split_conditions(conds)
+                rows = self._query_external_table(table, order_by=None, conditions=detail_conds)
+                if rows is None:
+                    stats['warnings'].append(
+                        f'预组合过滤：{table.name or table.code} 查询失败，该挂载不参与主记录过滤')
+                    continue
+                if cfg and cfg.header_table_id and cfg.header_link_field_id and cfg.detail_link_field_id:
+                    rows = self._join_header_rows(table, cfg, rows, fm.join_type, conditions=header_conds)
+                # —— 挂载键值集合：明细行 source_field 物理列行内取值（挂载键=明细行该列值）——
+                # 2026-08-14 修复：原实现按 target_code 查 code_to_physical 取 phys_cols，挂载字段
+                # code 非 schema code（如 MATERIAL_ID/MATERIAL_GROUP）时解析全空（kept 空 → 过滤
+                # 静默失效根因）；改为 source 侧行内取值，天然对齐用户 SQL 的 ON 语义
+                # （明细表挂载列值 = 主记录挂载键值）。
+                src_phys = fm.source_field.physical_name or fm.source_field.code
+                if not src_phys:
+                    stats['warnings'].append(
+                        f'预组合过滤：{table.name or table.code} 挂载未配置源字段，该挂载不参与主记录过滤')
+                    continue
+                src_values = set()
+                for row in rows:
+                    v = row.get(src_phys)
+                    if v is None:
+                        v = row.get(f'__hdr__{src_phys}')
+                    if v is not None:
+                        src_values.add(str(v))
+                if not src_values:
+                    stats['warnings'].append(
+                        f'预组合过滤：{table.name or table.code} 挂载 {target_code} 条件未命中任何明细行，'
+                        f'该挂载不参与过滤')
+                    continue
+                # —— 主记录侧挂载键通道 → kept（主键值集合，row_filter 统一按主键比较）——
+                # 挂载键值域 == target 表主键值域（同域，如价目明细 MATERIAL_ID ↔ 物料主键）→
+                # 直接以明细行值作为 kept；否则桥接 target_field 所在表（{主键值 → 挂载键值}，
+                # 如分组头 FID → 物料表 MATERIAL_GROUP），主记录行按主键值查桥接后比较。
+                tf = fm.target_field
+                tf_phys = tf.physical_name or tf.code
+                tf_table = tf.table
+                same_domain = False
+                if tf_table and tf_table.data_source:
+                    tf_pk = MField.objects.filter(
+                        table=tf_table, is_primary_key=True, status=MField.Status.ACTIVE).first()
+                    if tf_pk and (tf_pk.physical_name or tf_pk.code) == tf_phys:
+                        same_domain = True
+                if same_domain:
+                    kept = src_values
+                else:
+                    kept = set()
+                    if tf_table and tf_table.data_source:
+                        tf_pk = MField.objects.filter(
+                            table=tf_table, is_primary_key=True, status=MField.Status.ACTIVE).first()
+                        if tf_pk:
+                            tf_pk_phys = tf_pk.physical_name or tf_pk.code
+                            brow = self._query_external_table(tf_table, order_by=None)
+                            if brow is not None:
+                                for r in brow:
+                                    pv = r.get(tf_pk_phys)
+                                    tv = r.get(tf_phys)
+                                    if pv is None or tv is None:
+                                        continue
+                                    if str(tv) in src_values:
+                                        kept.add(str(pv))
+                if kept:
+                    kept_sets.append(kept)
+                else:
+                    stats['warnings'].append(
+                        f'预组合过滤：{table.name or table.code} 挂载 {target_code} 条件未命中任何主记录，'
+                        f'该挂载不参与过滤')
+        if not kept_sets:
+            stats['warnings'].append('预组合过滤：所有 inner 挂载条件均未命中，跳过主记录过滤')
+            return precombine_filters
+        kept = set.intersection(*kept_sets)
+        if not kept:
+            stats['warnings'].append(
+                '预组合过滤：inner 挂载条件交集为空（各条件分别命中但无共同主记录），跳过主记录过滤')
+            return precombine_filters
+        for tbl_id, phys in pk_phys_by_table.items():
+            precombine_filters[tbl_id] = (lambda row, _phys=phys, _kept=kept:
+                                          str(row.get(_phys)) in _kept)
+        return precombine_filters
 
     def _sync_detail_rows(self, archive, table, rows, detail_fm, code_to_physical, pk_fields,
                           match_channels, operated_by, stats, matched_ids, change_entries,
@@ -1931,12 +2107,25 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         # 本表物理列 → 挂载字段 schema code（明细归属主记录 + 代表行 key 构建用）
         # 2026-08-11 第三轮修复：预组合时头表物理列同样纳入（头表字段可作挂载关联键，
         # 平铺行中以其 `__hdr__` 前缀形态被 _record_key_for_row 取值）
-        target_code = detail_fm.target_field.code if detail_fm.target_field else None
+        # 2026-08-14：target_code 优先标准字段解析——挂载字段 code 可能非 schema code
+        # （如物料表 MATERIAL_ID 的 std=MTL_ID，主记录 data 键是 MTL_ID），用 code 直配会全失配
+        tf0 = detail_fm.target_field
+        target_code = None
+        if tf0:
+            sf0 = tf0.standard_field
+            target_code = sf0.standard_code if (sf0 and sf0.standard_code) else tf0.code
         target_physical_to_schema = {}
         if target_code:
             for tbl_id, phys in list(code_to_physical.get(target_code, [])) + list(match_channels.get(target_code, [])):
                 if tbl_id == table.id or tbl_id == header_table_id:
                     target_physical_to_schema[phys] = target_code
+        # 2026-08-14 异名挂载补洞：挂载字段物理列不在本表/头表（如分组头 FID→物料 MATERIAL_GROUP，
+        # 物理列在第三张表物料表）时，用 source_field 物理列作行内取值通道——行内值=明细行
+        # source_field 值，即用户 SQL 的 ON MTL1.MATERIAL_GROUP=GG.FID 语义（组合体主键=挂载键）。
+        if (not target_physical_to_schema and detail_fm.source_field and detail_fm.target_field):
+            src_phys = detail_fm.source_field.physical_name or detail_fm.source_field.code
+            if src_phys:
+                target_physical_to_schema[src_phys] = target_code
         if not target_code or not target_physical_to_schema:
             stats['warnings'].append(
                 f'明细子表 {source_table_name}：挂载字段 {target_code or "未配置"} 无本表物理列映射，'
@@ -2022,9 +2211,37 @@ class ArchiveViewSet(viewsets.ModelViewSet):
 
         # 预加载该档案全部记录（active 优先），代表行/明细归属匹配用
         # 2026-08-13 方向修正：按挂载字段值索引，同值多记录全保留（一对多挂载）
+        # 2026-08-14 桥接：挂载键不在档案 schema（如分组头 FID→物料 MATERIAL_GROUP，主记录
+        # data 无该键）时，经 target_field 所在表桥接 {主键值 → 挂载键值} 索引
+        schema_codes = {i.get('code') for i in schema}
+        bridge_by_pk = None
+        if target_code and target_code not in schema_codes and tf0 and tf0.table:
+            btable = tf0.table
+            b_pk = MField.objects.filter(
+                table=btable, is_primary_key=True, status=MField.Status.ACTIVE).first()
+            b_phys = tf0.physical_name or tf0.code
+            if btable.data_source and b_pk and b_phys:
+                b_pk_phys = b_pk.physical_name or b_pk.code
+                brow = self._query_external_table(btable, order_by=None)
+                if brow is not None:
+                    bridge_by_pk = {}
+                    for r in brow:
+                        pv = r.get(b_pk_phys)
+                        tv = r.get(b_phys)
+                        if pv is not None and tv is not None:
+                            bridge_by_pk[str(pv)] = str(tv)
         existing_records = {}
         for rec in ArchiveRecord.objects.filter(archive=archive).order_by('id'):
-            val = rec.data.get(target_code)
+            if bridge_by_pk is not None:
+                pk_v = None
+                for pk in pk_fields:
+                    v0 = rec.data.get(pk)
+                    if v0 is not None:
+                        pk_v = v0
+                        break
+                val = bridge_by_pk.get(str(pk_v)) if pk_v is not None else None
+            else:
+                val = rec.data.get(target_code)
             if val is None or str(val) == '':
                 continue
             key = str(val)
@@ -2236,7 +2453,7 @@ class ArchiveViewSet(viewsets.ModelViewSet):
                 return c
         return candidates[0]
 
-    def _upsert_records_from_rows(self, archive, table, rows, code_to_physical, schema_type_map, pk_fields, operated_by, stats, matched_ids=None, change_entries=None, created_in_this_batch=None, sync_exclude_codes=None, match_channels=None, is_primary_table=False):
+    def _upsert_records_from_rows(self, archive, table, rows, code_to_physical, schema_type_map, pk_fields, operated_by, stats, matched_ids=None, change_entries=None, created_in_this_batch=None, sync_exclude_codes=None, match_channels=None, is_primary_table=False, row_filter=None):
         """将查询结果行写入档案（双层存储，换底重合并）：
 
         - 该表映射到的字段值直接写入 source_data 底层（零比对，无保护/覆盖分支）；
@@ -2247,7 +2464,9 @@ class ArchiveViewSet(viewsets.ModelViewSet):
         - 每条变更（新增/修改/复活）追加到 change_entries，供收尾落变更日志批次；
         - 匹配通道（match_channels）：组合字段非主成员列（外键）仅用于构建记录 key，不写入档案；
         - 确定性折叠：同 key 多行保留排序后的最后一行（1:n 取首条），并计入 cardinality_fold_count；
-        - 非主表匹配不到已有记录时跳过不创建（外键引用不是独立实体，防数据爆炸）。
+        - 非主表匹配不到已有记录时跳过不创建（外键引用不是独立实体，防数据爆炸）；
+        - 预组合过滤（2026-08-14）：row_filter 非空时仅处理满足条件的行（不满足的行不进 seen_keys/
+          不 upsert/不创建，防 stale 记录被源行命中自动复活形成过滤死循环）。
         """
         schema = archive.schema or []
         if matched_ids is None:
@@ -2293,6 +2512,11 @@ class ArchiveViewSet(viewsets.ModelViewSet):
 
         source_table_name = table.name or table.code
         now_iso = timezone.now().isoformat()
+
+        # 预组合过滤（2026-08-14）：行级过滤必须在 upsert 阶段（防 stale 复活死循环——
+        # 不满足条件的行不进 seen_keys、不 upsert、不进 matched_ids，下一轮停用清扫统一标 stale）
+        if row_filter is not None:
+            rows = [row for row in rows if row_filter(row)]
 
         # 预解析 + 按主键折叠：同 key 多行保留排序后的最后一行（确定性取首条）
         parsed_rows = []

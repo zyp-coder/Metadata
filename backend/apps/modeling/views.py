@@ -2045,6 +2045,58 @@ class DetailTableConfigViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({'error': f'检测失败: {e}'}, status=400)
 
+    @action(detail=True, methods=['get'], url_path='preview')
+    def preview(self, request, pk=None):
+        """预组合数据预览（2026-08-14 第一百六十三轮）：按同步口径查明细表（detail 侧条件）
+        + 头表 JOIN 平铺（header 侧条件），返回统计（明细全量/条件命中/头表匹配）+ 前 limit 行样例。
+
+        复用同步引擎（惰性 import ArchiveViewSet，同 detect_row_key），与 _build_precombine_filters
+        口径一致；行内 `__hdr__` 前缀键即头表字段（匹配到头表的行才有）。
+        limit 参数控制样例行数（默认 50，上限 2000）。"""
+        cfg = self.get_object()
+        if not cfg.table.data_source:
+            return Response({'error': f'明细表 {cfg.table.name or cfg.table.code} 未配置数据源，无法预览'},
+                            status=400)
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 50)), 2000))
+        except (TypeError, ValueError):
+            limit = 50
+        from apps.archive.views import ArchiveViewSet
+        try:
+            avs = ArchiveViewSet()
+            header_conds, detail_conds = avs._split_conditions(cfg.conditions)
+            detail_total = avs._query_external_table(cfg.table, count_only=True)
+            detail_hit = avs._query_external_table(cfg.table, count_only=True, conditions=detail_conds)
+            rows = avs._query_external_table(cfg.table, conditions=detail_conds)
+            if rows is None:
+                return Response({'error': f'明细表 {cfg.table.name or cfg.table.code} 查询失败（连接异常或表为空）'},
+                                status=400)
+            header_total = None
+            header_matched = None
+            if cfg.header_table_id and cfg.header_link_field_id and cfg.detail_link_field_id:
+                header_rows = avs._query_external_table(cfg.header_table, conditions=header_conds)
+                if header_rows is not None:
+                    header_total = len(header_rows)
+                    rows = avs._join_header_rows(cfg.table, cfg, rows, join_type='left',
+                                                 conditions=header_conds, header_rows=header_rows)
+                    header_matched = sum(
+                        1 for r in rows if any(str(k).startswith('__hdr__') for k in r))
+                # header_rows is None → 头表不可用：header_total/header_matched 均 None（前端显示「头表不可用」）
+            # 样例匹配优先：先取匹配头表的行再补未匹配行（物理序前列可能全是未匹配行，用户会误判）
+            matched_rows = [r for r in rows if any(str(k).startswith('__hdr__') for k in r)]
+            unmatched_rows = [r for r in rows if not any(str(k).startswith('__hdr__') for k in r)]
+            sample = (matched_rows + unmatched_rows)[:limit]
+            return Response({
+                'detail_total': detail_total,
+                'detail_hit': detail_hit,
+                'header_total': header_total,
+                'header_matched': header_matched,
+                'rows': sample,
+                'truncated': len(rows) > limit,
+            })
+        except Exception as e:
+            return Response({'error': f'预览失败: {e}'}, status=400)
+
 
 class FieldMappingViewSet(viewsets.ModelViewSet):
     """字段映射 API

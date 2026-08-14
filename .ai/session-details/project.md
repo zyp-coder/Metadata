@@ -2,6 +2,22 @@
 
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
 
+### 第一百六十一轮（2026-08-14）标签：服务器同步超时、HYT00、login timeout、SQL Server 网络放行
+
+**任务**：用户反馈服务器上「维护好关系，新建档案同步数据」报 `('HYT00', '[HYT00] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0) (SQLDriverConnect)')`，涉及 4 张 EDS_K3 表（物料信息/销售价目表/物料分组/物料）；用户提出「本机数据库也换成跟服务器一样」。
+
+**读取文件**：deploy/.env、backend/apps/modeling/views.py（DataSourceViewSet 动态连接构造）、modeling/models.py（DataSource 模型）、deploy/docker-compose.yml、deploy/data_dump.json、backend/Dockerfile、backend/scripts/diag_sqlserver_activity.py、.ai/session-details/archive.md（旧驱动缺失记录，已确认过时）
+
+**查证结论（证据链）**：
+1. 本机 DataSource（dev.db）实测：id=2，host=39.108.132.32:1433，db=METADATA，user=MD_READ —— pyodbc 直连**成功**，读到 22 张表
+2. 服务器部署数据 deploy/data_dump.json DataSource pk=2 **同配置**（39.108.132.32/METADATA/MD_READ）；docker-compose 每次容器启动 loaddata 覆盖 → 服务器配置与本机一致
+3. 服务器 Dockerfile 已装 ODBC Driver 18（L17-24）→ 错误信息 `[Microsoft][ODBC Driver 18 for SQL Server]` 实证驱动在容器内（archive.md「slim 无驱动」记录已过时）
+4. 排除法：非 SQLite/Postgres 差异（ODBC 直连外部 SQL Server 不经过 Django 主库）、非配置差异（两侧一致）→ **根因 = 服务器（dolphin-1，172.18.148.11 内网）到 39.108.132.32:1433 TCP 不通**（SQL Server 侧安全组/防火墙按来源 IP 限制）
+
+**已给排查清单（用户执行中）**：①服务器上 `timeout 8 bash -c '</dev/tcp/39.108.132.32/1433'` 坐实网络 + `curl -s ifconfig.me` 拿公网出口 IP；②按 39.108.132.32 机器类型放行 1433（阿里云 ECS→安全组入方向；物理机→公司防火墙；Windows→防火墙+SQL 配置管理器 TCP/IP）；③复验 TCP + UI 重跑同步
+
+**遗留**：等用户反馈第 1 步结果（TCP 通/不通 + 公网 IP）后定下一步；若 39.108.132.32 与服务器同阿里云 VPC 可考虑改内网 IP 互访（优化项，不阻塞）
+
 ### 第一百五十三轮（2026-08-13）标签：release.ps1、sync.sh、一键发布、服务器同步
 
 **任务**：用户测试工作流诉求「本地一键启动前后端 + 改完保证 git commit + 服务器同步」，封装本地发布脚本 + 服务器同步脚本。服务器目录已确认 /opt/metadata/deploy（有 Node/npm）。

@@ -353,3 +353,14 @@
 - **验证**：vue-tsc 0 + build 通过；Browser 实跑：6 端点字段行 Y 全部零误差（edge2 源端 646.5=550+96.5 预组合标签+字段行）、路由离开再进入/刷新 3 场景 3 边 4 节点零 console error、PUT 0 次
 - **状态**：实测验证完成；待 commit+push+用户服务器部署
 - **遗留（P2）**：NODE3 保存位置 translate(-80,240) 负 x，画布无 scroller 左 80px 不可见（保存位置导致，待用户决策是否重排）
+
+### 第一百六十三轮（2026-08-14）标签：预组合数据预览、detail-configs/{id}/preview、__hdr__、样例匹配优先
+- **背景**：用户“还是不对的。先增加一个功能。预组合那里搞一个数据预览…”——上轮同步收敛 955 条但用户认为不对，先加预览工具自查；AskUserQuestion 确认：预览=统计+样例+**筛选项**（用户 Other 补充），不对在哪用户暂不告知
+- **后端 modeling**：`DetailTableConfigViewSet.preview`（GET /api/detail-configs/{id}/preview/?limit=N，默认 50 上限 2000）；惰性 import ArchiveViewSet（同 detect_row_key 先例）复用同步引擎：_split_conditions → 明细表 detail_conds 查询 → _join_header_rows 头表平铺；返回 detail_total/detail_hit/header_total/header_matched/rows/truncated；头表不可用降级 None；**样例匹配优先**（matched+unmatched 拼接，实测暴露物理序前 50 行全未匹配会误导用户判断“没匹配上”）
+- **后端 archive 支撑扩展**：_query_external_table 加 count_only（SELECT COUNT(*) 秒级统计，full_table 构建重构统一）；_join_header_rows 加 header_rows 参数（复用避免重复查询）；向后兼容零破坏
+- **前端 DomainFieldMapping.vue**：管理注册列表 action 列「预览」+ 挂载弹窗预组合列表项预览按钮（双入口）；预览弹窗 1100px：4 统计卡片 + 字段/值模糊筛选（匹配 N/M 行）+ limit 50/200/1000 切换 + a-table（首列匹配 tag，__hdr__ 前缀列显示「列名（头表）」）+ truncated 提示 + 加载兜底文案；modeling.ts detailConfigApi.preview；types DetailConfigPreview
+- **测试**：DetailTableConfigPreviewTest 6 条（mock _query_external_table/_join_header_rows：统计+样例/limit 全量/无头表/明细查询失败 400/头表失败降级/无数据源 400）6/6 PASS；modeling+archive 全套 127/127 PASS；vue-tsc 0 errors；django check 通过
+- **真实实测**（tester 登录；--noreload 下新 action 首请求 404 → dev.ps1 重启解决）：价目组合 id=2 → 239,504/239,504/1/955（与上轮同步保留 955 吻合）；物料分组 id=6 → 1,782/64/1,782/64（FULL_PARENT_ID starts_with .101041 生效）；两组合样例行 100% 带 __hdr__ 字段
+- **修改文件**：backend/apps/modeling/views.py、backend/apps/archive/views.py、backend/apps/modeling/tests.py、frontend/src/views/modeling/DomainFieldMapping.vue、frontend/src/api/modeling.ts、frontend/src/types/index.ts
+- **状态**：全链路验证完成；待 commit+push+用户服务器部署
+- **方向判定表**：不触及数据流向/存储模型/模块边界/核心交互范式四类（预览为只读查询展示，复用既有同步引擎口径，不新增模块）

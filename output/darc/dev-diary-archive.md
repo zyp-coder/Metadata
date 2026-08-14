@@ -2,6 +2,41 @@
 
 > 记录 archive 模块编码实现的关键数据流与实现要点，供后续影响分析使用。
 
+## 2026-08-14 — 预组合过滤主记录引擎改造（第一百六十二轮）
+
+### 变更背景
+用户反馈「预组合表设置了筛选条件 + inner join，同步结果数据量未收敛」；期望 SQL：价目明细（NAME 明码实价）INNER JOIN 物料 INNER JOIN 分组（FULL_PARENT_ID starts_with .101041）。已按用户 SQL 口径验证：最终主记录应 = 955 条（eq「明码实价」表头 955 明细）。
+
+### 关键实现（archive/views.py，7 个改动点）
+- **`_split_conditions`（新）**：conditions 按 field_source 拆 header_conds/detail_conds；header 条件透传 `_join_header_rows` 头表查询（原实现 header 字段不在明细表白名单 → ValueError 整表跳过 = 筛选条件静默失效根因）
+- **`_build_precombine_filters`（新，129 行）**：同步前对每个 inner detail 挂载预扫 kept_keys（主键值集合），多挂载交集后生成 row_filter 供主表/直连表 upsert 行级过滤（防 stale 复活死循环：过滤必须发生在 upsert 阶段）；kept 全部空/交集空 → warning + 跳过过滤（防误全量停用）
+- **`_upsert_records_from_rows`**：加 row_filter 参数，L2455-2457 行级过滤（不进 seen_keys/不 upsert/不创建）
+- **`_join_header_rows`**：加 conditions 参数透传头表查询
+- **`_sync_detail_rows` 异名挂载补洞**：挂载字段物理列不在本表/头表（分组头 FID→物料 MATERIAL_GROUP 在第三张表）→ source_field 物理列作行内取值通道
+
+### 实跑暴露根因与修复（第二轮）
+实跑域 2（209,123 主记录）过滤未生效（两个挂载 kept 全空）→ 探针定位：
+1. **target_code 错位**：挂载字段 code（MATERIAL_ID/MATERIAL_GROUP）非 schema code（主表主键 schema code=MTL_ID）；`code_to_physical['MATERIAL_ID']=None` → 预扫/挂载全失配
+2. **预扫 kept 取值错误**：原实现按 target_code 查 code_to_physical 取 phys_cols → 全空；改为**明细行 source_field 物理列行内取值**（src_values），主记录侧按「同域直取 or 桥接」收敛为主键值集合：
+   - 同域（tf_phys == target 表主键物理列，如价目 MATERIAL_ID↔物料主键）→ kept=src_values 直接主键比较
+   - 异键（如分组头 FID→物料 MATERIAL_GROUP）→ 桥接查询 target_field.table（物料表）：{主键值→挂载键值}，主记录行按主键查桥接后比较
+3. **挂载归属桥接**：`_sync_detail_rows` target_code 优先标准字段解析（MATERIAL_ID→MTL_ID）；挂载键不在档案 schema（主记录 data 无该键）→ 桥接 target_field 所在表 {主键值→挂载键值} 索引 existing_records
+
+### 配置修正（本机 dev.db，用户确认）
+- cfg6（分组）：conditions PARENT_ID → **FULL_PARENT_ID**（用户界面确认「A.我的配置错了」）
+- cfg2（价目）：NAME eq '新明码实价' → **eq '明码实价'**（实测：eq「新明码实价」的 838 个物料为 7 位 ID，全部不在物料表 209,123 行（6 位 ID）→ 与分组交集 0；eq「明码实价」955 条明细（6 位 ID）全在 .101041 组 → 结果 955，对齐用户 SQL 口径）
+
+### 新增测试（tests.py）
+- `PrecombineFilterSyncTest`（7 条）：split 条件拆分 / header 条件透传 / kept 交集过滤 / 全空跳过 / 单挂载空跳过 / upsert 行级过滤 / stale 防复活
+- `DetailSyncHeteronymMountTest`（3 条）：异名挂载 source 取值 / 未匹配跳过 / **桥接挂载（挂载键不在 schema）**
+
+### 实跑验证（域 2，二次实跑）
+records_updated=**955**（209,123→955 active），records_deactivated=**208,168**，details_created=**117,549**（分组头+价目明细挂载生效），tables_synced=6，errors=[]；唯一 warning：物料分组未配置代表行排序字段（既有配置提示）
+
+### 遗留问题
+- 明细行归属索引（existing_records）遍历全部记录（含将停用的 stale）→ 分组头明细挂到 116,594 个将停用记录上（details_created=117,549 中约 116,594 属此类）；active 记录（955）明细正常。不影响用户诉求（主记录收敛），停用记录不展示；如需只挂 active 可后续单独处理
+- 服务器 data_dump.json 配置暂缓（用户裁决 Q4「暂缓 dump，只改本机」），服务器上 cfg2/cfg6 条件需发布时同步
+
 ## 2026-08-13 — 普通关联筛选条件接入同步引擎（第一百五十九轮）
 
 ### 变更背景

@@ -259,3 +259,10 @@
 - **实证支撑**：域 14 真实数据——表4 S_K3_T_BD_MATERIALGROUP 分组头 FID 主键、GROUP_ID 非主键业务键，表1 S_K3_T_BD_MATERIAL 物料 MATERIAL_GROUP 非主键，fm=8 已存在 GROUP_ID 挂载（组合体端非主键）——用户场景完全成立；新测试 DetailSyncOneToManyTest 3 条（一对多挂载/第二轮幂等/未匹配跳过）+ 存量 DetailSyncEngineTest 11 条定向回归全过
 - **adqa 自查**：质疑1 归属键不在 schema（无本表/头表物理列映射）→ 同步警告返回不静默；质疑2 代表行覆盖同值多记录（同数据写多记录）→ 新测试断言共享写入；质疑3 存量回归（主键挂载语义不变）→ DetailSyncEngineTest 11 条全过；质疑4 detail-check 简化漏报方向异常 → 同步侧警告兜底
 - **回执**：回执：闸[✓] 记[✓] 拓[✓] 测[✓]（新增测试 3 条 + 全套 105/105 回归）
+
+## 架构级决策：预组合过滤主记录 + header 条件消费 + 异名挂载（2026-08-14 方向锁定，待实施）
+
+- **背景**：第一百六十二轮用户反馈「同步成功了但是同步不对」，期望同步结果≈用户 SQL（物料 ∩ 物料_L ∩ 分组 FULL_PARENT_ID LIKE '.101041%' ∩ 明码实价价目明细，955 条）；实测根因三层——①主表全量入档（主表优先处理 L1291，detail 挂载只挂不上过滤主记录）；②header 字段条件（NAME eq 新明码实价，field_source='header'）被 _build_conditions_sql 白名单拦截（仅明细表字段）→ ValueError 被 L1397/L1425-1426 吞进 errors → 价目表明细整表跳过，条件静默失效；③fm13 分组挂载 target_field=物料.MATERIAL_GROUP 无本表/头表物理列映射（2026-08-13 方向修正只覆盖挂载字段在组合体表内的场景）→ 同步警告返回，分组过滤静默失效；配置字段 PARENT_ID 语义错误（应为 FULL_PARENT_ID，用户确认改配置）
+- **决策（方向理解清单 7 条 + adqa 质疑关 5 条，§11.1 全流程，用户确认「开始编码」）**：①主记录过滤=upsert 阶段行级过滤——不满足全部 inner 预组合条件的源行不 upsert/不创建/不进 matched_ids（**必须行级过滤，纯后置过滤会被 upsert 复活机制（L2352-2355 stale 源端重现自动复活）抵消成死循环**）；过滤判定=行内挂载字段物理列值或桥接映射（挂载字段所在表↔主表共享主键列预扫构建，如物料 MATERIAL_ID→MATERIAL_GROUP）；②conditions 按 field_source 拆分：header 条件应用到头表查询（_join_header_rows 加 conditions 参数），detail 条件应用到明细表查询，白名单按各自表校验；③异名挂载补洞：target_physical_to_schema 追加 source_field 物理列→target_code 映射（明细行按 source_field 物理列取值归属，如分组头 FID→主记录 MATERIAL_GROUP）；④预扫阶段（主表处理前）收集 kept_keys（挂载值集合）+桥接映射，**不缓存 rows**（65 万行内存风险，查询翻倍可接受）；kept_keys 空→跳过过滤+warning 显式提示；⑤只对 join_type=inner 挂载过滤，left/reference 不参与；⑥数据量口径=NAME eq '新明码实价'（838 条，用户裁决）；服务器 data_dump.json 配置持久化暂缓（用户裁决 Q4=暂缓，只改本机配置）
+- **实证支撑**：探针 tmp_probe_domain2.py 实测表结构/行数（物料 209,123、价目明细 239,504、分组头 1,782）、用户 SQL=955、配置 eq 版=838；读代码证实 _write_dimension_row 对 DELETED 记录无复活分支（Q1 证伪失败）、docker-compose 无 mem_limit 但采纳不缓存方案（Q2）、FID/MATERIAL_GROUP 值域一致性由用户 SQL 实证（Q5）
+- **adqa 硬回执**：回执：质[✓5条] 伪[✓Q1读代码/Q2裁决不缓存/Q3清单条款/Q4用户裁决/Q5用户SQL实证] 锁[✓确认5/暂定0/否决0]

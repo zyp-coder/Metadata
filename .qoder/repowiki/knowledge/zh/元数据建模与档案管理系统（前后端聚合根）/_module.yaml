@@ -1,6 +1,6 @@
 schema_version: 1
 module_path: ""
-title: 元数据建模与档案管理系统根工程
+title: 元数据建模与档案管理系统（前后端聚合根）
 scope:
     - .ai/
     - scripts/

@@ -311,6 +311,8 @@
           <template v-else-if="column.key === 'row_key'">{{ record.row_key_field_name || '自动检测' }}</template>
           <template v-else-if="column.key === 'mappings'">{{ record.mapping_count }} 个</template>
           <template v-else-if="column.key === 'action'">
+            <a @click="openDetailConfigPreview(record)">预览</a>
+            <a-divider type="vertical" />
             <a @click="openDetailConfigEdit(record)">编辑</a>
             <a-divider type="vertical" />
             <a-popconfirm :title="record.mapping_count > 0 ? `该组合已被 ${record.mapping_count} 个映射挂载，删除后这些映射将变为未挂载状态，确认删除？` : '确认删除该注册？'" @confirm="removeDetailConfig(record)">
@@ -319,6 +321,52 @@
           </template>
         </template>
       </a-table>
+    </a-modal>
+
+    <!-- 预组合数据预览弹窗（2026-08-14 第一百六十三轮）：统计 + 筛选 + 样例行 -->
+    <a-modal v-model:open="previewModalVisible" :title="previewTitle" width="1100px" :footer="null">
+      <a-alert v-if="previewError" type="error" show-icon :message="previewError" style="margin-bottom: 12px" />
+      <template v-else-if="previewData">
+        <a-row :gutter="12" style="margin-bottom: 12px">
+          <a-col :span="6">
+            <div class="preview-stat">明细总行数<div class="preview-stat__num">{{ previewData.detail_total ?? '—' }}</div></div>
+          </a-col>
+          <a-col :span="6">
+            <div class="preview-stat">条件命中行数<div class="preview-stat__num">{{ previewData.detail_hit ?? '—' }}</div></div>
+          </a-col>
+          <a-col :span="6">
+            <div class="preview-stat">头表匹配行数<div class="preview-stat__num">{{ previewData.header_matched ?? '—' }}</div></div>
+          </a-col>
+          <a-col :span="6">
+            <div class="preview-stat">头表命中行数<div class="preview-stat__num">{{ previewData.header_total ?? '—' }}</div></div>
+          </a-col>
+        </a-row>
+        <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap">
+          <a-select v-model:value="previewField" placeholder="筛选字段" style="width: 200px" allowClear
+                    :options="previewFieldOptions" />
+          <a-input v-model:value="previewKeyword" placeholder="筛选值（模糊匹配）" style="width: 220px" allowClear />
+          <span style="color: #999; font-size: 12px">匹配 {{ previewFilteredRows.length }} / {{ previewData.rows.length }} 行</span>
+          <div style="flex: 1" />
+          <span style="color: #999; font-size: 12px">样例行数</span>
+          <a-select v-model:value="previewLimit" style="width: 90px" @change="onPreviewLimitChange">
+            <a-select-option :value="50">50</a-select-option>
+            <a-select-option :value="200">200</a-select-option>
+            <a-select-option :value="1000">1000</a-select-option>
+          </a-select>
+        </div>
+        <a-table :dataSource="previewFilteredRows" :columns="previewColumns" rowKey="__row_idx" size="small"
+                 :loading="previewLoading" :pagination="false" :scroll="{ x: 'max-content', y: 420 }">
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === '__hdr_matched'">
+              <a-tag :color="hasHeaderMatch(record) ? 'green' : 'red'">{{ hasHeaderMatch(record) ? '匹配' : '未匹配' }}</a-tag>
+            </template>
+          </template>
+        </a-table>
+        <div v-if="previewData.truncated" style="margin-top: 8px; color: #faad14; font-size: 12px">
+          仅显示前 {{ previewLimit }} 行样例（条件命中共 {{ previewData.detail_hit ?? '—' }} 行）
+        </div>
+      </template>
+      <div v-else style="text-align: center; padding: 40px 0; color: #999">正在拉取外部表数据，可能需要几十秒…</div>
     </a-modal>
 
     <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="960px">
@@ -368,9 +416,14 @@
                            class="field-item"
                            :class="{'field-item--selected': form.detail_config === cfg.id}"
                            @click="onDetailConfigChange(cfg.id)">
-                        <div style="font-weight: 500; font-size: 12px">{{ cfg.header_table_name ? cfg.header_table_name + ' + ' : '' }}{{ cfg.table_name }}</div>
-                        <div style="font-size: 11px; color: #999; margin-top: 2px">{{ cfg.header_table_code ? cfg.header_table_code + '+' : '' }}{{ cfg.table_code }}</div>
-                        <div v-if="cfg.row_key_field_name" style="font-size: 11px; color: #faad14; margin-top: 2px">行键:{{ cfg.row_key_field_name }}</div>
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px">
+                          <div style="flex: 1; min-width: 0">
+                            <div style="font-weight: 500; font-size: 12px">{{ cfg.header_table_name ? cfg.header_table_name + ' + ' : '' }}{{ cfg.table_name }}</div>
+                            <div style="font-size: 11px; color: #999; margin-top: 2px">{{ cfg.header_table_code ? cfg.header_table_code + '+' : '' }}{{ cfg.table_code }}</div>
+                            <div v-if="cfg.row_key_field_name" style="font-size: 11px; color: #faad14; margin-top: 2px">行键:{{ cfg.row_key_field_name }}</div>
+                          </div>
+                          <a style="font-size: 12px; flex-shrink: 0" @click.stop="openDetailConfigPreview(cfg)">预览</a>
+                        </div>
                       </div>
                       <div v-if="domainDetailConfigs.length === 0" class="field-panel__empty">暂无注册，请先管理注册</div>
                     </div>
@@ -732,6 +785,63 @@ const dcDetectingLink = ref(false)
 const domainDetailConfigs = ref<any[]>([])
 const dcListModalVisible = ref(false)
 const dcListSearch = ref('')
+
+// 预组合数据预览（2026-08-14 第一百六十三轮）
+const previewModalVisible = ref(false)
+const previewLoading = ref(false)
+const previewError = ref('')
+const previewData = ref<any>(null)
+const previewLimit = ref(50)
+const previewCfg = ref<any>(null)
+const previewField = ref<string>('')
+const previewKeyword = ref('')
+
+const previewTitle = computed(() => {
+  const c = previewCfg.value
+  if (!c) return '预组合数据预览'
+  return `${c.header_table_name ? c.header_table_name + ' + ' : ''}${c.table_name} 数据预览`
+})
+
+// 预览样例行字段选项（首行键集去重，__hdr__ 前缀标注头表来源）
+const previewFieldOptions = computed(() => {
+  const rows = previewData.value?.rows || []
+  const set = new Set<string>()
+  for (const r of rows) for (const k of Object.keys(r)) set.add(k)
+  return Array.from(set).map((k) => ({
+    value: k,
+    label: k.startsWith('__hdr__') ? `${k.slice(7)}（头表）` : k,
+  }))
+})
+
+// 预览表格列（固定首列=头表匹配状态；__hdr__ 前缀键显示为「列名（头表）」）
+const previewColumns = computed(() => {
+  const rows = previewData.value?.rows || []
+  if (rows.length === 0) return []
+  const keys: string[] = []
+  for (const r of rows) for (const k of Object.keys(r)) if (!keys.includes(k)) keys.push(k)
+  return [
+    { title: '头表匹配', key: '__hdr_matched', width: 90, fixed: 'left' },
+    ...keys.map((k) => ({
+      title: k.startsWith('__hdr__') ? `${k.slice(7)}（头表）` : k,
+      key: k,
+      dataIndex: k,
+      ellipsis: true,
+    })),
+  ]
+})
+
+// 预览样例行按「字段 + 值模糊」前端筛选（仅筛选已拉取样例，统计数字不受影响）
+const previewFilteredRows = computed(() => {
+  const rows = previewData.value?.rows || []
+  const f = previewField.value
+  const kw = previewKeyword.value.trim().toLowerCase()
+  const filtered = !f || !kw ? rows : rows.filter((r: any) => String(r[f] ?? '').toLowerCase().includes(kw))
+  return filtered.map((r: any, i: number) => ({ ...r, __row_idx: i }))
+})
+
+function hasHeaderMatch(row: any) {
+  return Object.keys(row).some((k) => k.startsWith('__hdr__'))
+}
 
 // 预组合列表搜索过滤
 const filteredDetailConfigs = computed(() => {
@@ -1879,6 +1989,34 @@ function openDetailConfigList() {
   loadDetailConfigs()
 }
 
+// 预组合数据预览（2026-08-14 第一百六十三轮）：统计 + 样例行；limit 切换重新拉取
+async function openDetailConfigPreview(cfg: any) {
+  previewCfg.value = cfg
+  previewField.value = ''
+  previewKeyword.value = ''
+  previewModalVisible.value = true
+  await loadDetailConfigPreview()
+}
+
+async function loadDetailConfigPreview() {
+  if (!previewCfg.value) return
+  previewLoading.value = true
+  previewError.value = ''
+  try {
+    const res = await detailConfigApi.preview(previewCfg.value.id, { limit: previewLimit.value })
+    previewData.value = res.data
+  } catch (e: any) {
+    previewError.value = extractApiError(e) || '预览失败'
+    previewData.value = null
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+function onPreviewLimitChange() {
+  loadDetailConfigPreview()
+}
+
 function openDetailConfigCreate() {
   dcEditingId.value = null
   dcForm.value = {
@@ -2505,5 +2643,21 @@ onBeforeUnmount(() => {
 }
 .field-item--disabled:hover {
   background: transparent;
+}
+
+/* 预组合数据预览统计卡片（2026-08-14 第一百六十三轮） */
+.preview-stat {
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #666;
+}
+.preview-stat__num {
+  font-size: 22px;
+  font-weight: 600;
+  color: #1677ff;
+  margin-top: 2px;
 }
 </style>

@@ -447,3 +447,22 @@ ER 图字段行从单行改为两行布局：
 - `frontend/src/views/modeling/DomainFieldMapping.vue`：批1~批4 全在此文件（约+97/-57 行）
 ### 验证
 vue-tsc --noEmit 0 errors；已 commit+push（3a93caa）
+
+## 2026-08-14 预组合数据预览功能（第一百六十三轮）
+### 变更背景
+用户："还是不对的。先增加一个功能。预组合那里搞一个数据预览。可以让我看看预组合的数据的情况。是不是对的。"——上轮预组合过滤引擎改造后同步收敛 955 条但用户认为不对，先加预览工具自查（统计+样例+筛选，用户确认加筛选项）。
+### 变更摘要
+- **后端 modeling**：`DetailTableConfigViewSet` 新增 `preview` action（GET /api/detail-configs/{id}/preview/?limit=N，默认 50 上限 2000）——复用同步引擎口径（惰性 import ArchiveViewSet，同 detect_row_key 先例）：`_split_conditions` 拆 header/detail 条件 → 明细表带 detail_conds 查询 → `_join_header_rows` 带 header_conds 平铺（`__hdr__` 前缀键=头表字段）→ 返回 `detail_total`（明细全量 COUNT）/ `detail_hit`（detail 条件命中 COUNT）/ `header_total`（头表条件命中行数）/ `header_matched`（匹配头表行数）/ `rows`（样例行）/ `truncated`；样例**匹配优先**（matched+unmatched 拼接截取，实测暴露物理序前 50 行全未匹配会误导）；头表不可用时 header 字段降级 None
+- **后端 archive 引擎最小扩展**：`_query_external_table` 加 `count_only` 参数（SELECT COUNT(*) 秒级统计，full_table 构建重构统一）；`_join_header_rows` 加 `header_rows` 参数（调用方已拉头表时复用，避免重复查询）——向后兼容零破坏
+- **前端 DomainFieldMapping.vue**：管理注册列表 action 列加「预览」+ 挂载弹窗预组合列表项加预览按钮（双入口）；预览弹窗 1100px——4 张统计卡片（明细总行数/条件命中/头表匹配/头表命中）+ 字段+值模糊筛选（匹配 N/M 行）+ limit 切换 50/200/1000 + a-table（首列「头表匹配」绿/红 tag，`__hdr__` 前缀列显示「列名（头表）」）+ truncated 提示条 + 加载兜底文案
+- `api/modeling.ts`：detailConfigApi.preview；`types/index.ts`：DetailConfigPreview 接口
+### 变更文件清单
+- `backend/apps/modeling/views.py`：preview action
+- `backend/apps/archive/views.py`：_query_external_table count_only + _join_header_rows header_rows（支撑扩展）
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：双入口+预览弹窗+筛选
+- `frontend/src/api/modeling.ts`、`frontend/src/types/index.ts`
+- `backend/apps/modeling/tests.py`：DetailTableConfigPreviewTest 6 条
+### 验证
+- 新测试 6/6 PASS（统计+样例/limit 全量/无头表配置/明细查询失败 400/头表查询失败降级/无数据源 400）；modeling+archive 全套 127/127 PASS；vue-tsc 0 errors；django check 通过
+- 真实请求实测（tester 登录，--noreload 重启后）：价目组合 id=2 → detail_total=239,504 / detail_hit=239,504 / header_total=1 / header_matched=955（与第一百六十二轮同步保留 955 完全吻合）；物料分组 id=6 → detail_total=1,782 / detail_hit=64（FULL_PARENT_ID starts_with .101041 生效）/ header_total=1,782 / header_matched=64；两组合样例行全部带 `__hdr__` 字段（匹配优先生效）
+- 实战教训：--noreload 部署下新 action 必须重启才生效（实测首请求 404 → dev.ps1 重启解决）；样例若不匹配优先，物理序前列全为未匹配行会误导用户判断"没匹配上"（已修复）
