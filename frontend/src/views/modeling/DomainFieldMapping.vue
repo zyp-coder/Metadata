@@ -18,7 +18,8 @@
           </span>
         </div>
         <a-tag v-if="pkStatusData?.all_configured" color="success" style="margin: 0">✓ 全部完成</a-tag>
-        <a-button type="primary" @click="openDetailConfigList()">预组合</a-button>
+        <!-- 2026-08-14 布局批：预组合降为次要操作，「新建映射」保持唯一主按钮（防双主按钮抢焦点） -->
+        <a-button @click="openDetailConfigList()">预组合</a-button>
         <a-button type="primary" @click="openCreate()">+ 新建映射</a-button>
         <a-button @click="aiAutoMapping" :loading="aiMappingLoading">
           <template #icon><span style="font-size: 14px">🤖</span></template>
@@ -668,7 +669,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, h } from 'v
 import { useRoute } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import { extractApiError } from '@/utils/apiError'
-import { Graph, Shape } from '@antv/x6'
+import { Graph, Shape, Point } from '@antv/x6'
 import { domainApi, tableApi, fieldApi, fieldMappingApi, detailConfigApi } from '@/api/modeling'
 import type { Table } from '@/types'
 import DomainStageNav from './components/DomainStageNav.vue'
@@ -997,10 +998,32 @@ let graph: Graph | null = null
 const resettingEr = ref(false)
 const erHighlightPrecombine = ref(false)
 const erNodeMap: Record<number, { node: any; tableId: number; tableRef: any }> = {}
+// 渲染中标记：抑制初始渲染触发的 change:position 保存（2026-08-14 布局批实跑发现：每次进页面 150+ 次 PUT）
+let erRenderInProgress = false
 
 // ER 图常量
-const ER_HEADER_HEIGHT = 40
-const ER_ROW_HEIGHT = 32
+// ER 图常量（2026-08-14 布局批第三轮：对齐 .er-node__header/.er-f 实际渲染尺寸，实测 header 50px、字段行 37px）
+const ER_HEADER_HEIGHT = 50
+const ER_ROW_HEIGHT = 37
+const ER_PRE_COMBINE_TAG_HEIGHT = 28 // 预组合标签行高（头表/明细表节点 header 下方，2026-08-14 布局批第二轮）
+const ER_MAX_NODE_HEIGHT = 400
+// 节点高度 = 表头 + 预组合标签(如有) + 字段行 × 行高，超限高时节点内部滚动（.er-node__body overflow-y:auto 兜底）
+function erNodeHeight(fieldCount: number, hasPrecombineTag = false) {
+  const tagH = hasPrecombineTag ? ER_PRE_COMBINE_TAG_HEIGHT : 0
+  return Math.min(ER_HEADER_HEIGHT + tagH + Math.max(1, fieldCount) * ER_ROW_HEIGHT + 4, ER_MAX_NODE_HEIGHT)
+}
+
+// 自定义锚点：表节点侧边字段行锚点（2026-08-14 布局批第四轮）
+// 背景：x6 内置 bbox anchor 的 dy 语义为「侧边中点 + dy×节点高」，且 HTML 节点异步渲染完成前 bbox 高度为 0，
+// 导致连线锚点偏下 h/2 或落在节点上缘。改用 cell 模型 bbox（含显式 width/height，不依赖渲染完成）直接计算。
+function erFieldRowAnchor(cellView: any, magnet: any, refPoint: any, args: { side: 'left' | 'right'; rowRatio: number }) {
+  const bbox = cellView.cell.getBBox()
+  const x = args.side === 'right' ? bbox.x + bbox.width : bbox.x
+  const y = bbox.y + bbox.height * args.rowRatio
+  return new Point(x, y)
+}
+// 注册防重（force）：SPA 路由离开再进入 / HMR 会重复执行 script setup 顶层，x6 registry 重复注册会 throw 导致页面空白（2026-08-14 布局批第五轮复验发现）
+Graph.registerAnchor('erFieldRow', erFieldRowAnchor as any, true)
 
 async function saveErNodePosition(tid: number, node: any, t: any) {
   const pos = node.getPosition()
@@ -1068,6 +1091,7 @@ function renderER() {
 
 function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
   if (!erContainer.value) return
+  erRenderInProgress = true
 
   const width = erContainer.value.clientWidth || 900
   const height = erContainer.value.clientHeight || 600
@@ -1093,6 +1117,8 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
   const startX = Math.max(30, Math.floor((width - totalContentWidth) / 2))
   const colY = new Array(cols).fill(30)
   const nodeMap: Record<number, string> = {}
+  // 含预组合标签的节点集合（边锚点 Y 偏移用，2026-08-14 布局批第二轮）
+  const tagTableIds = new Set<number>()
 
   // 预组合查找表（Issue 8: ER图展示组合表效果）
   const headerTableToDetails: Record<number, any[]> = {}
@@ -1113,9 +1139,9 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
     // 检测联合主键：如果表有 2+ 个 PK 字段，合并为一个虚拟字段
     const pkFields = rawFields.filter((f: any) => f.is_primary_key)
     const nonPkFields = rawFields.filter((f: any) => !f.is_primary_key)
-    let displayFields: any[]
+    let compositeField: any = null
     if (pkFields.length >= 2) {
-      const compositeField = {
+      compositeField = {
         id: 'composite_pk',
         name: pkFields.map((f: any) => f.name).join(' + '),
         code: pkFields.map((f: any) => f.code).join(' + '),
@@ -1124,14 +1150,9 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
         is_composite: true,
         _pkFieldIds: pkFields.map((f: any) => f.id),
       }
-      displayFields = [compositeField, ...nonPkFields]
-    } else {
-      displayFields = rawFields
     }
-    // 保存 displayFields 供边绘制时使用
-    tableFieldsMap.set(tid, displayFields)
 
-    // 收集参与映射的字段 id（高亮用）
+    // 收集参与映射的字段 id（先于 displayFields 构建，2026-08-14 布局批：节点只显示映射字段）
     const mappedFieldIds = new Set<number>()
     const mappedComposite = { source: false, target: false }
     mappings.value.forEach((m) => {
@@ -1153,10 +1174,26 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
       }
     })
 
+    // 构建显示字段：只保留参与映射的字段（用户拍板），联合主键虚拟行随映射保留
+    let displayFields: any[]
+    if (compositeField) {
+      displayFields = [
+        ...(mappedComposite.source || mappedComposite.target ? [compositeField] : []),
+        ...nonPkFields.filter((f: any) => mappedFieldIds.has(f.id)),
+      ]
+    } else {
+      displayFields = rawFields.filter((f: any) => mappedFieldIds.has(f.id))
+    }
+    // 兜底：能进 idList 必有映射字段，此分支正常不会触发
+    if (displayFields.length === 0) displayFields = rawFields
+    // 保存 displayFields 供边绘制时使用
+    tableFieldsMap.set(tid, displayFields)
+
     // 构建字段行 HTML：中文名优先，英文名括号补充
     const fieldRows = displayFields.length > 0
       ? displayFields.map((f: any) => {
-          const isKey = mappedFieldIds.has(f.id) || (f.is_composite && (mappedComposite.source || mappedComposite.target))
+          // 只显示映射字段模式下所有行均为映射字段，高亮语义改为主键标识（2026-08-14 布局批）
+          const isKey = !!f.is_primary_key
           const typeShort = ({ string: 'varchar', number: 'int', date: 'date', boolean: 'bool', enum: 'enum', composite: '⚿联合' } as any)[f.field_type] || f.field_type
           const typeLabel = f.length ? `${typeShort}(${f.length})` : typeShort
           // 中文名优先展示：comment（中文注释）> name > code
@@ -1165,9 +1202,8 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
           const subName = f.code && f.code !== displayName ? escapeHtml(f.code) : ''
           const cnName = escapeHtml(displayName)
           const enName = subName
-          const nameHtml = enName
-            ? `<div class="er-f__name-cn" title="${cnName} (${enName})">${cnName}</div><div class="er-f__name-en">${enName}</div>`
-            : `<div class="er-f__name-cn" title="${cnName}">${cnName}</div>`
+          // 始终输出两行结构（英文名空时占位）：保证所有字段行等高，锚点 dy 计算才与渲染一致（2026-08-14 布局批第三轮）
+          const nameHtml = `<div class="er-f__name-cn" title="${cnName}${enName ? ` (${enName})` : ''}">${cnName}</div><div class="er-f__name-en">${enName}</div>`
           return `
             <div class="er-f${isKey ? ' er-f--key' : ''}${f.is_composite ? ' er-f--composite' : ''}" data-field-id="${f.id}">
               <span class="er-f__icon">${isKey ? '⚿' : '○'}</span>
@@ -1211,8 +1247,9 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
       </div>
     `
 
-    // 节点高度：显示所有字段（不截断）
-    const nodeHeight = ER_HEADER_HEIGHT + Math.max(1, displayFields.length) * ER_ROW_HEIGHT + 4
+    // 节点高度：表头 + 预组合标签(如有) + 映射字段行高，超限高时节点内部滚动（2026-08-14 布局批）
+    const nodeHeight = erNodeHeight(displayFields.length, !!precombineHtml)
+    if (precombineHtml) tagTableIds.add(tid)
 
     const shapeName = `er-table-${tid}`
     Shape.HTML.register({
@@ -1247,6 +1284,7 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
     erNodeMap[tid] = { node, tableId: tid, tableRef: t }
 
     node.on('change:position', () => {
+      if (erRenderInProgress) return // 初始渲染/布局设置位置不保存（2026-08-14 布局批实跑发现）
       saveErNodePosition(tid, node, t)
     })
 
@@ -1269,9 +1307,9 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
   })
 
   // 绘制边：列表有多少行，ER 图就有多少条线（联合主键=一条）
-  // 注意：top 锚点的 dx/dy 是比例值(0-1)，不是像素值
-  // dx: 0.5 = 右边缘, dx: -0.5 = 左边缘
-  // dy: ratio = 像素偏移 / 节点高度
+  // 2026-08-14 布局批第五轮：显式 connectionPoint: 'anchor'（连接点=锚点，跳过默认 boundary 二次求交）。
+  // 根因：boundary 会把端点算成「线段与节点形状的交点」，线段从节点另一侧穿入时，字段行锚点
+  // 会被推到穿入边（上边界/右边界），与 erFieldRow 计算的字段行位置不符（实测 646.5→549.5）。
   mappingRows.value.forEach((m) => {
     const sourceIsCompositePk = compositePkTables.has(m.source_table)
     const targetIsCompositePk = compositePkTables.has(m.target_table)
@@ -1288,33 +1326,29 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
     // 计算节点高度（用于 dy 比例换算）
     const sourceFieldsCount = tableFieldsMap.get(m.source_table)?.length ?? 1
     const targetFieldsCount = tableFieldsMap.get(m.target_table)?.length ?? 1
-    const sourceNodeHeight = ER_HEADER_HEIGHT + Math.max(1, sourceFieldsCount) * ER_ROW_HEIGHT + 4
-    const targetNodeHeight = ER_HEADER_HEIGHT + Math.max(1, targetFieldsCount) * ER_ROW_HEIGHT + 4
+    const sourceNodeHeight = erNodeHeight(sourceFieldsCount, tagTableIds.has(m.source_table))
+    const targetNodeHeight = erNodeHeight(targetFieldsCount, tagTableIds.has(m.target_table))
 
-    // 字段行中心 Y 像素偏移 → 转为比例值
-    const sourceFieldY = ER_HEADER_HEIGHT + sourceIdx * ER_ROW_HEIGHT + ER_ROW_HEIGHT / 2
-    const targetFieldY = ER_HEADER_HEIGHT + targetIdx * ER_ROW_HEIGHT + ER_ROW_HEIGHT / 2
+    // 字段行中心 Y 像素偏移 → 转为比例值（预组合标签节点需加标签高度偏移，2026-08-14 布局批第二轮）
+    const sourceFieldY = ER_HEADER_HEIGHT + (tagTableIds.has(m.source_table) ? ER_PRE_COMBINE_TAG_HEIGHT : 0) + sourceIdx * ER_ROW_HEIGHT + ER_ROW_HEIGHT / 2
+    const targetFieldY = ER_HEADER_HEIGHT + (tagTableIds.has(m.target_table) ? ER_PRE_COMBINE_TAG_HEIGHT : 0) + targetIdx * ER_ROW_HEIGHT + ER_ROW_HEIGHT / 2
+
+    // 2026-08-14 布局批（测试问题3）：锚点从 top 改为按节点相对位置智能左右出线
+    // 源节点在左 → 源从右缘出、目标从左缘入；源在右 → 反向；dy 为字段行 Y 比例，指向对应字段行
+    const srcPos = erNodeMap[m.source_table].node.getPosition()
+    const tgtPos = erNodeMap[m.target_table].node.getPosition()
+    const srcGoesRight = srcPos.x <= tgtPos.x
 
     graph!.addEdge({
       source: {
         cell: nodeMap[m.source_table],
-        anchor: {
-          name: 'top',
-          args: {
-            dx: 0.5,  // 右边缘
-            dy: sourceFieldY / sourceNodeHeight,
-          },
-        },
+        anchor: { name: 'erFieldRow', args: { side: srcGoesRight ? 'right' : 'left', rowRatio: sourceFieldY / sourceNodeHeight } },
+        connectionPoint: { name: 'anchor' },
       },
       target: {
         cell: nodeMap[m.target_table],
-        anchor: {
-          name: 'top',
-          args: {
-            dx: -0.5, // 左边缘
-            dy: targetFieldY / targetNodeHeight,
-          },
-        },
+        anchor: { name: 'erFieldRow', args: { side: srcGoesRight ? 'left' : 'right', rowRatio: targetFieldY / targetNodeHeight } },
+        connectionPoint: { name: 'anchor' },
       },
       router: { name: 'manhattan', args: { padding: 16 } },
       connector: { name: 'rounded', args: { radius: 6 } },
@@ -1337,9 +1371,13 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
     const srcNodeId = nodeMap[dc.header_table]
     const tgtNodeId = nodeMap[dc.table]
     if (srcNodeId && tgtNodeId) {
+      // 2026-08-14 布局批：预组合虚线同步改为左右出线（表级连线，锚点取侧边中点）；第五轮加 connectionPoint anchor 防 boundary 二次求交
+      const pcSrcPos = erNodeMap[dc.header_table].node.getPosition()
+      const pcTgtPos = erNodeMap[dc.table].node.getPosition()
+      const pcGoesRight = pcSrcPos.x <= pcTgtPos.x
       graph!.addEdge({
-        source: { cell: srcNodeId, anchor: { name: 'top', args: { dx: 0.8, dy: 0.05 } } },
-        target: { cell: tgtNodeId, anchor: { name: 'top', args: { dx: 0.8, dy: 0.05 } } },
+        source: { cell: srcNodeId, anchor: { name: 'erFieldRow', args: { side: pcGoesRight ? 'right' : 'left', rowRatio: 0.5 } }, connectionPoint: { name: 'anchor' } },
+        target: { cell: tgtNodeId, anchor: { name: 'erFieldRow', args: { side: pcGoesRight ? 'left' : 'right', rowRatio: 0.5 } }, connectionPoint: { name: 'anchor' } },
         router: { name: 'manhattan', args: { padding: 16 } },
         connector: { name: 'rounded', args: { radius: 6 } },
         attrs: {
@@ -1375,6 +1413,7 @@ function doRenderER(idList: number[], tableFieldsMap: Map<number, any[]>) {
       }
     })
   }
+  erRenderInProgress = false
 }
 
 function escapeHtml(s: string) {
@@ -2249,7 +2288,9 @@ onBeforeUnmount(() => {
 }
 .er-container {
   width: 100%;
-  height: 600px;
+  /* 2026-08-14 布局批：高度自适应视口（页面上半部页头/列表/卡片标题约占 560px），低屏保底 440px */
+  height: max(440px, calc(100vh - 560px));
+  min-height: 440px;
   border: 1px solid #eef0f4;
   border-radius: 8px;
   background: #fafbfc;
@@ -2312,6 +2353,7 @@ onBeforeUnmount(() => {
 }
 :deep(.er-node__body) {
   flex: 1;
+  min-height: 0; /* 2026-08-14 布局批第二轮：内容超高时确保内部滚动生效（flex 子项默认 min-height:auto 会撑开容器） */
   padding: 2px 0;
   overflow-y: auto;
   background: #fff;

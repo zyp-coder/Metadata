@@ -340,3 +340,16 @@
 - **变更文件**：`backend/apps/modeling/models.py`（FieldMapping JoinType+join_type）、`backend/apps/modeling/migrations/0033_fieldmapping_join_type.py`（新）、`backend/apps/modeling/serializers.py`、`backend/apps/archive/views.py`（四场景适配）、`frontend/src/types/index.ts`（FieldMapping 接口扩展）、`frontend/src/views/modeling/DomainFieldMapping.vue`（模板+脚本+样式）
 - **验证**：vue-tsc 0 errors + django check 0 issues + 102 tests 0.716s PASS
 - **状态**：全部4个问题实施+验证+留痕完成
+
+### 第一百六十轮（2026-08-14）标签：/modeling/domains/2/mappings、测试报告3问题、ER连线锚点、boundary二次求交、布局批
+- **背景**：测试报告 3 问题（UI布局不友好×2 + ER 关系线要从表左右出、指到对应字段）。uxqa 布局反馈四步法后用户拍板方案A：本页优化 + ER 节点只显示映射字段
+- **修复历程（5 轮实跑复验）**：
+  1. 批1：页头按钮分级（预组合降 default）+ ER 容器高度自适应（max(440px, calc(100vh-560px))）+ 节点只显示映射字段 + 连线智能左右出线 → 复验发现预组合标签高度未计（字段行溢出节点）+ 每次进页面 150+ 次 PUT
+  2. 批2：加 ER_PRE_COMBINE_TAG_HEIGHT(28) + erRenderInProgress 抑制初始渲染保存（PUT 150+→0）→ 复验发现常量 40/32 与实际渲染 50/37 不符（裁切+锚点错位）
+  3. 批3：常量对齐实测（ER_HEADER_HEIGHT=50/ER_ROW_HEIGHT=37）+ 字段行模板改两行结构等高 → 复验发现 x6 内置 bbox anchor 的 dy 语义错误（侧边中点+dy×高）+ HTML 节点 bbox 时序问题
+  4. 批4：自定义 erFieldRowAnchor（cell 模型 bbox 直接算 x/y，不依赖 DOM 渲染）→ 复验 5/6 对准，仅连线②源端在顶部
+  5. 批5（收尾）：根因=connectionPoint 默认 boundary 二次求交——把端点算成「线段与节点形状的交点」，线段从另一侧穿入时字段行锚点被推到穿入边（实测 edge2 源端 646.5→549.5 顶部、目标端 130→452 右边界）；修复=显式 connectionPoint: { name: 'anchor' }（3 映射边+预组合虚线共 4 处）；顺带修 Graph.registerAnchor 重复注册 throw（SPA 路由重进 ER 空白，force=true 幂等）
+- **修改文件**：frontend/src/views/modeling/DomainFieldMapping.vue（锚点/边/节点/样式/页头）
+- **验证**：vue-tsc 0 + build 通过；Browser 实跑：6 端点字段行 Y 全部零误差（edge2 源端 646.5=550+96.5 预组合标签+字段行）、路由离开再进入/刷新 3 场景 3 边 4 节点零 console error、PUT 0 次
+- **状态**：实测验证完成；待 commit+push+用户服务器部署
+- **遗留（P2）**：NODE3 保存位置 translate(-80,240) 负 x，画布无 scroller 左 80px 不可见（保存位置导致，待用户决策是否重排）

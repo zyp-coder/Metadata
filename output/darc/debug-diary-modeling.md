@@ -2,6 +2,17 @@
 
 > 记录 modeling 模块的 Bug 根因、修复方式与已知耦合点，供后续影响分析使用。
 
+## BUG-2026-0814-01 ER 连线锚点错位：connectionPoint boundary 二次求交覆盖字段行锚点
+- **现象**：测试报告「ER 图关系线要从表的左边或右边出来、指到对应字段」。修复首 4 轮后浏览器实跑复验：3 条连线中 2 条端点仍不对——「销售价目表明细→物料」源端落在节点顶部（y=549.5）、两条「→物料」目标端全落在节点右边界（x=452），仅「物料→物料信息」正常；6 条 [erFieldRow] console 日志却全部正确（字段行比例 rowRatio 0.8109 → 应返回 y=646.5）
+- **根因**（@antv/x6 v2.19.2）：锚点计算本身正确，但 addEdge 未显式指定 connectionPoint → 使用 graph 默认 `boundary`。boundary 会对锚点做二次求交：取「锚点到对端线段与节点形状的交点」中离线段起点最近者——线段从节点另一侧穿入时，交点落在穿入边而非锚点所在边：
+  - edge2 源端 (410,646.5) 右缘字段行：manhattan 避障从上方绕行，线段从上方穿入 NODE2 → 交点=上边界 (410,549.5)
+  - edge2/3 目标端 (130,148.5) 左缘字段行：manhattan 避 NODE3 从右侧进入 NODE0 → 交点=右边界 (452,148.5)
+  - edge1 正常纯属巧合（线段恰好从锚点所在右缘穿入，交点=锚点）
+- **同类排查**：全文件 2 处 addEdge（映射边+预组合虚线）均未显式 connectionPoint，同改
+- **修复**：source/target 全部显式 `connectionPoint: { name: 'anchor' }`（x6 内置「连接点=锚点」，不做二次求交）；顺带 Graph.registerAnchor 加 force=true 防 SPA 路由重进重复注册 throw（复验发现：离开页面再进入 ER 图空白，x6 registry 重复注册即抛错）
+- **验证**：浏览器实跑 6 端点字段行 Y 全部零误差（edge2 源端 646.5=550+96.5，96.5=header 50+预组合标签 28+半行 18.5）；路由离开再进入/刷新 3 场景 3 边 4 节点零 console error；vue-tsc 0 + build 通过
+- **教训**：x6 中「锚点（anchor）→ 连接点（connectionPoint）→ 路由器 → 连接器」是独立管线——自定义 anchor 只定锚点位置，默认 boundary 连接点还会二次计算；需要「端点精确等于锚点」时必须显式 `connectionPoint: { name: 'anchor' }`，不能假设 anchor 即端点；且端点是否被 boundary 篡改取决于线段穿入方向，看起来正常也可能是巧合
+
 ## BUG-2026-0813-01 编辑普通关联点保存报「conditions: 该字段不能为 null」
 - **现象**：用户编辑 EDS_K3_物料 → EDS_K3_物料信息 普通关联，点保存报 `conditions: 该字段不能为 null`；新建也是半成功（create 落库 + 后续清理 PATCH 失败）
 - **根因**：前端 DomainFieldMapping.vue handleSubmit reference 清理分支（146 轮 13a8ac5 引入）`conditions: null`——后端 `FieldMapping.conditions = JSONField(default=list)` 无 null=True → DRF 400；同类排查全前端唯一一处（dcModal detail_config 链路无此问题）

@@ -1,6 +1,25 @@
 # 开发日记 - 主数据建模引擎（modeling）
 > 记录 modeling 模块开发过程中的关键实现决策和技术细节。
 ---
+## 2026-08-14 测试报告3问题修复：ER 连线锚点 + 页面布局（第一百六十轮）
+### 变更背景
+用户测试报告 3 问题（/modeling/domains/2/mappings）：①UI和布局不友好 ②布局重新调整 ③ER 关系线要从表左/右边出来、指到对应字段。uxqa 布局反馈四步法后用户拍板方案A：本页优化 + ER 节点只显示映射字段。
+### 关键实现（DomainFieldMapping.vue，5 轮实跑复验迭代）
+- **ER 节点只显示映射字段**：mappedFieldIds 先收集参与映射的字段 id（联合主键命中任一成员记 composite_pk），displayFields = 映射字段（联合主键虚拟行随映射保留），兜底 rawFields；isKey 语义改为主键标识（原为映射字段高亮）；字段行模板恒两行结构（enName 空占位等高）
+- **连线智能左右出线**：源节点在左→源从右缘出、目标从左缘入（反之反向）；自定义 erFieldRowAnchor 用 cell 模型 bbox 直接算字段行点（x=侧边、y=bboxY+bboxH×rowRatio）——内置 bbox anchor 的 dy 是「侧边中点+dy×高」语义且 HTML 节点渲染前 bbox 高度为 0
+- **connectionPoint anchor 治本（第五轮，最终根因）**：默认 boundary 连接点会对锚点二次求交——取「锚点到对端线段与节点形状的交点」中离线段起点最近者，线段从节点另一侧穿入时字段行锚点被推到穿入边（实测 edge2 源端 646.5→549.5 顶部、edge2/3 目标端 130→452 右边界）；显式 `connectionPoint: { name: 'anchor' }`（映射边+预组合虚线 4 处），连接点=锚点不做二次计算
+- **常量对齐实测**：ER_HEADER_HEIGHT=50 / ER_ROW_HEIGHT=37 / ER_PRE_COMBINE_TAG_HEIGHT=28（原 40/32 与 .er-node__header/.er-f 实际渲染不符导致裁切+锚点错位）；节点高度=header+tag+行数×37+4，上限 400 时 .er-node__body 内部滚动（min-height:0 保证 flex 滚动生效）
+- **erRenderInProgress 抑制**：初始渲染触发的 change:position 不再保存（原每次进页面 150+ 次 PUT→0）
+- **registerAnchor force=true**：SPA 路由重进/HMR 重复执行 script setup 顶层导致 x6 registry 重复注册 throw（页面空白，复验发现），force 幂等覆盖
+- **页头按钮分级**：预组合降为 default，新建映射保持唯一 primary；**.er-container** 高度 max(440px, calc(100vh - 560px)) 自适应
+### 变更文件清单
+- `frontend/src/views/modeling/DomainFieldMapping.vue`（锚点/边/节点/样式/页头）
+### 验证
+vue-tsc 0 + vite build 通过；浏览器实跑：3 边 6 端点字段行 Y 全部零误差（edge1 450,148.5→608.5,168.5 / edge2 410,646.5→131.5,148.5 / edge3 240,336.5→131.5,185.5）；路由离开再进入+刷新 3 场景 3 边 4 节点零 console error；PUT 0 次
+### 遗留
+NODE3 保存位置 translate(-80,240) 负 x，画布无 scroller 左 80px 不可见（P2，保存位置导致，待用户决策）
+
+---
 ## 2026-08-13 关系管理列表筛选 + 普通关联筛选条件 + conditions:null 修复（第一百五十九轮）
 ### 变更背景
 用户指出「之前要求过这个界面增加一个筛选项的功能」未加（留痕漏洞已承认）。范围确认（AskUserQuestion）：批1①conditions:null bug 修复 + 批1②列表筛选 + 批2③普通关联（reference）筛选条件，一起做。

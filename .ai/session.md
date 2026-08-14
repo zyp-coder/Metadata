@@ -1,7 +1,7 @@
 # 会话接力 — 主文件（当前状态 + 功能索引）
 > 启动只读本文件（rule §3）。历史详情按模块存于 `.ai/session-details/<模块>.md`（archive / modeling / uxqa / project / early-logs），确认需求后按「模块+功能标签/第N轮」grep 加载，禁止全量读。
 ## 当前会话状态
-- **当前阶段**：第一百五十九轮（编码完成）——批1①conditions:null bug 修复 + 批1②关系管理列表筛选（搜索框+类型下拉） + 批2③普通关联筛选条件（前端弹窗条件构建器+后端同步透传）；新增 6 测试 + archive 全套 60/60 PASS + vue-tsc 0 + build 通过；待提交推送 + 用户 sync 部署验证
+- **当前阶段**：第一百六十轮（编码完成）——测试报告 3 问题修复（/modeling/domains/2/mappings：ER 连线锚点 boundary 二次求交根因 + connectionPoint anchor 治本、节点只显示映射字段、页头按钮分级、容器高度自适应、PUT 抑制、registerAnchor force 防重）；vue-tsc 0 + build 通过 + 浏览器 6 端点零误差/路由重进复验通过；待 commit+push + 用户 sync 部署验证
 - **活跃模块**：modeling、archive、frontend
 ### 最近 3 轮详情（满 3 轮后最旧一轮下沉到详情文件）
 - **本次操作**：2026-08-13 — 第一百五十九轮：用户指出「之前要求过这个界面增加筛选项未加」（留痕漏洞已承认）；批1① handleSubmit reference 清理分支 conditions:null → 按 refConditions 序列化/[]（后端 JSONField 无 null=True 必 400）；批1② 列表卡片顶部搜索框+关系类型下拉（filteredMappings 在 grouping 前过滤，ER 图不受影响）；批2③ 弹窗 reference 分支加行式条件构建器（字段=目标表字段）+ 后端 _upsert_dimension_via_mapping 透传 conditions（仅 reference）；新增 6 测试 + archive 60/60 PASS
@@ -10,7 +10,7 @@
 ## 功能索引（倒序，每轮一行；完整性/确认点自本次迁移后开始记录）
 | 轮次 | 日期 | 模块 | 功能标签 | 一句话摘要 | 完整性 | 确认点 |
 |------|------|------|----------|------------|--------|--------|
-| 第一百五十九轮续2 | 2026-08-13 | archive、deploy | 服务器同步、mssql后端缺失、ODBC Driver 18、Dockerfile | 用户部署服务器后同步预检报「'mssql' isn't an available database backend」。根因：requirements.txt 从未包含 mssql-django（本机手工装未登记）+ Docker 镜像无微软 ODBC 驱动。修复：requirements.txt 加 mssql-django>=1.7,<2.0 + Dockerfile 加 ODBC Driver 18 安装层；本机 import 验证通过；待服务器 rebuild 实测 | 闸✓记✓拓✓测✓（无新增路径） | 1问/0改向 |
+| 第一百六十轮 | 2026-08-14 | modeling、frontend | /modeling/domains/2/mappings、测试报告3问题、ER连线锚点、boundary二次求交、节点只显示映射字段、注册防重 | 测试报告 3 问题（UI布局×2+ER连线）。用户拍板A：本页优化+节点只显示映射字段。5 轮实跑复验：按钮分级/容器自适应/常量对齐（50/37）/erRenderInProgress（PUT 150+→0）/自定义 erFieldRowAnchor；最终根因=connectionPoint 默认 boundary 二次求交把字段行锚点推到穿入边（646.5→549.5、130→452），显式 connectionPoint anchor 治本（4 处）+registerAnchor force 防 SPA 重进空白；6 端点 Y 零误差实跑验证 | 闸✓记✓拓✓测✓ | 2问/0改向 |
 | 第一百五十九轮续 | 2026-08-13 | archive | 档案删除、SQLite变量上限、perform_destroy、combined_updates | 用户反馈「档案列表点删除删除不了」——后端 500 too many SQL variables。根因：Django 6.0 Collector combined_updates 优化将 ArchiveChangeDetail.detail_group SET_NULL 反向 FK 合并为单条 UPDATE 超 SQLite 999 上限。修复：perform_destroy 三层策略——先清反指 FK（200 PK/批 detail_group=None）再 200 PK/批删详情，500/批删版本和记录行；curl 实测 204 | 闸✓记✓拓✓测✓ | 0问 |
 | 第一百五十九轮 | 2026-08-13 | modeling、archive、frontend | /modeling/domains/2/mappings、列表筛选、关系类型下拉、普通关联筛选条件、conditions:null、_upsert_dimension_via_mapping | 用户指出「之前要求过这个界面增加筛选项未加」；批1①修复 handleSubmit reference 分支 conditions:null→序列化/[]（后端 JSONField 无 null=True 必 400，146 轮引入）；批1②列表卡片加搜索框（表名/字段名/编码）+关系类型下拉（filteredMappings grouping 前过滤，ER 图不受影响）；批2③弹窗 reference 分支加行式条件构建器（字段=目标表字段，存 FieldMapping.conditions）+后端 _upsert_dimension_via_mapping L2503 透传 conditions（仅 reference，detail 行为不变）；新增 6 测试（PATCH null 400 锁定/[] 200/列表 200/透传/无条件 None/detail 不传）+archive 全套 60/60 PASS + vue-tsc 0 + build 通过 | 闸✓记✓拓✓测✓ | 1问/0改向 |
 | 第一百五十八轮 | 2026-08-13 | modeling、archive、deploy | 诊断、部署未生效、--noreload、dist旧构建、sync.sh | 用户反馈「用编辑修改不行」：排查根因=部署未生效——本地后端 8/12 --noreload 启动（跑 156 轮代码，validate 仍强校验主键）+ dist 8/8 旧构建 + 本地无前端服务；157 轮改动（5f4d81c）已推送未部署；用户确认访问服务器，重新 sync 部署后验证 | N-A | 1问/0改向 |
