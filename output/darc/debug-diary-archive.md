@@ -5,12 +5,12 @@
 ## BUG-2026-0817-01 启动链 loaddata 条件判断误判 → 容器崩溃循环，前端全挂（假象「域管理东西全没了」）
 
 - **现象**（第一百六十六轮）：第一百六十五轮治本上线（compose 启动链 loaddata 条件化：`if Domain.objects.exists() 则跳过，else loaddata`）后，服务器 git pull + `docker compose up -d --build backend` → backend 容器 `Restarting (1)` 循环崩溃 → 前端全部加载失败（用户以为「域管理的东西都没有了」）。日志关键行：loaddata 实际执行（走了 else 分支）→ `IntegrityError: Problem installing fixture '/app/data_dump.json': Could not load modeling.FieldMapping(pk=11): duplicate key value violates unique constraint "modeling_fieldmapping_source_table_id_source_f_da74177b_uniq"`（键 (1,1,2,33) 已存在）
-- **根因（两层）**：
-  1. **条件命令在容器内误判走 else**：`python manage.py shell -c '...sys.exit(0 if Domain.objects.exists() else 1)'` 在容器内实际走了 loaddata 分支（exists() 返回 False 或命令退出码非 0，**具体原因未在容器内复现确认**——本地模拟部署验证只测了 migrate+loaddata 导入路径，从未在容器环境实测 if 判断分支，属验证缺口）
+- **根因（两层，第一层已确认闭环）**：
+  1. **条件命令 import 路径错误（已确认）**：`INSTALLED_APPS=['apps.modeling','apps.archive','apps.auth']`（settings.py L23-25，`apps.` 前缀），但条件命令写的是 `from modeling.models import Domain` → 任何环境必然 `ModuleNotFoundError: No module named 'modeling'` → 退出码非 0 → if 误判走 else。**本机 + 容器均实测复现**（`from modeling.models` 失败 / `from apps.modeling.models` OK 1）——验证缺口：本地模拟部署验证只测了 migrate/loaddata 两条 Django 内置命令，从未实测自己写的 if 条件命令
   2. **loaddata 撞唯一约束中断启动链**：服务器数据库已有同键 FM（(1,1,2,33) 已存在，pk≠11）→ loaddata 插入 pk=11 撞唯一约束 → IntegrityError → 启动链 `&&` 中断 → gunicorn 未起 → 容器崩溃循环
 - **修复**（commit 99c6c86）：compose 启动链**彻底移除 loaddata**——启动链= migrate → init_admin → collectstatic → gunicorn；data_dump.json 仅用于**首次部署手动导入**（compose 注释写明命令 `docker compose exec backend python manage.py loaddata /app/data_dump.json`）。数据库数据未丢（loaddata 撞约束前部分对象已导入，同 pk 记录被 UPDATE 成本机配置=正确方向），恢复后需核查残留
 - **教训**：
-  1. 启动链双分支逻辑（if 判断）**必须在目标容器环境实测后才可上线**——本地 YAML 解析 + 模拟导入 ≠ 容器内 sh 执行行为（引号嵌套/退出码/环境差异）
+  1. 启动链/脚本里**自己写的 import 语句必须实测后才可上线**——`INSTALLED_APPS` 用 `apps.` 前缀时 `from modeling.models` 必失败（本机/容器同款报错）；模拟验证只测 Django 内置命令（migrate/loaddata）测不出自定义命令的导入错误
   2. loaddata **非事务**：撞唯一约束会部分导入，恢复后必须核查数据库残留（多出的对象/被覆盖的同 pk 记录）
   3. 「页面全空」先查 `docker compose ps`（Restarting 状态）+ 启动日志，**数据未必丢**，禁止直接走恢复数据流程
   4. 生产启动链禁用自动数据操作：宁可首次部署显式手动 loaddata（写进部署脚本），也不要自动化双分支
