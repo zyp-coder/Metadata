@@ -12,11 +12,12 @@
 
 ### 验证
 - YAML 解析 OK（command 展开为纯启动链）
-- 服务器恢复验证待用户反馈（docker compose ps 不再 Restarting + API 可达 + 域/表/字段 counts 核查）
+- 2026-08-17 服务器恢复验证全部通过：①docker compose ps backend Up（不再 Restarting）②curl /api/domains/ 401（后端活）③counts=domains 1/tables 6/fields 101/fms 7/cfgs 2——loaddata 无残留（撞车于 FM pk=11 即中断，dump 的 FM 12/13 未轮到导入，7=服务器原有数量）④DB 补 3 处 OK（cfg2/cfg6 inner+conditions、FM9 inner）⑤diag_precombine 完全收敛：价目 239,504→955、分组 64→桥接 kept 116,594、交集 955、档案 total 955、影子一致 0 warning——服务器与本机完全一致（此前 kept 209,123→27281 错误）
 
 ### 遗留
-- 条件命令误判根因未在容器内复现（待有环境时实测 `shell -c` 退出码行为）；
-- loaddata 撞约束前部分对象已导入（同 pk 被 UPDATE 成本机配置），服务器恢复后需核查数据库残留
+- 条件命令误判根因已确认闭环：条件命令 `from modeling.models import Domain` import 路径错误（INSTALLED_APPS 用 `apps.` 前缀）→ 任何环境必 ModuleNotFoundError → 退出码非 0 → 误判走 else（本机+容器实测复现，见 debug-diary BUG-2026-0817-01）
+- loaddata 残留核查完成：无残留
+- 界面同步收敛 955 待用户确认
 
 ## 2026-08-17 — 服务器 27281 根因定位 + 配置分发机制治本（第一百六十五轮）
 

@@ -12,7 +12,11 @@
 
 **状态变更**：v20 决策（loaddata 条件化）被推翻 → v21（启动链零数据操作，首次部署手动灌）；constitution 决策行已标【推翻】。
 
-**遗留**：服务器 git pull + up --build 恢复验证（ps 不再 Restarting + API 可达 + 域/表/字段 counts）；loaddata 部分导入残留核查（同 pk 被 UPDATE 成本机配置=正确方向）；条件误判根因待容器内实测
+**服务器恢复验证（全部通过）**：①docker compose ps backend Up（不再 Restarting）②curl /api/domains/ 401（后端活；/api/modeling/domains/ 404=路径错误不影响）③counts=domains 1/tables 6/fields 101/fms 7/cfgs 2——loaddata 无残留（撞车于 FM pk=11 即中断，dump 的 FM 12/13 未轮到导入，7=服务器原有数量）④DB 补 3 处 OK（cfg2/cfg6 inner+conditions、FM9 inner；修正版命令用 apps.modeling 前缀）⑤diag_precombine 完全收敛：价目 239,504→955、分组 64→桥接 kept 116,594、交集 955、档案 total 955、影子一致 0 warning——服务器与本机完全一致。
+
+**根因闭环确认**：条件命令 `from modeling.models import Domain` import 路径错误（INSTALLED_APPS 用 `apps.` 前缀，settings.py L23-25）→ 任何环境必 ModuleNotFoundError → 退出码非 0 → 误判走 else（本机+容器实测复现，debug-diary BUG-2026-0817-01）。
+
+**遗留**：界面同步收敛 955 待用户确认（用户已被告知重跑同步后反馈）
 
 ### 第一百六十五轮（2026-08-17）标签：27281根因、data_dump基线、loaddata条件化、配置分发、治本
 

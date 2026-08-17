@@ -14,7 +14,7 @@
   2. loaddata **非事务**：撞唯一约束会部分导入，恢复后必须核查数据库残留（多出的对象/被覆盖的同 pk 记录）
   3. 「页面全空」先查 `docker compose ps`（Restarting 状态）+ 启动日志，**数据未必丢**，禁止直接走恢复数据流程
   4. 生产启动链禁用自动数据操作：宁可首次部署显式手动 loaddata（写进部署脚本），也不要自动化双分支
-- **验证**：YAML 解析 OK（command 展开为纯启动链）；服务器恢复验证待用户反馈
+- **验证**：YAML 解析 OK（command 展开为纯启动链）；2026-08-17 服务器恢复验证全部通过：①backend Up（不再 Restarting）②curl /api/domains/ 401（后端活）③counts=domains 1/tables 6/fields 101/fms 7/cfgs 2——loaddata 无残留（撞车于 FM pk=11 即中断，dump 的 FM 12/13 未轮到导入，7=服务器原有数量）④DB 补 3 处 OK（cfg2/cfg6 inner+conditions、FM9 inner）⑤diag_precombine 完全收敛：价目 239,504→955、分组 64→桥接 kept 116,594、交集 955、档案 total 955、影子一致 0 warning——服务器与本机完全一致
 
 ## BUG-2026-0808-02 同步收尾炸「too many SQL variables」：SQLite 999 变量上限被大列表击穿
 
