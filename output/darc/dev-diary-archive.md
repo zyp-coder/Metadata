@@ -17,6 +17,7 @@
 ### 遗留
 - 条件命令误判根因已确认闭环：条件命令 `from modeling.models import Domain` import 路径错误（INSTALLED_APPS 用 `apps.` 前缀）→ 任何环境必 ModuleNotFoundError → 退出码非 0 → 误判走 else（本机+容器实测复现，见 debug-diary BUG-2026-0817-01）
 - loaddata 残留核查完成：无残留
+- **服务器关系对齐修复完成**（用户反馈「关系管理多了很多条/语义不一样」）：FM 对齐本机 3 条——保留 FM5/FM11，FM3 改 inner，删 FM4/FM7/FM8/FM9；diag 重跑：价目 955、分组 116,594、交集 955、影子一致 0 warning，过滤结果与修复前一致；界面刷新后关系页 3 条
 - 界面同步收敛 955 待用户确认
 
 ## 2026-08-17 — 服务器 27281 根因定位 + 配置分发机制治本（第一百六十五轮）

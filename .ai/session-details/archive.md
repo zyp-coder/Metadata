@@ -16,6 +16,8 @@
 
 **根因闭环确认**：条件命令 `from modeling.models import Domain` import 路径错误（INSTALLED_APPS 用 `apps.` 前缀，settings.py L23-25）→ 任何环境必 ModuleNotFoundError → 退出码非 0 → 误判走 else（本机+容器实测复现，debug-diary BUG-2026-0817-01）。
 
+**服务器关系对齐修复（用户反馈「关系管理多了很多条/语义不一样」，确认方案后执行）**：服务器 FieldMapping 对齐本机 3 条——保留 FM5（=本机 FM11 reference）、FM11（=本机 FM13 分组挂载）；FM3 改 join=inner（对齐本机 FM12 价目挂载）；删除 FM4（分组_L→物料 left）、FM7（物料_NO→物料信息 reference）、FM8（分组→物料信息 left）、FM9（价目→物料信息 inner，价目过滤改由 FM3 承担）。diag 重跑验证：价目挂载 239,504→955（same_domain 直取）、分组挂载 64→桥接 116,594、交集 955、影子一致 0 warning——过滤结果与修复前完全一致，档案 total=955。界面刷新后关系管理页显示 3 条。
+
 **遗留**：界面同步收敛 955 待用户确认（用户已被告知重跑同步后反馈）
 
 ### 第一百六十五轮（2026-08-17）标签：27281根因、data_dump基线、loaddata条件化、配置分发、治本
