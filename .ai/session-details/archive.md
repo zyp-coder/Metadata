@@ -1,5 +1,27 @@
 # 模块详情：archive
 
+### 第一百六十五轮（2026-08-17）标签：27281根因、data_dump基线、loaddata条件化、配置分发、治本
+
+**任务**：服务器 diag_precombine 输出对比定位 27281 vs 955 根因 + 配置分发机制治本。用户连续追问「data_dump 为什么是旧的」「应该跟我的配置做」→ 解释机制（快照=出厂设置，只在首次部署读；配置存数据库不随 git 走）+ 用户拍板治本。
+
+**根因（证据链）**：
+- 服务器 cfg2/cfg6 conditions=[]、join_type=left、updated_at=08-11（=data_dump 导出时间）；FM9 价目挂载 left、FM11 分组挂载 inner 但无条件 → kept=209,123 全量 → 主表 239,504 行匹配 27,281 行 = 用户看到的 27281
+- dump 考古：FieldMapping/DetailTableConfig 记录无 join_type 字段（后续模型新增）→ loaddata 取默认 left
+- 机制缺陷：启动链每次 loaddata 覆盖数据库，服务器改配置重启即还原
+
+**方向锁定**：命中数据流向（配置分发机制）→ rule §11.1 方向理解清单 4 条 + adqa 质疑关 5 条（#4 存活：新部署用旧 dump 重踩 27281 → 整改项 R-001；#1/#5 执行时验证；#2/#3 证伪失败）→ 用户全确认。
+
+**变更文件**：
+- `deploy/docker-compose.yml`：启动链 loaddata 条件化（`if Domain.objects.exists() 跳过，else loaddata`，仅首次部署灌快照）
+- `deploy/data_dump.json`：重新导出正确基线（排除 auth.user/authtoken/userprofile/archive；PYTHONUTF8=1 防 GBK 编码；91KB/133 对象）
+- `.gitignore`：解除 /deploy/data_dump.json 忽略（决策变更，用户确认入库）
+
+**验证**：模拟首次部署（临时 sqlite 库 migrate+loaddata 全量 133 对象导入 OK + cfg2/cfg6 inner+conditions 正确）；YAML 解析 OK；commit c46ed2b→push 待做。
+
+**状态变更**：服务器配置分发从「每次启动 loaddata 覆盖」→「仅首次初始化 + 数据库为准」；配置基线从 08-11 旧版 → 08-17 正确版入库。
+
+**遗留**：服务器待执行 git pull → up --build（看 loaddata skipped）→ DB 补 3 处（cfg2/cfg6 conditions+join_type、FM9 inner）→ diag 重跑验证 kept 955/116,594 交集 955 → 界面重跑同步收敛；用户「在哪台机器配的」未确认（不阻塞：本机 dev.db=正确主副本）
+
 ### 第一百六十四轮（2026-08-17）标签：diag_precombine、诊断命令、预组合过滤、本机vs服务器对比
 
 **任务**：用户报服务器档案同步出 27281 条（本机 955 正确），预组合配置界面已确认（物料分组 64 条限制 + inner join），代码已 git 同步；用户要求把同步逻辑做成可打印的 debug 工具，两侧各跑一次对比。prjm 路由→AskUserQuestion 确认「做诊断命令」→ darc 执行。

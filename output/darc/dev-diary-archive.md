@@ -2,6 +2,33 @@
 
 > 记录 archive 模块编码实现的关键数据流与实现要点，供后续影响分析使用。
 
+## 2026-08-17 — 服务器 27281 根因定位 + 配置分发机制治本（第一百六十五轮）
+
+### 变更背景
+用户跑服务器 diag_precombine 输出证实根因：服务器 cfg2/cfg6 conditions=[]、join_type=left、updated_at=08-11（data_dump 导出时间）；FM9（价目挂载）left；FM11（分组挂载）inner 但无条件。本机 cfg2 08-17 / cfg6 08-13 的正确配置从未进入服务器 PostgreSQL。
+
+### 根因链（诊断证据 + dump 考古）
+- **配置存数据库不随 git 走**：用户在本机界面配的 64 条限制+inner join 只写进 dev.db，服务器 PostgreSQL 从未收到（updated_at=08-11 铁证）
+- **data_dump.json 是 08-11 部署基线且结构性过时**：dump 中 FieldMapping/DetailTableConfig 记录**无 join_type 字段**（该字段是后续模型新增）→ loaddata 导入时取默认值 left → 服务器全部 left；且 conditions 全空
+- **27281 的数学来源**：服务器唯一 inner 挂载 FM11 无条件 → 明细 1782 行全量 → 桥接物料表 209,123 → kept=209,123 全量 → 应用到主表 239,504 行 → 匹配 27,281 行 → 全部入档
+- **机制性缺陷**：docker-compose 启动链每次启动都 loaddata → 即使服务器 DB 改对，重启即被旧 dump 覆盖
+
+### 方向锁定（rule §11.1，命中数据流向）
+- 用户拍板治本；adqa 质疑关 5 条（#4 存活：未来新部署用旧 dump 会重踩 27281 → 转整改项 R-001；#1/#5 执行时验证；#2/#3 证伪失败）
+
+### 实施（3 项）
+1. **deploy/docker-compose.yml 启动链 loaddata 条件化**：`if Domain.objects.exists() 则跳过，else loaddata`——仅首次部署（空库）灌配置快照，之后重启不再覆盖数据库；配置以数据库为准
+2. **data_dump.json 重新导出为正确基线**：从本机 dev.db 导出（排除 auth.user/authtoken/mdm_auth.userprofile/archive 等敏感+业务数据；`PYTHONUTF8=1` 强制 UTF-8 防 Windows GBK）；**解除 .gitignore 入库**（决策变更，用户确认）——以后 git pull 自动同步基线
+3. **服务器 DB 补 3 处**（用户执行）：cfg2.conditions=[NAME eq 明码实价 header]+join_type=inner、cfg6.conditions=[FULL_PARENT_ID starts_with .101041 detail]+join_type=inner、FM9.join_type=inner（FM11 已 inner）
+
+### 验证
+- 新 dump 模拟首次部署全流程：临时 sqlite 库 migrate OK + loaddata OK（domain 1/table 6/field 101/fieldgroup 7/FM 3/cfg 2/configtable 6/datasource 1/computedfield 3/standardfield 1/aiconfig 1/role 1 全量导入）+ 导入后 cfg2/cfg6 join_type=inner + conditions 正确
+- YAML 解析 OK（command 展开 if/fi 结构正确）
+- 服务器待执行：git pull → up --build（看 loaddata skipped 日志）→ DB 补 3 处 → diag 重跑（kept 955/116,594 交集 955）→ 同步收敛
+
+### 遗留
+- 服务器侧验证结果待用户反馈；dump 入库后旧 dump 历史仍在 git 历史（含 08-11 的 auth.user 哈希，属历史遗留，不阻断）
+
 ## 2026-08-17 — 新增 diag_precombine 诊断命令（第一百六十四轮）
 
 ### 变更背景

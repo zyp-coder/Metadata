@@ -40,7 +40,12 @@ services:
       context: ../backend
     command: >
       sh -c "python manage.py migrate --noinput &&
-             python manage.py loaddata /app/data_dump.json &&
+             if python manage.py shell -c 'import sys; from modeling.models import Domain; sys.exit(0 if Domain.objects.exists() else 1)'; then
+               echo 'loaddata skipped: database already initialized';
+             else
+               echo 'loaddata running: first-time initialization';
+               python manage.py loaddata /app/data_dump.json;
+             fi &&
              python manage.py init_admin &&
              python manage.py collectstatic --noinput &&
              gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 120"
