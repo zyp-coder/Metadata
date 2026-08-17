@@ -1,5 +1,30 @@
 # 模块详情：archive
 
+### 第一百六十四轮（2026-08-17）标签：diag_precombine、诊断命令、预组合过滤、本机vs服务器对比
+
+**任务**：用户报服务器档案同步出 27281 条（本机 955 正确），预组合配置界面已确认（物料分组 64 条限制 + inner join），代码已 git 同步；用户要求把同步逻辑做成可打印的 debug 工具，两侧各跑一次对比。prjm 路由→AskUserQuestion 确认「做诊断命令」→ darc 执行。
+
+**关键判断（影响分析）**：预组合配置（DetailTableConfig.conditions / FieldMapping.join_type）存数据库、不随 git 走——代码同步 ≠ 配置同步；session 第一百六十二轮留痕「服务器 data_dump 配置暂缓」是最大嫌疑。
+
+**变更文件**：
+- `backend/apps/archive/management/commands/diag_precombine.py`（新文件，只读不改数据）：`python manage.py diag_precombine --domain-id N [--archive-id M] [--no-query]`
+  - 第一部分 配置全景：主表/主键/每表数据源/DetailTableConfig（conditions 原样 JSON + join_type + 头表关联 + updated_at）/detail 挂载 FieldMapping；高亮 cfg.join_type != fm.join_type 不一致（同步实际用 fm.join_type）
+  - 第二部分 逐步模拟：复用 ArchiveViewSet 纯方法（无 request 实例化），逐挂载打印 条件来源→header/detail 拆分→明细行数→头表带条件行数→JOIN 后行数→src_values 大小→same_domain→桥接行数→kept→交集；逻辑与 _build_precombine_filters 逐行对齐
+  - 第三部分 影子校验：真实 _build_precombine_filters 对比 warnings 与结论（防诊断逻辑漂移）
+  - 第四部分 档案统计：total/active/synced
+- 踩坑修复：Windows 控制台 GBK 不支持 ✓/⚠/★/→ 等符号（UnicodeEncodeError）→ 全部 ASCII 化（FAIL/WARN/OK/->）；`--no-query` 模式验证配置输出
+- 修正：默认取域下第一个档案（不限 status）——本机档案 #3 是 draft 状态但 active=955 正是目标档案
+
+**本机实跑验证（域 2 档案 #3，EXIT:0）**：
+- 挂载#12 价目明细：header 条件 NAME eq 明码实价 → 头表 1 行 → inner JOIN 239,504→955 → src_values=955 → same_domain=True → kept=955
+- 挂载#13 物料分组：detail 条件 FULL_PARENT_ID starts_with .101041 → 明细 64 行（用户限制生效）→ 头表 1,782 行 → JOIN 后 64 行 → same_domain=False → 桥接物料表 209,123 行 → kept=116,594
+- 交集=955；影子校验一致（真实函数生成 row_filter [1,2,6]，0 warnings）；档案 active=955 完全吻合
+- 关键对比证据：本机 cfg2 updated_at=2026-08-17 01:13:38、cfg6 updated_at=2026-08-13 08:54:13
+
+**状态变更**：诊断命令已交付；服务器侧待用户跑 `docker compose exec backend python manage.py diag_precombine --domain-id 2` 对比输出定位根因（重点：cfg.conditions 是否缺失/旧、kept 大小、交集）。
+
+**遗留**：若服务器 cfg.conditions 缺失/不同 → 需在服务器数据库修正配置（或重新导入 data_dump），并重跑同步收敛 27281→955。
+
 ### 第一百五十九轮续2（2026-08-13）标签：服务器同步、mssql后端缺失、ODBC Driver 18、Dockerfile、requirements
 
 **任务**：用户部署服务器后档案同步预检报错 `'mssql' isn't an available database backend or couldn't be imported`（4 张 SQL Server 表同报），预检无法完成。

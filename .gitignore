@@ -47,5 +47,8 @@ desktop.ini
 *.tmp
 nul
 
+# Local settings (development only, not for production)
+backend/local_settings.py
+
 # Data export (deploy artifact)
 /deploy/data_dump.json

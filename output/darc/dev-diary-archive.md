@@ -2,6 +2,32 @@
 
 > 记录 archive 模块编码实现的关键数据流与实现要点，供后续影响分析使用。
 
+## 2026-08-17 — 新增 diag_precombine 诊断命令（第一百六十四轮）
+
+### 变更背景
+用户报服务器档案同步出 27281 条（本机 955 正确），代码已 git 同步，怀疑服务器数据库配置（cfg.conditions 存 PostgreSQL，不随 git 走）与本地不一致。用户要求把同步逻辑做成可打印的 debug 工具，本机/服务器各跑一次对比。
+
+### 关键实现（backend/apps/archive/management/commands/diag_precombine.py，新文件，只读不改数据）
+- `python manage.py diag_precombine --domain-id N [--archive-id M] [--no-query]`
+- **第一部分 配置全景**：主表/主键 + 每表数据源 + DetailTableConfig（conditions/join_type/头表关联/updated_at 原样 JSON）+ 全部 detail 挂载 FieldMapping（join_type/conditions/源目标字段）；高亮 `cfg.join_type != fm.join_type` 不一致告警（同步实际用 fm.join_type，前端配置界面存 cfg.join_type）
+- **第二部分 逐步模拟**：复用 ArchiveViewSet 纯方法（无 request 实例化），对每个 inner 挂载逐步打印：条件来源→header/detail 拆分→明细行数→头表带条件行数→JOIN 后行数→src_values 大小→same_domain 判定→桥接行数→kept 大小→交集；逻辑与 `_build_precombine_filters` 逐行对齐
+- **第三部分 影子校验**：调用真实 `_build_precombine_filters` 对比结论与 warnings（防诊断逻辑漂移；不一致时以真实函数为准）
+- **第四部分 档案统计**：total/active/synced 直接对比口径
+- 踩坑：Windows 控制台 GBK 不支持 ✓/⚠/★/→ 等 Unicode 符号 → 全部 ASCII 化（FAIL/WARN/OK/->）保证本机与服务器容器都能跑
+
+### 本机实跑验证（域 2，档案 #3）
+- 挂载#12 价目明细：header 条件 NAME eq 明码实价 → 头表 1 行 → inner JOIN 239,504→955 → src_values=955 → same_domain=True → kept=955
+- 挂载#13 物料分组：detail 条件 FULL_PARENT_ID starts_with .101041 → 明细 64 行（用户数据限制生效）→ 头表 1,782 行 → JOIN 后 64 行 → same_domain=False → 桥接物料表 209,123 行 → kept=116,594
+- 交集=955；影子校验一致（真实函数生成 row_filter，0 warnings）；档案 active=955 完全吻合
+- 关键证据：本机 cfg2 updated_at=2026-08-17 01:13:38（价目）、cfg6 updated_at=2026-08-13 08:54:13（分组）——服务器对比时若 cfg.conditions 缺失/不同/updated_at 更旧 → 即为 27281 vs 955 根因
+
+### 验证
+- py_compile 通过 + Django check 0 issues + 命令实跑 2 次（--no-query 与全量）EXIT:0
+- 未改任何既有逻辑（新增独立只读命令），无回归风险
+
+### 遗留
+- 服务器侧待用户跑 `docker compose exec backend python manage.py diag_precombine --domain-id 2` 对比两侧输出（重点：cfg.conditions、cfg.updated_at、kept 大小）
+
 ## 2026-08-14 — 预组合过滤主记录引擎改造（第一百六十二轮）
 
 ### 变更背景
