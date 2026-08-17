@@ -2,6 +2,22 @@
 
 > 记录 archive 模块编码实现的关键数据流与实现要点，供后续影响分析使用。
 
+## 2026-08-17 — 启动链 loaddata 事故修复：彻底移除自动灌（第一百六十六轮）
+
+### 变更背景
+第一百六十五轮治本（loaddata 条件化）上线后事故：服务器 git pull + up --build → backend 容器 Restarting 循环崩溃，前端全挂（假象「域管理的东西都没有了」）。日志：loaddata 走了 else 分支 → FieldMapping(pk=11) 撞唯一约束 (1,1,2,33) 已存在 → IntegrityError → 启动链中断 → gunicorn 未起。详见 debug-diary BUG-2026-0817-01。
+
+### 变更（commit 99c6c86）
+- `deploy/docker-compose.yml`：启动链移除 if/loaddata 双分支，恢复纯启动链 `migrate → init_admin → collectstatic → gunicorn`；注释写明 data_dump.json 仅用于首次部署手动导入（`docker compose exec backend python manage.py loaddata /app/data_dump.json`）
+
+### 验证
+- YAML 解析 OK（command 展开为纯启动链）
+- 服务器恢复验证待用户反馈（docker compose ps 不再 Restarting + API 可达 + 域/表/字段 counts 核查）
+
+### 遗留
+- 条件命令误判根因未在容器内复现（待有环境时实测 `shell -c` 退出码行为）；
+- loaddata 撞约束前部分对象已导入（同 pk 被 UPDATE 成本机配置），服务器恢复后需核查数据库残留
+
 ## 2026-08-17 — 服务器 27281 根因定位 + 配置分发机制治本（第一百六十五轮）
 
 ### 变更背景

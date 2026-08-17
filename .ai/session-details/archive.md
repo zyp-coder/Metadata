@@ -1,5 +1,19 @@
 # 模块详情：archive
 
+### 第一百六十六轮（2026-08-17）标签：loaddata事故、容器崩溃、启动链、事故修复、方案A
+
+**任务**：第一百六十五轮治本（compose 启动链 loaddata 条件化）上线后服务器事故——用户报「服务器更新之后域管理的东西都没有了」。
+
+**事故链条（取证）**：docker compose ps 显示 backend `Restarting (1)` 循环崩溃；日志 = loaddata 走了 else 分支 → `IntegrityError: Could not load modeling.FieldMapping(pk=11): duplicate key (1,1,2,33) already exists` → 启动链 && 中断 → gunicorn 未起 → 前端全挂（假象）。关键判断：报错证明数据库配置**都在**（数据未丢），页面全空是后端崩溃所致。
+
+**根因**：①条件命令 `shell -c '...sys.exit(0 if Domain.objects.exists() else 1)'` 在容器内误判走 else（具体原因未复现——本地模拟只测了导入路径，未实测 if 分支，验证缺口）；②服务器库已有同键 FM（pk≠11）→ loaddata 插入撞唯一约束。
+
+**修复（方案A，用户确认，commit 99c6c86）**：启动链彻底移除 loaddata（migrate→init_admin→collectstatic→gunicorn）；data_dump.json 仅用于首次部署手动导入（compose 注释写明命令）；YAML 解析验证 OK。
+
+**状态变更**：v20 决策（loaddata 条件化）被推翻 → v21（启动链零数据操作，首次部署手动灌）；constitution 决策行已标【推翻】。
+
+**遗留**：服务器 git pull + up --build 恢复验证（ps 不再 Restarting + API 可达 + 域/表/字段 counts）；loaddata 部分导入残留核查（同 pk 被 UPDATE 成本机配置=正确方向）；条件误判根因待容器内实测
+
 ### 第一百六十五轮（2026-08-17）标签：27281根因、data_dump基线、loaddata条件化、配置分发、治本
 
 **任务**：服务器 diag_precombine 输出对比定位 27281 vs 955 根因 + 配置分发机制治本。用户连续追问「data_dump 为什么是旧的」「应该跟我的配置做」→ 解释机制（快照=出厂设置，只在首次部署读；配置存数据库不随 git 走）+ 用户拍板治本。

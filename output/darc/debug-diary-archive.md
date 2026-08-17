@@ -2,6 +2,20 @@
 
 > 记录 archive 模块的 Bug 根因、修复方式与已知耦合点，供后续影响分析使用。
 
+## BUG-2026-0817-01 启动链 loaddata 条件判断误判 → 容器崩溃循环，前端全挂（假象「域管理东西全没了」）
+
+- **现象**（第一百六十六轮）：第一百六十五轮治本上线（compose 启动链 loaddata 条件化：`if Domain.objects.exists() 则跳过，else loaddata`）后，服务器 git pull + `docker compose up -d --build backend` → backend 容器 `Restarting (1)` 循环崩溃 → 前端全部加载失败（用户以为「域管理的东西都没有了」）。日志关键行：loaddata 实际执行（走了 else 分支）→ `IntegrityError: Problem installing fixture '/app/data_dump.json': Could not load modeling.FieldMapping(pk=11): duplicate key value violates unique constraint "modeling_fieldmapping_source_table_id_source_f_da74177b_uniq"`（键 (1,1,2,33) 已存在）
+- **根因（两层）**：
+  1. **条件命令在容器内误判走 else**：`python manage.py shell -c '...sys.exit(0 if Domain.objects.exists() else 1)'` 在容器内实际走了 loaddata 分支（exists() 返回 False 或命令退出码非 0，**具体原因未在容器内复现确认**——本地模拟部署验证只测了 migrate+loaddata 导入路径，从未在容器环境实测 if 判断分支，属验证缺口）
+  2. **loaddata 撞唯一约束中断启动链**：服务器数据库已有同键 FM（(1,1,2,33) 已存在，pk≠11）→ loaddata 插入 pk=11 撞唯一约束 → IntegrityError → 启动链 `&&` 中断 → gunicorn 未起 → 容器崩溃循环
+- **修复**（commit 99c6c86）：compose 启动链**彻底移除 loaddata**——启动链= migrate → init_admin → collectstatic → gunicorn；data_dump.json 仅用于**首次部署手动导入**（compose 注释写明命令 `docker compose exec backend python manage.py loaddata /app/data_dump.json`）。数据库数据未丢（loaddata 撞约束前部分对象已导入，同 pk 记录被 UPDATE 成本机配置=正确方向），恢复后需核查残留
+- **教训**：
+  1. 启动链双分支逻辑（if 判断）**必须在目标容器环境实测后才可上线**——本地 YAML 解析 + 模拟导入 ≠ 容器内 sh 执行行为（引号嵌套/退出码/环境差异）
+  2. loaddata **非事务**：撞唯一约束会部分导入，恢复后必须核查数据库残留（多出的对象/被覆盖的同 pk 记录）
+  3. 「页面全空」先查 `docker compose ps`（Restarting 状态）+ 启动日志，**数据未必丢**，禁止直接走恢复数据流程
+  4. 生产启动链禁用自动数据操作：宁可首次部署显式手动 loaddata（写进部署脚本），也不要自动化双分支
+- **验证**：YAML 解析 OK（command 展开为纯启动链）；服务器恢复验证待用户反馈
+
 ## BUG-2026-0808-02 同步收尾炸「too many SQL variables」：SQLite 999 变量上限被大列表击穿
 
 - **现象**（第一百三十二轮）：全量同步（去 TOP 1000）实测，主体数据全部写入成功（209,123 条记录、MTL_NAME 100% 有值、PRICE 24,794 精确命中交集），但收尾时顶层报 `档案 10 数据刷新失败: too many SQL variables`，且 stats 显示全 0（records_created/updated 均 0）——与实际落库数据严重矛盾
