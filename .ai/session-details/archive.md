@@ -1,5 +1,26 @@
 # 模块详情：archive
 
+### 第一百六十七轮（2026-08-17）标签：事故复盘、规则优化、166轮
+
+**任务**：166 轮事故复盘 + 技能架构优化（用户确认：「关系这个肯定要修复」→ 关系对齐完成后用户要求复盘根因 + 优化 AI 技能架构）
+
+**关系对齐收尾**：用户确认界面已好（关系 3 条 + 档案 955），commit 5d90972
+
+**复盘结论（三层根因链）**：
+1. 初始故障 27281：每次启动 loaddata 覆盖服务器配置（用户界面改的 inner/conditions 被还原）+ 旧基线缺 join_type 字段（导入默认 left）+ 基线被 gitignore 无法考古
+2. 治本崩溃：条件命令 `from modeling.models import Domain` import 路径错误（INSTALLED_APPS 用 apps. 前缀，settings.py L23-25）→ 容器必 ModuleNotFoundError → 退出码非0 → 误判走 else → loaddata 撞唯一约束 → 启动链中断容器崩溃
+3. 体系漏洞：部署链改动未获「新功能」验证待遇（模拟验证只测内置命令，自定义命令漏测）；§8 非幂等禁令管新脚本管不到存量覆盖机制；验证环境不同构（本机 venv ≠ 容器）
+
+**规则优化落地（用户确认 R-1/R-2/R-3/R-4）**：
+- R-1：rule §5 第3问新增 ③ 部署/启动链验证——compose/entrypoint/初始化命令/Dockerfile 类改动 = 新功能，必须与生产同构环境（容器）实测自定义命令逐条执行 + 产出实测清单
+- R-2：rule §8 一致性底线新增「永不放任存量覆盖性机制」——启动链/定时任务中每次运行覆盖 DB 的存量机制必须审计治理（幂等化或移除）
+- R-3：rule §7 新增第 7 条验证环境同构原则——「本机通过 ≠ 容器通过」
+- R-4：adqa SKILL 时点 B 新增「部署链行为反例」检查项——攻击验证证据本身（是否容器实测自定义命令）
+
+**修改文件**：`.qoder/rules/prjm.md`（副本，3 处条款）、`D:\AIproject\Store2DDD-Skill\.qoder\rules\prjm-rules.md`（母本，Copy-Item 同步 HASH OK）、`C:\Users\zhangyupeng\.qoder\skills\adqa\SKILL.md`（时点 B）
+
+**状态变更**：166 轮事故完整闭环（修复 + 复盘 + 规则补丁）；遗留：无
+
 ### 第一百六十六轮（2026-08-17）标签：loaddata事故、容器崩溃、启动链、事故修复、方案A
 
 **任务**：第一百六十五轮治本（compose 启动链 loaddata 条件化）上线后服务器事故——用户报「服务器更新之后域管理的东西都没有了」。

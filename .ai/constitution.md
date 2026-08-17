@@ -284,3 +284,10 @@
 - **决策（方向理解清单 4 条 + adqa 质疑关 5 条，§11.1 全流程，用户拍板治本）**：①docker-compose 启动链 loaddata 条件化——`if modeling.Domain.objects.exists() 则跳过，else loaddata`，仅首次部署（空库）灌配置快照，之后重启不再覆盖数据库，配置以数据库为准；②data_dump.json 重新导出为正确基线（从本机 dev.db，排除 auth.user/authtoken/mdm_auth.userprofile/archive 等敏感+业务数据，PYTHONUTF8=1 强制 UTF-8 防 Windows GBK）+解除 .gitignore 入库（决策变更，用户确认）——git pull 自动同步基线，新服务器首次部署出厂即正确（整改项 R-001）；③服务器 DB 补 3 处对齐本机：cfg2.conditions=[NAME eq 明码实价 header]+join_type=inner、cfg6.conditions=[FULL_PARENT_ID starts_with .101041 detail]+join_type=inner、FM9.join_type=inner（FM11 已 inner）
 - **实证支撑**：新 dump 模拟首次部署全流程验证（临时 sqlite 库 migrate OK + loaddata 133 对象全量导入 + cfg2/cfg6 inner+conditions 正确）；YAML 解析 OK；dump 考古证实无 join_type 字段；质疑 #2/#3 证伪失败（init_admin 幂等、差异仅 cfg/FM 已由 diag 证实）、#1（服务器 Domain 计数）/#5（启动命令语法）执行时验证
 - **adqa 硬回执**：回执：质[✓5条] 伪[✓dump考古/diag对比/模拟部署/YAML解析] 锁[✓确认4/留活口1（R-001 已整改）/否决0]
+
+## 架构级决策：166 轮事故复盘规则补丁 R-1~R-4（2026-08-17 复盘落地）
+
+- **背景**：166 轮事故完整闭环后用户要求复盘 + 优化 AI 技能架构。复盘三层根因链：①初始故障 27281=每次启动 loaddata 覆盖服务器配置（界面改的 inner/conditions 被还原）+ 旧基线缺 join_type 字段（导入默认 left）+ 基线被 gitignore 无法考古；②治本崩溃=条件命令 `from modeling.models import Domain` import 路径错误（INSTALLED_APPS 用 apps. 前缀）→ 容器必 ModuleNotFoundError → 退出码非0 → 误判走 else → loaddata 撞唯一约束 → 启动链中断容器崩溃；③体系漏洞=部署链改动未获「新功能」验证待遇（模拟验证只测内置命令）+ §8 非幂等禁令管新脚本管不到存量覆盖机制 + 验证环境不同构（本机 venv ≠ 容器）
+- **决策（用户确认 R-1/R-2/R-3/R-4 全落地）**：R-1 rule §5 第3问新增 ③ 部署/启动链验证——compose/entrypoint/初始化命令/Dockerfile 类改动 = 新功能，必须与生产同构环境（容器）实测自定义命令逐条执行 + 产出「自定义命令实测清单」，禁止仅本机 venv 验证；R-2 rule §8 一致性底线新增「永不放任存量覆盖性机制」——启动链/定时任务中每次运行覆盖 DB 数据的存量机制必须审计治理（幂等化或彻底移除，二选一）；R-3 rule §7 新增第 7 条验证环境同构原则——「本机通过 ≠ 容器通过」（import 路径/环境变量/依赖版本都可能不同），无法容器实测时必须显式声明环境差异与风险点；R-4 adqa SKILL 时点 B 新增「部署链行为反例」检查项——攻击验证证据本身是否容器实测自定义命令
+- **实施**：`.qoder/rules/prjm.md`（副本 3 处条款）+ `D:\AIproject\Store2DDD-Skill\.qoder\rules\prjm-rules.md`（母本 Copy-Item 同步，HASH OK 已校验）+ `C:\Users\zhangyupeng\.qoder\skills\adqa\SKILL.md`（时点 B 检查项）
+- **回执**：闸[✓] 记[✓] 拓[✓] 测[✓]（无新增路径——规则/文档变更；母本副本哈希比对通过）
