@@ -18,11 +18,12 @@
     </div>
 
     <div style="min-height: calc(100vh - 180px)">
-        <a-alert v-if="archive" type="info" show-icon style="margin-bottom: 12px">
-          <template #message>
-            所属域：{{ archive.domain_name }} | Schema 版本：v{{ archive.schema_version }} | 字段数：{{ archive.schema?.length || 0 }} | 记录数：{{ recordTotal }}
-          </template>
-        </a-alert>
+        <div v-if="archive" style="display:flex;gap:24px;margin-bottom:12px;padding:8px 16px;background:#f6f8fa;border-radius:6px;border:1px solid #f0f0f0">
+          <span style="font-size:13px"><span style="color:#8c8c8c">所属域</span> <strong>{{ archive.domain_name }}</strong></span>
+          <span style="font-size:13px"><span style="color:#8c8c8c">Schema</span> <strong>v{{ archive.schema_version }}</strong></span>
+          <span style="font-size:13px"><span style="color:#8c8c8c">字段数</span> <strong>{{ archive.schema?.length || 0 }}</strong></span>
+          <span style="font-size:13px"><span style="color:#8c8c8c">记录数</span> <strong>{{ recordTotal }}</strong></span>
+        </div>
 
         <!-- 筛选器 + 查询（第八十七轮问题6） -->
         <a-space style="margin-bottom: 12px" wrap>
@@ -52,7 +53,8 @@
         <div style="display: flex; gap: 12px; align-items: stretch; min-height: calc(100vh - 280px)">
           <div class="field-nav" style="height: calc(100vh - 260px); overflow-y: auto">
             <div class="field-nav-title">字段导航</div>
-            <template v-for="block in groupedSchemaBlocks" :key="block.key">
+            <a-input v-model:value="fieldNavSearch" placeholder="搜索字段" size="small" allow-clear style="margin:0 8px 6px" />
+            <template v-for="block in filteredNavBlocks" :key="block.key">
               <div v-if="block.name" class="field-nav-group" :style="{ paddingLeft: (block.level - 1) * 8 + 'px' }">{{ block.name }}</div>
               <div
                 v-for="f in block.fields"
@@ -78,7 +80,7 @@
           :loading="loading"
           rowKey="id"
           size="small"
-          :scroll="{ x: dynamicColumnsTotalWidth, y: 'calc(100vh - 300px)' }"
+          :scroll="{ x: dynamicColumnsTotalWidth, y: 'calc(100vh - 240px)' }"
           :pagination="{ current: recordPage, pageSize: 20, total: recordTotal, onChange: (p: number) => { recordPage = p; loadRecords() }, showTotal: (t: number) => `共 ${t} 条` }"
         >
           <template #bodyCell="{ column, record: rec, index }">
@@ -519,6 +521,17 @@ interface SchemaGroupBlock {
 }
 
 // 树展平为块序列（父标题在前、子组紧随），供抽屉嵌套标题渲染
+// 字段导航搜索
+const fieldNavSearch = ref('')
+const filteredNavBlocks = computed(() => {
+  const q = fieldNavSearch.value.trim().toLowerCase()
+  if (!q) return groupedSchemaBlocks.value
+  return groupedSchemaBlocks.value.map(b => ({
+    ...b,
+    fields: b.fields.filter(f => f.code.toLowerCase().includes(q) || f.name.toLowerCase().includes(q)),
+  })).filter(b => b.fields.length > 0 || (b.name && b.name.toLowerCase().includes(q)))
+})
+
 const groupedSchemaBlocks = computed<SchemaGroupBlock[]>(() => {
   const blocks: SchemaGroupBlock[] = []
   const walk = (nodes: SchemaGroupNode[]) => {

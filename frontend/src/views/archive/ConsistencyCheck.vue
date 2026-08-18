@@ -241,7 +241,7 @@ const disableRuleTypeLabel = computed(() => checkTypes.find(t => t.key === disab
 
 const issueColumns = [
   { title: '字段', key: 'field', width: 160 },
-  { title: '差异', key: 'diff', width: 280 },
+  { title: '差异', key: 'diff', width: 320 },
   { title: '记录标识', key: 'record_key', width: 140, ellipsis: true },
   { title: '状态', key: 'status', width: 80 },
   { title: '操作', key: 'action', width: 70 },

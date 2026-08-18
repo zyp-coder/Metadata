@@ -144,7 +144,7 @@
     </a-drawer>
 
     <!-- 子表注册管理弹窗（预组合=头表+明细表） -->
-    <a-modal v-model:open="dcModalVisible" :title="dcEditingId ? '编辑子表配置' : '新建子表注册（预组合）'" @ok="handleDcSubmit" :confirmLoading="dcSaving" width="860px" :destroyOnClose="true">
+    <a-modal v-model:open="dcModalVisible" :title="dcEditingId ? '编辑子表配置' : '新建子表注册（预组合）'" @ok="handleDcSubmit" :confirmLoading="dcSaving" width="1100px" :destroyOnClose="true">
       <a-alert v-if="!dcEditingId" type="info" show-icon style="margin-bottom: 16px"
         message="预组合 = 头表 + 明细表"
         description="先选头表和明细表（如 价目表 + 价目表明细），再配头↔明细关联字段；后续挂载时用整个预组合体关联主表" />
@@ -292,7 +292,7 @@
     </a-modal>
 
     <!-- 子表注册管理列表（2026-08-11 修复：注册管理入口升级为列表，支持查看/编辑/删除已有注册） -->
-    <a-modal v-model:open="dcListModalVisible" title="子表注册管理（预组合）" width="860px" :footer="null">
+    <a-modal v-model:open="dcListModalVisible" title="子表注册管理（预组合）" width="1100px" :footer="null">
       <a-alert type="info" show-icon style="margin-bottom: 12px" message="预组合 = 头表 + 明细表"
         description="注册（头表+明细表先组合）与挂载（用组合体关联主表）是两步；同一明细表只能注册一次，新建时已注册的明细表不可重复选择" />
       <a-input v-model:value="dcListSearch" placeholder="搜索头表名或明细表名..." allowClear style="margin-bottom: 12px" />
@@ -369,7 +369,7 @@
       <div v-else style="text-align: center; padding: 40px 0; color: #999">正在拉取外部表数据，可能需要几十秒…</div>
     </a-modal>
 
-    <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="960px">
+    <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="1200px">
       <a-form layout="vertical">
         <a-row :gutter="16">
           <a-col :span="12">
@@ -634,7 +634,7 @@
     <a-modal
       v-model:open="aiModalVisible"
       title="AI 建议的字段映射关系"
-      :width="900"
+      :width="1100"
       :footer="null"
       :bodyStyle="{ maxHeight: '70vh', overflowY: 'auto' }"
     >

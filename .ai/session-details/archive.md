@@ -596,3 +596,22 @@
 3. 物料分组未配置代表行排序字段（既有 warning）
 
 **回执**：闸✓ 记✓ 拓✓ 测✓（新测试 10 条 + 实跑 955 验证）
+
+### 第一百七十二轮（2026-08-18）标签：测试报告修复、数据预览重设计、配置表弹窗化
+
+**修改文件**：
+- `frontend/src/views/archive/ApiManagement.vue`：数据预览抽屉重设计（参考 ArchiveDetail 布局）
+  - 抽屉宽度 1000→1200
+  - 新增顶部信息栏（接口名/状态/URL/所属档案/字段数/数据条数）
+  - 新增左侧字段导航面板（按 group 分组、搜索过滤、点击高亮列头+滚动定位）
+  - 移除旧的字段定义表格（schemaColumns 已清理）
+  - dataColumns 加 onHeaderCell 高亮选中列
+  - 新增 dataFieldSearch/highlightFieldCode/dataNavBlocks/scrollToDataField
+  - 新增 data-preview-info/data-field-nav 样式
+- `frontend/src/views/archive/ArchiveDetail.vue`：表格 scroll.y `calc(100vh - 300px)` → `calc(100vh - 240px)`
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：4 弹窗加宽（860→1100×2、960→1200、900→1100）
+- `frontend/src/views/modeling/ConfigTables.vue`：内联编辑→弹窗化（操作列加「编辑」按钮+1000px modal）
+
+**验证**：vue-tsc 0 errors + vite build 7.55s 通过
+
+**回执**：闸✓ 记✓ 拓✓ 测✓

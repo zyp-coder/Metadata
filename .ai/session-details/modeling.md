@@ -1,5 +1,48 @@
 # 操作详情 — modeling 模块（倒序，最新在前）
 > 由 rule §3 双层留痕追加；检索方式：按「第N轮」或功能标签 grep。
+## 第一百七十一轮（2026-08-18）标签：UI优化、批4+批5巡检、设置模块
+**任务**：uxqa 全站巡检批4（设置模块 5 页面）+ 批5（其余 8 页面），发现 4 项问题（1P1+3P2），用户确认全改（1问/0改向）。批5 全部巡检通过无新增整改。
+**读取文件**：UserManagement.vue（274行）、RoleManagement.vue（374行）、DataSourceList.vue（255行）、AIConfig.vue（305行）、TechFunctions.vue（239行）、DomainChangeOverview.vue（79行）、ApiKeyTab.vue（391行）、ChangeHistoryDrawer.vue（216行）、PermissionOverview.vue（203行）、RefreshPreviewModal.vue（115行）、Login.vue（80行）、DomainStageNav.vue（170行）、TrialCalculation.vue（300行）
+**变更摘要**：
+- **AIConfig.vue**：①高级设置折叠面板标题精简（去冗余括号内容）
+- **DataSourceList.vue**：①名称列加 width:140②scroll.x 800→840③h2 font-size 18→20px
+- **TechFunctions.vue**：①h2 font-size 18→20px
+**状态**：vue-tsc 0 errors + vite build 通过
+
+## 第一百七十轮（2026-08-18）标签：UI优化、批3巡检、档案模块、关系管理
+**任务**：uxqa 全站巡检批3（DomainFieldMapping + ArchiveList + ArchiveDetail + VersionManagement + ApiManagement + ConsistencyCheck）发现 3 项 P1 + 4 项 P2 问题，用户确认全改（1问/0改向）。
+**读取文件**：DomainFieldMapping.vue（2664行）、ArchiveList.vue（335行）、ArchiveDetail.vue（1252行）、VersionManagement.vue（568行）、ApiManagement.vue（736行）、ConsistencyCheck.vue（449行）
+**变更摘要**：
+- **ArchiveList.vue**：①操作列宽 320→220②scroll.x 1220→1120③新建弹窗 500→420px
+- **ArchiveDetail.vue**：①顶部信息 Alert 改为结构化展示（域/Schema/字段数/记录数分标签）②字段导航新增搜索输入框（按编码/名称过滤）
+- **ApiManagement.vue**：①scroll.x 1500→1150
+- **VersionManagement.vue**：①变更概况超3项加 tooltip（悬停显示剩余变更）
+- **ConsistencyCheck.vue**：①差异列宽 280→320
+**状态变更**：纯 UI 优化，无数据迁移
+**验证**：vue-tsc --noEmit 0 errors + vite build 通过（7.21s）
+**遗留**：无
+
+## 第一百六十九轮（2026-08-18）标签：UI优化、批2巡检、字段管理、公式编辑器
+**任务**：uxqa 全站巡检批2（DomainFieldConfig + FormulaEditor）发现 5 项 P1 + 6 项 P2 问题，用户确认全改（1问/0改向）。
+**读取文件**：DomainFieldConfig.vue（1708行）、FormulaEditor.vue（1539行）完整源码
+**变更摘要**：
+- **DomainFieldConfig.vue**：①组合字段表格列宽精简：composite_code/name 140→120、成员 code/name 140→120、table_name 220→160（总宽 1040→760）②组合编码列合并显示：首行同时展示编码+名称（名称灰色小字副标题）③公式摘要列加 ellipsis④「执行顺序」→「计算优先级」⑤属性配置 panel-sub 精简（长段引导文字→「配置字段属性；计算字段仅可切换释放」）⑥「刷新去重内容」按钮从左栏搜索旁移到左栏「字段分类」面板头（命名「刷新数据」）⑦新建分组弹窗 480→360px
+- **FormulaEditor.vue**：①弹窗标题简化（编辑时从「编辑计算字段公式 - code (name)」→「编辑计算字段」）②技术函数上传按钮去掉 block
+**状态变更**：纯 UI 优化，无数据迁移
+**验证**：vue-tsc --noEmit 0 errors + vite build 通过（7.28s）
+**遗留**：无
+
+## 第一百六十八轮（2026-08-18）标签：UI优化、批1巡检、列宽调整、配置状态loading、状态Switch、删除确认
+**任务**：uxqa 全站巡检批1（DomainList + TableList + ConfigTables）发现 6 项 P1 + 7 项 P2 问题，用户确认全改（1问/0改向）。
+**读取文件**：DomainList.vue、TableList.vue、ConfigTables.vue 完整源码；config/settings.py（ARCHIVE_AUTO_REFRESH_MINUTES）
+**变更摘要**：
+- **DomainList.vue**：①配置状态列加 `_configLoaded` 标记+loading 占位（未加载完显示 spin）②列宽调整：描述 500→300、操作 320→280、名称 220→200、编码 160→140、状态 110→100、创建时间 170→160③名称列改普通文本（非链接样式，避免与操作列链接混淆）④h2 字号 20px→18px（与 TableList/ConfigTables 统一）
+- **TableList.vue**：①page-header 提示文字精简：从页头移到 Alert 内（与主表/主键引导合并）②列宽调整：表名英/中 180→160、类型 100→90、数据源 140→120、字段数 90→80、主表 90→80、主键 200→220、创建时间 160→150、操作 200→160③scroll.x 1430→1350④数据预览列宽 200/140→180/130 + ellipsis showTitle（超长显示 tooltip）⑤字段管理抽屉滚动高度 300→280
+- **ConfigTables.vue**：①状态列改 Switch（新增 handleToggleStatus + _toggling 标记）②新建按钮 disabled 修复：`!!editingId`（始终 null）→ `showCreateForm`③数据行删除加 Popconfirm④同步按钮区分：「预览」→「预览结果」、「同步」→「执行同步」（主色按钮）⑤状态列宽 80→100
+**状态变更**：纯 UI 优化，无数据迁移
+**验证**：vue-tsc --noEmit 0 errors + vite build 通过（9.42s）
+**遗留**：批2（字段管理+关系管理）、批3（关系管理单独）、批4（档案模块）、批5（设置模块）待后续巡检
+
 ## 第一百五十九轮（2026-08-13）标签：列表筛选、关系类型下拉、普通关联筛选条件、conditions:null、refConditions、filteredMappings
 **任务**：用户指出「我告诉你什么问题。。我之前要求过这个界面增加一个筛选项的功能。。你还未加进去」——关系管理列表筛选 + reference 筛选条件 + conditions:null 400 修复。范围 AskUserQuestion 确认：批1+批2 一起做（1问/0改向）。
 **读取文件**：DomainFieldMapping.vue（列表模板 L34-83/mappingRows L798-900/弹窗 reference 分支 L446-541/保存逻辑 L1559-1734/openCreate+openEdit 回填 L1466-1526/dcConditions 先例 L253-281+1962-1968/handleDcSubmit 序列化 L1917-1924/onRelationTypeChange L2027-2042）；archive/views.py（_query_external_table L1660 已支持 conditions/_build_conditions_sql L1746 白名单+参数化/_upsert_dimension_via_mapping L2432-2530 L2503 未传/L1328 detail 路径 conditions 先例）；models.py（FieldMapping.conditions JSONField L564 无 null=True；RelationType.REFERENCE L532）；urls.py（field-mappings 路由）；tests.py（DetailSyncEngineTest.test_build_conditions_sql L798 先例）；package.json（build=vue-tsc -b && vite build）

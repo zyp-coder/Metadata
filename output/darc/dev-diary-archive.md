@@ -633,3 +633,13 @@ DetailSyncOneToManyTest 3/3 + DetailSyncEngineTest+ArchiveRecordDetailModelTest 
 ### 遗留
 - 本修正是逻辑修复，未重跑同步刷新数据（用户确认「数据不用处理，只管系统逻辑」）
 - 下次全量同步时代表行将正确按物料分组写入
+
+## 2026-08-18 测试报告 5 项修复（第一百七十二轮）
+### 变更摘要
+- **ApiManagement.vue**：数据预览抽屉重设计（参考 ArchiveDetail 布局）——抽屉宽度 1000→1200；新增顶部信息栏（接口名/状态/URL/所属档案/字段数/数据条数）；新增左侧字段导航面板（按 group 分组、搜索过滤、点击高亮列头+滚动定位）；移除旧的字段定义表格（schemaColumns 已清理）；dataColumns 加 onHeaderCell 高亮选中列
+- **ArchiveDetail.vue**：表格 scroll.y `calc(100vh - 300px)` → `calc(100vh - 240px)`（加高占满浏览器）
+### 变更文件清单
+- `frontend/src/views/archive/ApiManagement.vue`：数据预览抽屉重设计 + 新增 dataFieldSearch/highlightFieldCode/dataNavBlocks/scrollToDataField + 新增 data-preview-info/data-field-nav 样式
+- `frontend/src/views/archive/ArchiveDetail.vue`：scroll.y 调整
+### 验证
+- vue-tsc 0 errors；vite build 7.55s 通过

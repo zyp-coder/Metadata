@@ -11,7 +11,7 @@
       :loading="loading"
       :pagination="false"
       rowKey="id"
-      :scroll="{ x: 800 }"
+      :scroll="{ x: 840 }"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'db_type'">
@@ -127,7 +127,7 @@ const dbTypeDefaultPorts: Record<string, number> = {
 }
 
 const columns = [
-  { title: '名称', dataIndex: 'name', key: 'name' },
+  { title: '名称', dataIndex: 'name', key: 'name', width: 140 },
   { title: '类型', key: 'db_type', width: 100 },
   { title: '主机', dataIndex: 'host', key: 'host', width: 140 },
   { title: '端口', dataIndex: 'port', key: 'port', width: 80 },
@@ -249,6 +249,6 @@ onMounted(loadData)
 }
 .page-header h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 20px;
 }
 </style>

@@ -24,7 +24,8 @@
           />
         </template>
         <template v-if="column.key === 'config_status'">
-          <a-tooltip v-if="record._configIssues?.length" :title="`${record._configIssues.join('；')}（点击查看详情）`">
+          <a-spin v-if="!record._configLoaded" size="small" :indicator="null" />
+          <a-tooltip v-else-if="record._configIssues?.length" :title="`${record._configIssues.join('；')}（点击查看详情）`">
             <a-tag color="orange" style="cursor:pointer" @click="showConfigDetail(record)">⚠️ {{ record._configIssues.length }} 项待完善</a-tag>
           </a-tooltip>
           <a-tooltip v-else title="点击查看配置检查详情">
@@ -32,7 +33,7 @@
           </a-tooltip>
         </template>
         <template v-if="column.key === 'name'">
-          <a @click="goEdit(record)" style="color: #1677ff; font-weight: 500">{{ record.name }}</a>
+          <span @click="goEdit(record)" style="cursor: pointer; font-weight: 500">{{ record.name }}</span>
         </template>
         <template v-if="column.key === 'action'">
           <a-space :size="4" style="white-space: nowrap">
@@ -134,7 +135,7 @@ import { formatDateTime } from '@/utils/date'
 import { extractApiError } from '@/utils/apiError'
 
 const router = useRouter()
-const domains = ref<(Domain & { _toggling?: boolean; _configIssues?: string[] })[]>([])
+const domains = ref<(Domain & { _toggling?: boolean; _configIssues?: string[]; _configLoaded?: boolean })[]>([])
 const loading = ref(false)
 const modalVisible = ref(false)
 const saving = ref(false)
@@ -151,15 +152,15 @@ const configResult = ref<{
 } | null>(null)
 
 const columns = [
-  { title: '名称', dataIndex: 'name', key: 'name', width: 220 },
-  { title: '编码', dataIndex: 'code', key: 'code', width: 160 },
-  { title: '描述', dataIndex: 'description', key: 'description', width: 500, ellipsis: true },
-  { title: '状态', key: 'status', width: 110 },
+  { title: '名称', dataIndex: 'name', key: 'name', width: 200 },
+  { title: '编码', dataIndex: 'code', key: 'code', width: 140 },
+  { title: '描述', dataIndex: 'description', key: 'description', width: 300, ellipsis: true },
+  { title: '状态', key: 'status', width: 100 },
   { title: '配置状态', key: 'config_status', width: 140 },
   { title: '表数量', dataIndex: 'table_count', key: 'table_count', width: 80 },
-  { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 170,
+  { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 160,
     customRender: ({ text }: any) => formatDateTime(text) },
-  { title: '操作', key: 'action', width: 320 },
+  { title: '操作', key: 'action', width: 280 },
 ]
 
 const configColumns = [
@@ -182,8 +183,14 @@ async function loadData() {
           .filter((c: any) => c.status !== 'pass')
           .map((c: any) => `[${c.level}] ${c.message || c.label}`)
         const target = domains.value.find(x => x.id === d.id)
-        if (target) target._configIssues = issues
-      } catch { /* 非关键 */ }
+        if (target) {
+          target._configIssues = issues
+          target._configLoaded = true
+        }
+      } catch { 
+        const target = domains.value.find(x => x.id === d.id)
+        if (target) target._configLoaded = true
+      }
     })
   } finally {
     loading.value = false
@@ -332,6 +339,6 @@ onMounted(loadData)
 }
 .page-header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
 }
 </style>

@@ -41,7 +41,7 @@
       </a-form>
 
       <a-collapse v-model:activeKey="activeAdvancedKeys" style="margin: 0 0 16px 0">
-        <a-collapse-panel key="advanced" header="高级设置（服务厂商 / 接口地址 / 采样温度 / 超时 / 名称 / 启用）">
+        <a-collapse-panel key="advanced" header="高级设置">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item label="配置名称">
               <a-input v-model:value="form.name" placeholder="默认AI配置" />

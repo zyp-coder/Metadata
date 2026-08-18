@@ -228,7 +228,7 @@ onMounted(() => {
 }
 .page-header h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 20px;
 }
 .ant-upload-drag-icon {
   font-size: 32px;

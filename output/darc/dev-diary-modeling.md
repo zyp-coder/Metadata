@@ -1,6 +1,115 @@
 # 开发日记 - 主数据建模引擎（modeling）
 > 记录 modeling 模块开发过程中的关键实现决策和技术细节。
 ---
+## 2026-08-18 UXQA 批4+批5 巡检整改：设置模块 + 其余页面 UI 优化（第一百七十一轮）
+### 变更背景
+uxqa 全站巡检批4（设置模块 5 页面）+ 批5（其余 8 页面），发现 4 项问题（1P1+3P2），用户确认全改。批5 全部巡检通过无新增整改。
+### 关键实现
+**AIConfig.vue**：
+- 高级设置折叠面板标题精简：`高级设置（服务厂商 / 接口地址 / 采样温度 / 超时 / 名称 / 启用）` → `高级设置`
+
+**DataSourceList.vue**：
+- 名称列加 width:140（原来无 width，scroll.x=800 扣除其他列只剩 ~120px 易截断）
+- scroll.x 800→840（匹配列宽总和）
+- page-header h2 font-size 18→20px（与 UserManagement/RoleManagement 统一）
+
+**TechFunctions.vue**：
+- page-header h2 font-size 18→20px（同上统一）
+
+### 变更文件清单
+- `frontend/src/views/settings/AIConfig.vue`
+- `frontend/src/views/settings/DataSourceList.vue`
+- `frontend/src/views/settings/TechFunctions.vue`
+
+---
+## 2026-08-18 UXQA 批3 巡检整改：关系管理 + 档案模块 UI 优化（第一百七十轮）
+### 变更背景
+uxqa 全站巡检批3（DomainFieldMapping + ArchiveList + ArchiveDetail + VersionManagement + ApiManagement + ConsistencyCheck）发现 3 项 P1 + 4 项 P2 问题，用户确认全改。
+### 关键实现
+**ArchiveList.vue**：
+- 操作列宽 320→220（5 个文字链接不需要 320px）
+- scroll.x 1220→1120（消除多余空白）
+- 新建档案弹窗 500→420px
+
+**ArchiveDetail.vue**：
+- 顶部信息 Alert 改为结构化展示（域/Schema/字段数/记录数分标签显示，标签灰色+值加粗）
+- 字段导航新增搜索输入框（按编码/名称过滤字段，空搜索显示全部）
+
+**ApiManagement.vue**：
+- scroll.x 1500→1150（列宽总和仅 1150，消除 350px 空白）
+
+**VersionManagement.vue**：
+- 变更概况列超 3 项时「…等 N 项」加 tooltip（悬停显示剩余变更详情）
+
+**ConsistencyCheck.vue**：
+- 差异列宽 280→320（复合内容更宽松）
+
+### 变更文件清单
+- `frontend/src/views/archive/ArchiveList.vue`
+- `frontend/src/views/archive/ArchiveDetail.vue`
+- `frontend/src/views/archive/ApiManagement.vue`
+- `frontend/src/views/archive/VersionManagement.vue`
+- `frontend/src/views/archive/ConsistencyCheck.vue`
+### 验证
+vue-tsc --noEmit 0 errors + vite build 通过（7.21s）
+
+---
+## 2026-08-18 UXQA 批2 巡检整改：字段管理 + 公式编辑器 UI 优化（第一百六十九轮）
+### 变更背景
+uxqa 全站巡检批2（DomainFieldConfig + FormulaEditor）发现 5 项 P1 + 6 项 P2 问题，用户确认全改。
+### 关键实现
+**DomainFieldConfig.vue**：
+- 组合字段表格列宽精简：组合编码/名称 140→120、成员编码/名称 140→120、来源表 220→160；总宽 1040→760
+- 组合编码列合并显示：首行同时展示编码+名称（名称灰色小字副标题），减少视觉冗余
+- 公式摘要列加 ellipsis（超长公式截断+省略号）
+- 「执行顺序」列名改为「计算优先级」
+- 属性配置 Tab panel-sub 精简：长段引导文字缩短为「配置字段属性；计算字段仅可切换释放」
+- 「刷新去重内容」按钮从左栏搜索旁移到左栏「字段分类」面板头（命名改为「刷新数据」），避免与搜索框混淆
+- 新建分组弹窗宽度 480→360px（单输入框弹窗不需要那么宽）
+
+**FormulaEditor.vue**：
+- 弹窗标题简化：编辑时从「编辑计算字段公式 - code (name)」简化为「编辑计算字段」
+- 技术函数上传按钮去掉 block（不再占满整行）
+
+### 变更文件清单
+- `frontend/src/views/modeling/DomainFieldConfig.vue`
+- `frontend/src/views/modeling/components/FormulaEditor.vue`
+### 验证
+vue-tsc --noEmit 0 errors + vite build 通过（7.28s）
+
+---
+## 2026-08-18 UXQA 批1 巡检整改：建模基础页 UI 优化（第一百六十八轮）
+### 变更背景
+uxqa 全站巡检批1（DomainList + TableList + ConfigTables）发现 6 项 P1 + 7 项 P2 问题，用户确认全改。
+### 关键实现
+**DomainList.vue**：
+- 配置状态列加 loading 占位（`_configLoaded` 标记，未加载完显示 spin）
+- 列宽调整：描述 500→300、操作 320→280、名称 220→200、编码 160→140、状态 110→100、创建时间 170→160
+- 名称列改普通文本（非链接样式，避免与操作列链接混淆）
+- h2 字号 20px→18px（与 TableList/ConfigTables 统一）
+
+**TableList.vue**：
+- page-header 提示文字精简：从页头移到 Alert 内（与主表/主键引导合并）
+- 列宽调整：表名英/中 180→160、类型 100→90、数据源 140→120、字段数 90→80、主表 90→80、主键 200→220、创建时间 160→150、操作 200→160
+- scroll.x 1430→1350
+- 数据预览列宽 200/140→180/130 + ellipsis showTitle（超长显示 tooltip）
+- 字段管理抽屉滚动高度 300→280
+
+**ConfigTables.vue**：
+- 状态列改 Switch（新增 handleToggleStatus + _toggling 标记）
+- 新建按钮 disabled 修复：`!!editingId`（始终 null）→ `showCreateForm`
+- 数据行删除加 Popconfirm
+- 同步按钮区分：「预览」→「预览结果」、「同步」→「执行同步」（主色按钮）
+- 状态列宽 80→100
+
+### 变更文件清单
+- `frontend/src/views/modeling/DomainList.vue`
+- `frontend/src/views/modeling/TableList.vue`
+- `frontend/src/views/modeling/ConfigTables.vue`
+### 验证
+vue-tsc --noEmit 0 errors + vite build 通过（9.42s）
+
+---
 ## 2026-08-14 测试报告3问题修复：ER 连线锚点 + 页面布局（第一百六十轮）
 ### 变更背景
 用户测试报告 3 问题（/modeling/domains/2/mappings）：①UI和布局不友好 ②布局重新调整 ③ER 关系线要从表左/右边出来、指到对应字段。uxqa 布局反馈四步法后用户拍板方案A：本页优化 + ER 节点只显示映射字段。
@@ -465,4 +574,14 @@ vue-tsc --noEmit 0 errors；已 commit+push（3a93caa）
 ### 验证
 - 新测试 6/6 PASS（统计+样例/limit 全量/无头表配置/明细查询失败 400/头表查询失败降级/无数据源 400）；modeling+archive 全套 127/127 PASS；vue-tsc 0 errors；django check 通过
 - 真实请求实测（tester 登录，--noreload 重启后）：价目组合 id=2 → detail_total=239,504 / detail_hit=239,504 / header_total=1 / header_matched=955（与第一百六十二轮同步保留 955 完全吻合）；物料分组 id=6 → detail_total=1,782 / detail_hit=64（FULL_PARENT_ID starts_with .101041 生效）/ header_total=1,782 / header_matched=64；两组合样例行全部带 `__hdr__` 字段（匹配优先生效）
-- 实战教训：--noreload 部署下新 action 必须重启才生效（实测首请求 404 → dev.ps1 重启解决）；样例若不匹配优先，物理序前列全为未匹配行会误导用户判断"没匹配上"（已修复）
+- 实战教训：--noreload 部署下新 action 必须重启才生效（实测首次请求 404 → dev.ps1 重启解决）；样例若不匹配优先，物理序前列全为未匹配行会误导用户判断「没匹配上」（已修复）
+
+## 2026-08-18 测试报告 5 项修复（第一百七十二轮）
+### 变更摘要
+- **DomainFieldMapping.vue**：4 处弹窗加宽——子表注册/编辑 860→1100、子表注册管理列表 860→1100、新建/编辑映射 960→1200、AI 建议映射 900→1100
+- **ConfigTables.vue**：交互改造——操作列加「编辑」按钮（原只有「删除」）→ 打开 1000px 大弹窗（含同步配置+数据表格+添加行/保存）；移除页面内联编辑区；操作列宽 80→120；删除 .data-editor/.data-editor-header 样式
+### 变更文件清单
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：4 弹窗宽度调整
+- `frontend/src/views/modeling/ConfigTables.vue`：内联编辑→弹窗化
+### 验证
+- vue-tsc 0 errors；vite build 7.55s 通过

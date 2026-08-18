@@ -106,7 +106,9 @@
                 <span style="color: #999"> → </span>
                 <span style="color: #52c41a">{{ fc.new ?? '-' }}</span>
               </div>
-              <div v-if="row.cd.field_changes.length > 3" style="color: #999">…等 {{ row.cd.field_changes.length }} 项</div>
+              <a-tooltip v-if="row.cd.field_changes.length > 3" :title="row.cd.field_changes.slice(3).map((fc: any) => `${fc.name || fc.field}: ${fc.old ?? '-'} → ${fc.new ?? '-'}`).join('\n')">
+                <span style="color: #999; cursor: pointer">…等 {{ row.cd.field_changes.length }} 项</span>
+              </a-tooltip>
             </template>
             <span v-else style="color: #999">{{ ['created', 'deactivated'].includes(row.cd.change_type) ? '（记录级变更，无字段级变化）' : '-' }}</span>
           </template>

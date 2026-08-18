@@ -1,7 +1,7 @@
 <template>
   <a-modal
     :open="open"
-    :title="isEdit && field ? `编辑计算字段公式 - ${field.code} (${field.name})` : '新建计算字段'"
+    :title="isEdit && field ? '编辑计算字段' : '新建计算字段'"
     width="1680px"
     :destroy-on-close="true"
     @cancel="$emit('update:open', false)"
@@ -241,7 +241,7 @@
               :custom-request="handlePluginUpload"
               :disabled="pluginUploading"
             >
-              <a-button size="small" type="primary" block :loading="pluginUploading">
+              <a-button size="small" type="primary" :loading="pluginUploading">
                 {{ pluginUploading ? '上传中...' : '上传 .py 插件' }}
               </a-button>
             </a-upload>

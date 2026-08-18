@@ -5,21 +5,21 @@
     <div class="page-header">
       <h3 style="margin: 0">表列表</h3>
       <a-space>
-        <span style="color: #888; font-size: 13px">点击行可快速预览字段；点击「字段管理」可维护注释、启停字段及预览数据</span>
         <a-button @click="goConfigTables">配置表</a-button>
         <a-button type="primary" @click="openCreate">新建表</a-button>
       </a-space>
     </div>
 
-    <!-- 引导提示：主表/主键配置引导 -->
+    <!-- 引导提示：主表/主键配置引导 + 操作提示 -->
     <a-alert
-      v-if="setupGuideMessage"
+      v-if="setupGuideMessage || true"
       type="info"
       show-icon
       style="margin-bottom: 12px"
     >
       <template #message>
-        <span v-html="setupGuideMessage"></span>
+        <span v-if="setupGuideMessage" v-html="setupGuideMessage + '<br/>'"></span>
+        <span style="color: #666; font-size: 12px">💡 点击行可展开字段预览；点击「字段管理」可维护注释、启停字段及预览数据</span>
       </template>
     </a-alert>
 
@@ -29,7 +29,7 @@
       :loading="loading"
       :pagination="false"
       rowKey="id"
-      :scroll="{ x: 1430 }"
+      :scroll="{ x: 1350 }"
       :expandable="{ expandedRowRender, expandRowByClick: true }"
     >
       <template #bodyCell="{ column, record }">
@@ -435,7 +435,7 @@ const previewLoading = ref(false)
 const previewData = ref<{ rawColumns: string[]; rows: any[]; totalWidth: number }>({ rawColumns: [], rows: [], totalWidth: 0 })
 const previewShowCn = ref(true)
 const previewDisplayColumns = computed(() => {
-  const colWidth = previewShowCn.value ? 200 : 140
+  const colWidth = previewShowCn.value ? 180 : 130
   return previewData.value.rawColumns.map((rawName) => {
     const field = fieldModalFields.value.find((f: any) => f.code === rawName)
     let title = rawName
@@ -447,7 +447,7 @@ const previewDisplayColumns = computed(() => {
       dataIndex: rawName,
       key: rawName,
       width: colWidth,
-      ellipsis: true,
+      ellipsis: { showTitle: true }, // 超长时显示 tooltip
     }
   })
 })
@@ -494,17 +494,17 @@ const typeLabels: Record<string, string> = {
 }
 
 const columns = [
-  { title: '表名称（英文）', dataIndex: 'code', key: 'code', width: 180, ellipsis: true },
-  { title: '表名称（中文）', dataIndex: 'name', key: 'name', width: 180, ellipsis: true },
-  { title: '类型', key: 'type', width: 100 },
-  { title: '数据源', key: 'data_source', width: 140, ellipsis: true },
-  { title: '字段数', dataIndex: 'field_count', key: 'field_count', width: 90, align: 'center' as const },
-  { title: '主表', key: 'is_primary', width: 90, align: 'center' as const },
-  { title: '主键', key: 'primary_keys', width: 200, ellipsis: true },
+  { title: '表名称（英文）', dataIndex: 'code', key: 'code', width: 160, ellipsis: true },
+  { title: '表名称（中文）', dataIndex: 'name', key: 'name', width: 160, ellipsis: true },
+  { title: '类型', key: 'type', width: 90 },
+  { title: '数据源', key: 'data_source', width: 120, ellipsis: true },
+  { title: '字段数', dataIndex: 'field_count', key: 'field_count', width: 80, align: 'center' as const },
+  { title: '主表', key: 'is_primary', width: 80, align: 'center' as const },
+  { title: '主键', key: 'primary_keys', width: 220, ellipsis: true },
   { title: '状态', key: 'status', width: 90 },
-  { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 160,
+  { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 150,
     customRender: ({ text }: any) => formatDateTime(text) },
-  { title: '操作', key: 'action', width: 200 },
+  { title: '操作', key: 'action', width: 160 },
 ]
 
 // 字段管理弹窗列定义（注释列不设固定宽，自动填充剩余空间）
@@ -517,8 +517,8 @@ const fieldColumns = [
   { title: '模型字段', key: 'model_field', width: 120, align: 'center' as const },
 ]
 
-// 字段表格动态滚动高度：近全屏弹窗下，减去标题栏+Tab+边距 ≈ 300px
-const fieldTableScrollY = computed(() => `calc(100vh - 300px)`)
+// 字段表格动态滚动高度：近全屏抽屉下，减去标题栏+Tab+边距 ≈ 280px
+const fieldTableScrollY = computed(() => `calc(100vh - 280px)`)
 
 // 主键字段列表（按 sort_order 排序，用于主键标识区展示）
 const pkFieldsList = computed(() => {

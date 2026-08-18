@@ -10,7 +10,7 @@
       :columns="columns"
       :loading="loading"
       rowKey="id"
-      :scroll="{ x: 1220 }"
+      :scroll="{ x: 1120 }"
       :pagination="{ current: page, pageSize: 20, total, onChange: (p: number) => { page = p; loadData() } }"
     >
       <template #bodyCell="{ column, record }">
@@ -51,7 +51,7 @@
       title="新建档案"
       @ok="handleCreate"
       :confirmLoading="creating"
-      width="500px"
+      width="420px"
     >
       <a-form layout="vertical">
         <a-form-item label="所属域" required>
@@ -129,7 +129,7 @@ const columns = [
   { title: '创建人', dataIndex: 'created_by', key: 'created_by', width: 90, ellipsis: true },
   { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 160,
     customRender: ({ text }: any) => formatDateTime(text) },
-  { title: '操作', key: 'action', width: 320, fixed: 'right' },
+  { title: '操作', key: 'action', width: 220, fixed: 'right' },
 ]
 
 function statusColor(s: string) {

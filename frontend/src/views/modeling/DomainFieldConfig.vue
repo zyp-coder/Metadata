@@ -21,6 +21,7 @@
       <div class="split-layout__left">
         <div class="panel-header">
           <span class="panel-title">字段分类</span>
+          <a-button :loading="manualRefreshing" size="small" @click="refreshManualDistinct">刷新数据</a-button>
         </div>
         <div class="category-list">
           <div class="category-item category-item--parent" :class="{ 'category-item--active': activeCategory === 'archive' }" @click="setCategory('archive')">
@@ -62,10 +63,7 @@
             {{ categoryLabel }}
             <span class="panel-sub">{{ currentDataCount }} 个字段</span>
           </span>
-          <a-space>
-            <a-input v-model:value="searchText" placeholder="搜索：编码/名称" allow-clear style="width: 240px" size="small" />
-            <a-button :loading="manualRefreshing" size="small" @click="refreshManualDistinct">刷新去重内容</a-button>
-          </a-space>
+          <a-input v-model:value="searchText" placeholder="搜索：编码/名称" allow-clear style="width: 240px" size="small" />
         </div>
 
         <!-- 基础字段表格 -->
@@ -91,7 +89,10 @@
             :custom-row="getCompositeCustomRow">
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'composite_code'">
-                <span v-if="record._isFirst" style="font-weight:600">{{ record._compositeCode }}</span>
+                <div v-if="record._isFirst">
+                  <div style="font-weight:600">{{ record._compositeCode }}</div>
+                  <div style="font-weight:600;color:#8c8c8c;font-size:11px">{{ record._compositeName }}</div>
+                </div>
               </template>
               <template v-else-if="column.key === 'composite_name'">
                 <span v-if="record._isFirst" style="font-weight:600">{{ record._compositeName }}</span>
@@ -322,7 +323,7 @@
         <div class="panel-header">
           <span class="panel-title">
             {{ attrActiveGroupId === null ? '全部字段' : attrActiveGroupId === 0 ? '未分组' : getGroupName(attrActiveGroupId) || '' }}
-            <span class="panel-sub">配置字段的数据类型、长度、必填、默认值等；计算字段仅可切换释放到档案</span>
+            <span class="panel-sub">配置字段属性；计算字段仅可切换释放</span>
           </span>
           <a-space>
             <a-button :loading="aiLoading.semantic" size="small" @click="runSemantic">AI自动配置</a-button>
@@ -496,7 +497,7 @@
     <a-modal
       v-model:open="groupFormModal"
       :title="groupFormTitle"
-      width="480px"
+      width="360px"
       okText="确认"
       cancelText="取消"
       :okButtonProps="{ disabled: !groupFormName.trim() }"
@@ -629,11 +630,11 @@ const baseColumns = [
   { title: '数据去重内容', key: 'distinct', sorter: (a: any, b: any) => (a.distinct_values?.length || 0) - (b.distinct_values?.length || 0) },
 ]
 const compositeColumns = [
-  { title: '组合字段编码', key: 'composite_code', width: 140, ellipsis: true },
-  { title: '组合字段名称', key: 'composite_name', width: 140, ellipsis: true },
-  { title: '成员编码', dataIndex: 'code', key: 'code', width: 140, ellipsis: true, sorter: (a: any, b: any) => (a.code || '').localeCompare(b.code || '') },
-  { title: '成员名称', dataIndex: 'name', key: 'name', width: 140, ellipsis: true, sorter: (a: any, b: any) => (a.name || '').localeCompare(b.name || '') },
-  { title: '来源表', dataIndex: 'table_name', key: 'table_name', width: 220, ellipsis: true, sorter: (a: any, b: any) => (a.table_name || '').localeCompare(b.table_name || '') },
+  { title: '组合编码', key: 'composite_code', width: 120, ellipsis: true },
+  { title: '组合名称', key: 'composite_name', width: 120, ellipsis: true },
+  { title: '成员编码', dataIndex: 'code', key: 'code', width: 120, ellipsis: true, sorter: (a: any, b: any) => (a.code || '').localeCompare(b.code || '') },
+  { title: '成员名称', dataIndex: 'name', key: 'name', width: 120, ellipsis: true, sorter: (a: any, b: any) => (a.name || '').localeCompare(b.name || '') },
+  { title: '来源表', dataIndex: 'table_name', key: 'table_name', width: 160, ellipsis: true, sorter: (a: any, b: any) => (a.table_name || '').localeCompare(b.table_name || '') },
   { title: '数据去重内容', key: 'distinct', sorter: (a: any, b: any) => (a.distinct_values?.length || 0) - (b.distinct_values?.length || 0) },
   { title: '主表', key: 'primary_table', width: 70, align: 'center' as const },
   { title: '主字段', key: 'primary_field', width: 70, align: 'center' as const },
@@ -642,9 +643,9 @@ const compositeColumns = [
 const computedColumns = [
   { title: '字段编码', dataIndex: 'code', key: 'code', width: 130, ellipsis: true, sorter: (a: any, b: any) => (a.code || '').localeCompare(b.code || '') },
   { title: '字段名称', dataIndex: 'name', key: 'name', width: 130, ellipsis: true, sorter: (a: any, b: any) => (a.name || '').localeCompare(b.name || '') },
-  { title: '公式摘要', key: 'expression' },
+  { title: '公式摘要', key: 'expression', ellipsis: true },
   { title: '输出类型', key: 'output_type', width: 80, align: 'center' as const },
-  { title: '执行顺序', dataIndex: 'execution_order', key: 'execution_order', width: 80, align: 'center' as const, sorter: (a: any, b: any) => (a.execution_order || 0) - (b.execution_order || 0) },
+  { title: '计算优先级', dataIndex: 'execution_order', key: 'execution_order', width: 80, align: 'center' as const, sorter: (a: any, b: any) => (a.execution_order || 0) - (b.execution_order || 0) },
   { title: '操作', key: 'actions', width: 160, align: 'center' as const },
 ]
 const unassignedColumns = [
