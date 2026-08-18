@@ -1,17 +1,15 @@
 # 会话接力 — 主文件（当前状态 + 功能索引）
 > 启动只读本文件（rule §3）。历史详情按模块存于 `.ai/session-details/<模块>.md`（archive / modeling / uxqa / project / early-logs），确认需求后按「模块+功能标签/第N轮」grep 加载，禁止全量读。
 ## 当前会话状态
-- **当前阶段**：第一百七十三轮（测试报告 4 项修复）——问题 1 ConfigTables 输入框无边框化、问题 2+3 mappings 弹窗 1200→1800 + 列表 280→420、问题 4 api-management 数据预览抽屉→Tab 切换；全部完成，待部署验证
+- **当前阶段**：第一百六十六轮（启动链 loaddata 事故修复）——165 轮治本（loaddata 条件化）上线后服务器 backend 容器 Restarting 崩溃（loaddata 误判走 else → FM pk=11 撞唯一约束 → 启动链中断 → 前端全挂假象「域管理东西没了」）；用户拍板方案A：启动链彻底移除 loaddata（commit 99c6c86 已推送）；遗留：服务器 git pull→up --build 恢复验证 + 数据库残留核查 + 条件误判根因容器内实测
 - **活跃模块**：archive 同步引擎（诊断+配置分发）、deploy
 ### 最近 3 轮详情（满 3 轮后最旧一轮下沉到详情文件）
-- **本次操作**：2026-08-18 — 第一百七十三轮：测试报告 4 项修复——ConfigTables 输入框无边框化、DomainFieldMapping 弹窗 1200→1800 + 列表 280→420、ApiManagement 数据预览抽屉→Tab 切换；vue-tsc 0 + build 7.22s
-- **上次操作**：2026-08-18 — 第一百七十二轮：测试报告 5 项修复（详见索引行）
-- **更早操作**：2026-08-18 — 第一百七十一轮：uxqa 全站巡检批4+批5（详见索引行）
+- **本次操作**：2026-08-17 — 第一百六十六轮：启动链 loaddata 事故修复（详见索引行）——165 轮治本上线后服务器容器 Restarting 崩溃；取证：ps 显示 backend Restarting(1) + 日志 IntegrityError FieldMapping(pk=11) 键(1,1,2,33) 已存在 → 证明数据库数据都在（页面全空=后端崩溃假象）；根因=条件命令容器内误判走 else（验证缺口：本地模拟未实测 if 分支）+ loaddata 撞唯一约束中断启动链；用户拍板方案A：启动链彻底移除 loaddata（99c6c86 已推送，YAML 验证 OK）；服务器待 pull→up --build→核查 counts
+- **上次操作**：2026-08-17 — 第一百六十五轮：服务器 27281 根因定位+治本（详见索引行）——根因链：服务器 cfg2/cfg6 conditions=[]+join_type=left+updated_at=08-11（data_dump 旧基线，dump 无 join_type 字段→loaddata 默认 left）；用户本机界面配置只进 dev.db 不随 git 走；27281=kept 209,123 全量→主表匹配 27,281 行；机制缺陷=每次启动 loaddata 覆盖 DB；治本：①compose 启动链 loaddata 条件化（Domain.exists 则跳过，仅首次部署灌）②data_dump.json 重新导出正确基线（排除敏感/业务表，UTF-8）③解除 gitignore 入库；模拟首次部署验证（临时库 migrate+loaddata 133 对象+cfg 正确导入）；服务器待执行 pull→重建→DB 补 3 处（cfg2/cfg6 conditions+join_type、FM9 inner）→同步收敛
+- **更早操作**：2026-08-17 — 第一百六十四轮：新增 diag_precombine 诊断命令（详见索引行）——新文件 backend/apps/archive/management/commands/diag_precombine.py（只读）：①配置全景（DetailTableConfig.conditions/join_type/updated_at 原样 + inner 挂载 FieldMapping + cfg.join_type vs fm.join_type 不一致告警）②逐步模拟 inner 挂载过滤（条件拆分→明细行数→头表带条件行数→JOIN 后行数→src_values→same_domain→桥接→kept→交集，与 _build_precombine_filters 逐行对齐）③影子校验（真实函数对比 warnings/结论）④档案统计；本机实跑：挂载#12 价目 239,504→955（header 条件 NAME eq 明码实价 头表 1 行）、挂载#13 分组 64 条（FULL_PARENT_ID starts_with .101041）+桥接物料 209,123→kept 116,594、交集 955、真实函数 0 warnings 生成 row_filter [1,2,6]、档案 active=955 完全吻合；踩坑：Windows GBK 不支持 ✓⚠★→ 符号→ASCII 化；关键证据：本机 cfg2 updated_at=08-17 01:13、cfg6 updated_at=08-13 08:54
 ## 功能索引（倒序，每轮一行；完整性/确认点自本次迁移后开始记录）
 | 轮次 | 日期 | 模块 | 功能标签 | 一句话摘要 | 完整性 | 确认点 |
 |------|------|------|----------|------------|--------|--------|
-| 第一百七十三轮 | 2026-08-18 | archive、modeling | 测试报告修复、输入框样式、弹窗尺寸、Tab切换 | 测试报告 4 项全改：①ConfigTables 输入框无边框化 ②DomainFieldMapping 弹窗 1200→1800+列表 280→420 ③ApiManagement 数据预览抽屉→Tab 切换 | 闸✓记✓拓✓测✓ | 1问/0改向 |
-| 第一百七十二轮 | 2026-08-18 | archive、modeling | 测试报告修复、数据预览、配置表弹窗 | 测试报告 5 项全改：①mappings 4 弹窗加宽 ②ApiManagement 数据预览重设计（信息栏+字段导航+数据表格，参考 ArchiveDetail）③ArchiveDetail scroll.y 加高 ④ConfigTables 内联编辑→操作列「编辑」+大弹窗 | 闸✓记✓拓✓测✓ | 2问/0改向 |
 | 第一百七十一轮 | 2026-08-18 | modeling、uxqa | UI优化、批4+批5巡检、设置模块 | uxqa 全站巡检批4（设置模块 5 页面）+批5（其余 8 页面）：1P1+3P2 全改——AIConfig 高级设置折叠标题精简、DataSourceList 名称列加 width+scroll.x 调整+h2 统一 20px、TechFunctions h2 统一 20px；批5 巡检通过无新增；vue-tsc 0 + build 通过 | 闸✓记✓拓✓测✓ | 1问/0改向 |
 | 第一百七十轮 | 2026-08-18 | modeling、uxqa | UI优化、批3巡检、档案模块、关系管理 | uxqa 全站巡检批3（ArchiveList+ArchiveDetail+ApiManagement+VersionManagement+ConsistencyCheck）：3项P1+4项P2 全改——操作列宽精简 320→220、scroll.x 消除空白、信息栏结构化展示、字段导航加搜索、变更概况 tooltip、差异列加宽；vue-tsc 0 + build 通过 | 闸✓记✓拓✓测✓ | 1问/0改向 |
 | 第一百六十九轮 | 2026-08-18 | modeling、uxqa | UI优化、批2巡检、字段管理、公式编辑器 | uxqa 全站巡检批2（DomainFieldConfig+FormulaEditor）：5项P1+6项P2 全改——组合字段表格列宽精简 1040→760 + 编码列合并显示、公式摘要 ellipsis、计算优先级列名、属性配置引导文字精简、刷新按钮移位、分组弹窗缩窄、公式编辑器标题简化、上传按钮去 block；vue-tsc 0 + build 通过 | 闸✓记✓拓✓测✓ | 1问/0改向 |

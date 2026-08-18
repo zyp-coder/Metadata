@@ -74,63 +74,6 @@
       <a-tab-pane key="keys" tab="密钥管理">
         <ApiKeyTab :apis="apis" />
       </a-tab-pane>
-
-      <!-- ===== Tab3：数据预览 ===== -->
-      <a-tab-pane key="data" tab="数据预览" :disabled="!currentApi">
-        <template v-if="currentApi">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-            <a-space>
-              <strong style="font-size:15px">{{ currentApi.name }}</strong>
-              <a-tag :color="currentApi.status === 'enabled' ? 'green' : 'default'">{{ currentApi.status === 'enabled' ? '启用' : '停用' }}</a-tag>
-              <span style="font-family:monospace;font-size:12px;color:#888">{{ currentApi.public_url || '未生成地址' }}</span>
-            </a-space>
-            <a-space>
-              <span style="font-size:13px;color:#888">所属档案：<strong style="color:#333">{{ currentApi.archive_name }}</strong></span>
-              <a-button size="small" :loading="dataLoading" @click="viewApiData(currentApi)">刷新</a-button>
-            </a-space>
-          </div>
-          <a-spin :spinning="dataLoading">
-            <template v-if="apiData">
-              <div class="data-preview-info">
-                <span><span style="color:#8c8c8c">字段</span> <strong>{{ apiData.schema.length }}</strong></span>
-                <span><span style="color:#8c8c8c">数据</span> <strong>{{ apiData.records.length }} 条</strong></span>
-              </div>
-              <div style="display:flex;gap:12px;align-items:stretch">
-                <div class="data-field-nav" style="width:200px;flex-shrink:0;height:calc(100vh - 280px);overflow-y:auto">
-                  <div class="data-field-nav__title">字段导航</div>
-                  <a-input v-model:value="dataFieldSearch" placeholder="搜索字段" size="small" allow-clear style="margin:0 8px 6px" />
-                  <template v-for="block in dataNavBlocks" :key="block.key">
-                    <div v-if="block.name" class="data-field-nav__group">{{ block.name }}</div>
-                    <div
-                      v-for="f in block.fields"
-                      :key="f.code"
-                      class="data-field-nav__item"
-                      :class="{ active: highlightFieldCode === f.code }"
-                      :style="block.name ? { paddingLeft: '14px' } : {}"
-                      :title="`${f.name} (${f.type})`"
-                      @click="scrollToDataField(f.code)"
-                    >
-                      {{ f.name }}
-                    </div>
-                  </template>
-                </div>
-                <div ref="dataTableWrapRef" style="flex:1;min-width:0">
-                  <a-table
-                    :dataSource="apiData.records"
-                    :columns="dataColumns"
-                    :pagination="{ pageSize: 20 }"
-                    rowKey="__id"
-                    size="small"
-                    :scroll="{ x: dataScrollX }"
-                  />
-                </div>
-              </div>
-            </template>
-            <a-empty v-else-if="!dataLoading" description="点击接口操作列的「数据」按钮加载数据" />
-          </a-spin>
-        </template>
-        <a-empty v-else description="请先在「接口管理」Tab 中点击操作列的「数据」按钮选择接口" />
-      </a-tab-pane>
     </a-tabs>
 
     <!-- 新建/编辑接口抽屉 -->
@@ -243,6 +186,28 @@
       </template>
     </a-drawer>
 
+    <!-- 查看数据抽屉 -->
+    <a-drawer v-model:open="dataDrawer" :title="`数据预览 - ${currentApi?.name || ''}`" width="1000" :destroyOnClose="true">
+      <a-spin :spinning="dataLoading">
+        <template v-if="apiData">
+          <a-divider orientation="left">字段定义（{{ apiData.schema.length }}）</a-divider>
+          <a-table :dataSource="apiData.schema" :columns="schemaColumns" :pagination="false" rowKey="code" size="small" />
+          <a-divider orientation="left">启用数据（{{ apiData.records.length }} 条）</a-divider>
+          <a-table
+            :dataSource="apiData.records"
+            :columns="dataColumns"
+            :pagination="{ pageSize: 20 }"
+            rowKey="__id"
+            size="small"
+            :scroll="{ x: dataScrollX }"
+          />
+        </template>
+      </a-spin>
+      <template #footer>
+        <a-button @click="dataDrawer = false">关闭</a-button>
+      </template>
+    </a-drawer>
+
     <!-- 接口文档抽屉 -->
     <a-drawer v-model:open="docsDrawer" :title="`接口文档 - ${docs?.name || ''}`" width="900" :destroyOnClose="true">
       <a-spin :spinning="docsLoading">
@@ -343,7 +308,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Empty } from 'ant-design-vue'
 import { archiveApi, archiveApiApi } from '@/api/archive'
@@ -595,10 +560,18 @@ async function save() {
   }
 }
 
-// ===== 查看数据（Tab 切换） =====
+// ===== 查看数据抽屉 =====
+const dataDrawer = ref(false)
 const dataLoading = ref(false)
 const currentApi = ref<ArchiveApi | null>(null)
 const apiData = ref<ArchiveApiData | null>(null)
+
+const schemaColumns = [
+  { title: '字段名', dataIndex: 'name', key: 'name', width: 180 },
+  { title: '编码', dataIndex: 'code', key: 'code', width: 200 },
+  { title: '类型', dataIndex: 'type', key: 'type', width: 100 },
+  { title: '分组', dataIndex: 'group', key: 'group', width: 120 },
+]
 
 const dataColumns = computed(() => {
   const schema = apiData.value?.schema || []
@@ -608,9 +581,6 @@ const dataColumns = computed(() => {
     key: f.code,
     width: 160,
     ellipsis: true,
-    onHeaderCell: (col: any) => ({
-      style: highlightFieldCode.value === col.key ? { background: '#e6f4ff' } : {},
-    }),
   }))
 })
 
@@ -619,7 +589,7 @@ const dataScrollX = computed(() => (apiData.value?.schema?.length || 0) * 160)
 async function viewApiData(api: ArchiveApi) {
   currentApi.value = api
   apiData.value = null
-  activeTab.value = 'data'
+  dataDrawer.value = true
   dataLoading.value = true
   try {
     const res = await archiveApiApi.getData(api.id)
@@ -629,37 +599,6 @@ async function viewApiData(api: ArchiveApi) {
   } finally {
     dataLoading.value = false
   }
-}
-
-// ===== 数据预览：字段导航 =====
-const dataFieldSearch = ref('')
-const highlightFieldCode = ref('')
-const dataTableWrapRef = ref<HTMLElement | null>(null)
-
-const dataNavBlocks = computed(() => {
-  const schema = apiData.value?.schema || []
-  const search = dataFieldSearch.value.toLowerCase()
-  const groups = new Map<string, { name: string; key: string; fields: ArchiveSchemaItem[] }>()
-  for (const f of schema) {
-    const gName = f.group || ''
-    if (!groups.has(gName)) groups.set(gName, { name: gName, key: gName, fields: [] })
-    groups.get(gName)!.fields.push(f)
-  }
-  const blocks = Array.from(groups.values())
-  if (search) {
-    return blocks.map(b => ({ ...b, fields: b.fields.filter(f => f.name.toLowerCase().includes(search) || f.code.toLowerCase().includes(search)) })).filter(b => b.fields.length)
-  }
-  return blocks
-})
-
-function scrollToDataField(code: string) {
-  highlightFieldCode.value = code
-  nextTick(() => {
-    const el = dataTableWrapRef.value?.querySelector(`th[data-col-key="${code}"]`) as HTMLElement
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
-    }
-  })
 }
 
 // ===== 接口文档抽屉 =====
@@ -793,21 +732,4 @@ onMounted(async () => {
   word-break: break-all;
   margin: 0;
 }
-.data-preview-info {
-  display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
-  padding: 8px 16px; margin-bottom: 12px;
-  background: #f6f8fa; border-radius: 6px; border: 1px solid #f0f0f0;
-  font-size: 13px;
-}
-.data-field-nav {
-  background: #fafbfc; border-right: 1px solid #f0f0f0; border-radius: 6px; padding: 8px 0;
-}
-.data-field-nav__title { padding: 4px 12px 8px; font-weight: 600; font-size: 13px; color: #333; }
-.data-field-nav__group { padding: 4px 12px; font-size: 12px; color: #1677ff; font-weight: 500; margin-top: 4px; }
-.data-field-nav__item {
-  padding: 3px 12px; font-size: 12px; color: #555; cursor: pointer;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.data-field-nav__item:hover { background: #e6f4ff; }
-.data-field-nav__item.active { background: #bae0ff; color: #1677ff; font-weight: 500; }
 </style>

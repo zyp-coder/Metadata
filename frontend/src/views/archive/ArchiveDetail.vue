@@ -80,7 +80,7 @@
           :loading="loading"
           rowKey="id"
           size="small"
-          :scroll="{ x: dynamicColumnsTotalWidth, y: 'calc(100vh - 240px)' }"
+          :scroll="{ x: dynamicColumnsTotalWidth, y: 'calc(100vh - 300px)' }"
           :pagination="{ current: recordPage, pageSize: 20, total: recordTotal, onChange: (p: number) => { recordPage = p; loadRecords() }, showTotal: (t: number) => `共 ${t} 条` }"
         >
           <template #bodyCell="{ column, record: rec, index }">

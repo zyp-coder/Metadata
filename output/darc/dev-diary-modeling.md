@@ -574,24 +574,4 @@ vue-tsc --noEmit 0 errors；已 commit+push（3a93caa）
 ### 验证
 - 新测试 6/6 PASS（统计+样例/limit 全量/无头表配置/明细查询失败 400/头表查询失败降级/无数据源 400）；modeling+archive 全套 127/127 PASS；vue-tsc 0 errors；django check 通过
 - 真实请求实测（tester 登录，--noreload 重启后）：价目组合 id=2 → detail_total=239,504 / detail_hit=239,504 / header_total=1 / header_matched=955（与第一百六十二轮同步保留 955 完全吻合）；物料分组 id=6 → detail_total=1,782 / detail_hit=64（FULL_PARENT_ID starts_with .101041 生效）/ header_total=1,782 / header_matched=64；两组合样例行全部带 `__hdr__` 字段（匹配优先生效）
-- 实战教训：--noreload 部署下新 action 必须重启才生效（实测首次请求 404 → dev.ps1 重启解决）；样例若不匹配优先，物理序前列全为未匹配行会误导用户判断「没匹配上」（已修复）
-
-## 2026-08-18 测试报告 5 项修复（第一百七十二轮）
-### 变更摘要
-- **DomainFieldMapping.vue**：4 处弹窗加宽——子表注册/编辑 860→1100、子表注册管理列表 860→1100、新建/编辑映射 960→1200、AI 建议映射 900→1100
-- **ConfigTables.vue**：交互改造——操作列加「编辑」按钮（原只有「删除」）→ 打开 1000px 大弹窗（含同步配置+数据表格+添加行/保存）；移除页面内联编辑区；操作列宽 80→120；删除 .data-editor/.data-editor-header 样式
-### 变更文件清单
-- `frontend/src/views/modeling/DomainFieldMapping.vue`：4 弹窗宽度调整
-- `frontend/src/views/modeling/ConfigTables.vue`：内联编辑→弹窗化
-### 验证
-- vue-tsc 0 errors；vite build 7.55s 通过
-
-## 2026-08-18 测试报告 4 项修复（第一百七十三轮）
-### 变更摘要
-- **ConfigTables.vue**：数据表格输入框样式优化——`<a-input>` 加 `bordered=false` + `background: transparent`，去掉突兀边框
-- **DomainFieldMapping.vue**：映射编辑弹窗 1200→1800px；field-panel__list max-height 280→420px（1.5x）
-### 变更文件清单
-- `frontend/src/views/modeling/ConfigTables.vue`：输入框无边框化
-- `frontend/src/views/modeling/DomainFieldMapping.vue`：弹窗加宽 + 列表面加高
-### 验证
-- vue-tsc 0 errors；vite build 7.22s 通过
+- 实战教训：--noreload 部署下新 action 必须重启才生效（实测首请求 404 → dev.ps1 重启解决）；样例若不匹配优先，物理序前列全为未匹配行会误导用户判断"没匹配上"（已修复）
