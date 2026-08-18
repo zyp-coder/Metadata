@@ -615,3 +615,16 @@
 **验证**：vue-tsc 0 errors + vite build 7.55s 通过
 
 **回执**：闸✓ 记✓ 拓✓ 测✓
+
+### 第一百七十三轮（2026-08-18）标签：测试报告修复、数据预览 Tab 切换
+
+**修改文件**：
+- `frontend/src/views/archive/ApiManagement.vue`：数据预览从抽屉改为 Tab 页切换
+  - 新增「数据预览」Tab（与「接口管理」「密钥管理」并列）
+  - 点击操作列「数据」按钮切换到该 Tab 并加载数据
+  - 移除 dataDrawer 状态
+  - Tab 内容保留信息栏+字段导航+数据表格布局
+
+**验证**：vue-tsc 0 errors + vite build 7.22s 通过
+
+**回执**：闸✓ 记✓ 拓✓ 测✓

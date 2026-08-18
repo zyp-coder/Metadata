@@ -1,60 +1,5 @@
 <template>
   <div>
-    <!-- 数据预览全页模式 -->
-    <template v-if="routeApiId">
-      <div class="page-header">
-        <a-space>
-          <a-button @click="router.push('/archive/api-management')">← 返回API列表</a-button>
-          <h2>{{ currentApi?.name || '数据预览' }}</h2>
-          <a-tag v-if="currentApi" :color="currentApi.status === 'enabled' ? 'green' : 'default'">
-            {{ currentApi.status === 'enabled' ? '启用' : '停用' }}
-          </a-tag>
-        </a-space>
-      </div>
-      <div v-if="currentApi" class="data-preview-info">
-        <span><span style="color:#8c8c8c">接口路径</span> <strong style="font-family:monospace">{{ currentApi.public_url || '未生成' }}</strong></span>
-        <span><span style="color:#8c8c8c">所属档案</span> <strong>{{ currentApi.archive_name }}</strong></span>
-        <span v-if="apiData"><span style="color:#8c8c8c">字段</span> <strong>{{ apiData.schema.length }}</strong></span>
-        <span v-if="apiData"><span style="color:#8c8c8c">数据</span> <strong>{{ apiData.records.length }} 条</strong></span>
-      </div>
-      <a-spin :spinning="dataLoading">
-        <template v-if="apiData">
-          <div style="display:flex;gap:12px;align-items:stretch">
-            <div class="data-field-nav" style="width:200px;flex-shrink:0;height:calc(100vh - 220px);overflow-y:auto">
-              <div class="data-field-nav__title">字段导航</div>
-              <a-input v-model:value="dataFieldSearch" placeholder="搜索字段" size="small" allow-clear style="margin:0 8px 6px" />
-              <template v-for="block in dataNavBlocks" :key="block.key">
-                <div v-if="block.name" class="data-field-nav__group">{{ block.name }}</div>
-                <div
-                  v-for="f in block.fields"
-                  :key="f.code"
-                  class="data-field-nav__item"
-                  :class="{ active: highlightFieldCode === f.code }"
-                  :style="block.name ? { paddingLeft: '14px' } : {}"
-                  :title="`${f.name} (${f.type})`"
-                  @click="scrollToDataField(f.code)"
-                >
-                  {{ f.name }}
-                </div>
-              </template>
-            </div>
-            <div style="flex:1;min-width:0">
-              <a-table
-                :dataSource="apiData.records"
-                :columns="dataColumns"
-                :pagination="{ pageSize: 20 }"
-                rowKey="__id"
-                size="small"
-                :scroll="{ x: dataScrollX }"
-              />
-            </div>
-          </div>
-        </template>
-      </a-spin>
-    </template>
-
-    <!-- 正常模式 -->
-    <template v-else>
     <div class="page-header">
       <h2>API管理</h2>
     </div>
@@ -114,7 +59,7 @@
             </template>
             <template v-if="column.key === 'action'">
               <a-space :size="4" style="white-space: nowrap">
-                <a @click="viewDataPage(api)">数据</a>
+                <a @click="viewApiData(api)">数据</a>
                 <a-divider type="vertical" />
                 <a @click="viewDocs(api)">文档</a>
                 <a-divider type="vertical" />
@@ -129,8 +74,64 @@
       <a-tab-pane key="keys" tab="密钥管理">
         <ApiKeyTab :apis="apis" />
       </a-tab-pane>
+
+      <!-- ===== Tab3：数据预览 ===== -->
+      <a-tab-pane key="data" tab="数据预览" :disabled="!currentApi">
+        <template v-if="currentApi">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <a-space>
+              <strong style="font-size:15px">{{ currentApi.name }}</strong>
+              <a-tag :color="currentApi.status === 'enabled' ? 'green' : 'default'">{{ currentApi.status === 'enabled' ? '启用' : '停用' }}</a-tag>
+              <span style="font-family:monospace;font-size:12px;color:#888">{{ currentApi.public_url || '未生成地址' }}</span>
+            </a-space>
+            <a-space>
+              <span style="font-size:13px;color:#888">所属档案：<strong style="color:#333">{{ currentApi.archive_name }}</strong></span>
+              <a-button size="small" :loading="dataLoading" @click="viewApiData(currentApi)">刷新</a-button>
+            </a-space>
+          </div>
+          <a-spin :spinning="dataLoading">
+            <template v-if="apiData">
+              <div class="data-preview-info">
+                <span><span style="color:#8c8c8c">字段</span> <strong>{{ apiData.schema.length }}</strong></span>
+                <span><span style="color:#8c8c8c">数据</span> <strong>{{ apiData.records.length }} 条</strong></span>
+              </div>
+              <div style="display:flex;gap:12px;align-items:stretch">
+                <div class="data-field-nav" style="width:200px;flex-shrink:0;height:calc(100vh - 280px);overflow-y:auto">
+                  <div class="data-field-nav__title">字段导航</div>
+                  <a-input v-model:value="dataFieldSearch" placeholder="搜索字段" size="small" allow-clear style="margin:0 8px 6px" />
+                  <template v-for="block in dataNavBlocks" :key="block.key">
+                    <div v-if="block.name" class="data-field-nav__group">{{ block.name }}</div>
+                    <div
+                      v-for="f in block.fields"
+                      :key="f.code"
+                      class="data-field-nav__item"
+                      :class="{ active: highlightFieldCode === f.code }"
+                      :style="block.name ? { paddingLeft: '14px' } : {}"
+                      :title="`${f.name} (${f.type})`"
+                      @click="scrollToDataField(f.code)"
+                    >
+                      {{ f.name }}
+                    </div>
+                  </template>
+                </div>
+                <div ref="dataTableWrapRef" style="flex:1;min-width:0">
+                  <a-table
+                    :dataSource="apiData.records"
+                    :columns="dataColumns"
+                    :pagination="{ pageSize: 20 }"
+                    rowKey="__id"
+                    size="small"
+                    :scroll="{ x: dataScrollX }"
+                  />
+                </div>
+              </div>
+            </template>
+            <a-empty v-else-if="!dataLoading" description="点击接口操作列的「数据」按钮加载数据" />
+          </a-spin>
+        </template>
+        <a-empty v-else description="请先在「接口管理」Tab 中点击操作列的「数据」按钮选择接口" />
+      </a-tab-pane>
     </a-tabs>
-    </template>
 
     <!-- 新建/编辑接口抽屉 -->
     <a-drawer
@@ -342,7 +343,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Empty } from 'ant-design-vue'
 import { archiveApi, archiveApiApi } from '@/api/archive'
@@ -354,8 +355,6 @@ const simpleImage = Empty.PRESENTED_IMAGE_SIMPLE
 
 const route = useRoute()
 const router = useRouter()
-
-const routeApiId = computed(() => route.params.apiId as string | undefined)
 
 const OP_LABELS: Record<string, string> = { read: '查询', create: '新增', update: '修改', delete: '删除' }
 function opLabel(op: string) { return OP_LABELS[op] || op }
@@ -596,7 +595,7 @@ async function save() {
   }
 }
 
-// ===== 数据预览（全页模式） =====
+// ===== 查看数据（Tab 切换） =====
 const dataLoading = ref(false)
 const currentApi = ref<ArchiveApi | null>(null)
 const apiData = ref<ArchiveApiData | null>(null)
@@ -617,33 +616,20 @@ const dataColumns = computed(() => {
 
 const dataScrollX = computed(() => (apiData.value?.schema?.length || 0) * 160)
 
-function viewDataPage(api: ArchiveApi) {
+async function viewApiData(api: ArchiveApi) {
   currentApi.value = api
-  router.push(`/archive/api-management/${api.id}`)
+  apiData.value = null
+  activeTab.value = 'data'
+  dataLoading.value = true
+  try {
+    const res = await archiveApiApi.getData(api.id)
+    apiData.value = res.data
+  } catch (e: any) {
+    message.error(extractApiError(e) || '加载数据失败')
+  } finally {
+    dataLoading.value = false
+  }
 }
-
-// 路由驱动数据加载（全页模式）
-watch(routeApiId, async (id) => {
-  if (id && !currentApi.value) {
-    const api = apis.value.find(a => String(a.id) === id)
-    if (api) currentApi.value = api
-  }
-  if (id && currentApi.value) {
-    dataLoading.value = true
-    try {
-      const res = await archiveApiApi.getData(currentApi.value.id)
-      apiData.value = res.data
-    } catch (e: any) {
-      message.error(extractApiError(e) || '加载数据失败')
-    } finally {
-      dataLoading.value = false
-    }
-  }
-  if (!id) {
-    currentApi.value = null
-    apiData.value = null
-  }
-}, { immediate: true })
 
 // ===== 数据预览：字段导航 =====
 const dataFieldSearch = ref('')

@@ -369,7 +369,7 @@
       <div v-else style="text-align: center; padding: 40px 0; color: #999">正在拉取外部表数据，可能需要几十秒…</div>
     </a-modal>
 
-    <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="1200px">
+    <a-modal v-model:open="modalVisible" :title="modalTitle" @ok="handleSubmit" :confirmLoading="saving" width="1800px">
       <a-form layout="vertical">
         <a-row :gutter="16">
           <a-col :span="12">
@@ -2596,14 +2596,13 @@ onBeforeUnmount(() => {
 .field-panel__header {
   background: #fafafa;
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: 12px;
   color: #666;
   border-bottom: 1px solid #e8e8e8;
   font-weight: 500;
 }
 .field-panel__list {
   max-height: 420px;
-  min-height: 320px;
   overflow-y: auto;
 }
 .field-panel__empty {
@@ -2613,7 +2612,7 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 .field-item {
-  padding: 10px 14px;
+  padding: 8px 12px;
   cursor: pointer;
   font-size: 13px;
   border-bottom: 1px solid #f5f5f5;

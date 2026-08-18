@@ -160,6 +160,8 @@
               <a-input
                 :value="row[column.dataIndex]"
                 :bordered="false"
+                size="small"
+                style="background: transparent"
                 @change="(e: any) => row[column.dataIndex] = e.target.value"
               />
             </template>

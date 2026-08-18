@@ -585,3 +585,13 @@ vue-tsc --noEmit 0 errors；已 commit+push（3a93caa）
 - `frontend/src/views/modeling/ConfigTables.vue`：内联编辑→弹窗化
 ### 验证
 - vue-tsc 0 errors；vite build 7.55s 通过
+
+## 2026-08-18 测试报告 4 项修复（第一百七十三轮）
+### 变更摘要
+- **ConfigTables.vue**：数据表格输入框样式优化——`<a-input>` 加 `bordered=false` + `background: transparent`，去掉突兀边框
+- **DomainFieldMapping.vue**：映射编辑弹窗 1200→1800px；field-panel__list max-height 280→420px（1.5x）
+### 变更文件清单
+- `frontend/src/views/modeling/ConfigTables.vue`：输入框无边框化
+- `frontend/src/views/modeling/DomainFieldMapping.vue`：弹窗加宽 + 列表面加高
+### 验证
+- vue-tsc 0 errors；vite build 7.22s 通过

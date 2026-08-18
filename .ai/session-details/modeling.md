@@ -407,3 +407,12 @@
 - **ä¿®æ”¹æ–‡ä»¶**ï¼šbackend/apps/modeling/views.pyã€backend/apps/archive/views.pyã€backend/apps/modeling/tests.pyã€frontend/src/views/modeling/DomainFieldMapping.vueã€frontend/src/api/modeling.tsã€frontend/src/types/index.ts
 - **çŠ¶æ€**ï¼šå…¨é“¾è·¯éªŒè¯å®Œæˆï¼›å¾… commit+push+ç”¨æˆ·æœåŠ¡å™¨éƒ¨ç½²
 - **æ–¹å‘åˆ¤å®šè¡¨**ï¼šä¸è§¦åŠæ•°æ®æµå‘/å­˜å‚¨æ¨¡å‹/æ¨¡å—è¾¹ç•Œ/æ ¸å¿ƒäº¤äº’èŒƒå¼å››ç±»ï¼ˆé¢„è§ˆä¸ºåªè¯»æŸ¥è¯¢å±•ç¤ºï¼Œå¤ç”¨æ—¢æœ‰åŒæ­¥å¼•æ“å£å¾„ï¼Œä¸æ–°å¢æ¨¡å—ï¼‰
+### µÚÒ»°ÙÆßÊ®ÈıÂÖ£¨2026-08-18£©±êÇ©£º²âÊÔ±¨¸æĞŞ¸´¡¢ÊäÈë¿òÑùÊ½¡¢µ¯´°³ß´ç
+
+**ĞŞ¸ÄÎÄ¼ş**£º
+- \rontend/src/views/modeling/ConfigTables.vue\£ºÊı¾İ±í¸ñÊäÈë¿ò \<a-input>\ ¼Ó \ordered=false\ + \ackground: transparent\£¬È¥µôÍ»Ø£±ß¿ò
+- \rontend/src/views/modeling/DomainFieldMapping.vue\£ºÓ³Éä±à¼­µ¯´° 1200¡ú1800px£»field-panel__list max-height 280¡ú420px£¨1.5x£©
+
+**ÑéÖ¤**£ºvue-tsc 0 errors + vite build 7.22s Í¨¹ı
+
+**»ØÖ´**£ºÕ¢? ¼Ç? ÍØ? ²â?

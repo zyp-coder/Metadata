@@ -643,3 +643,11 @@ DetailSyncOneToManyTest 3/3 + DetailSyncEngineTest+ArchiveRecordDetailModelTest 
 - `frontend/src/views/archive/ArchiveDetail.vue`：scroll.y 调整
 ### 验证
 - vue-tsc 0 errors；vite build 7.55s 通过
+
+## 2026-08-18 测试报告 4 项修复（第一百七十三轮）
+### 变更摘要
+- **ApiManagement.vue**：数据预览从抽屉改为 Tab 页切换——新增「数据预览」Tab（与「接口管理」「密钥管理」并列）；点击操作列「数据」按钮切换到该 Tab 并加载数据；移除 dataDrawer 状态；Tab 内容保留信息栏+字段导航+数据表格布局
+### 变更文件清单
+- `frontend/src/views/archive/ApiManagement.vue`：数据预览抽屉→Tab 切换
+### 验证
+- vue-tsc 0 errors；vite build 7.22s 通过
