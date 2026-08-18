@@ -2596,13 +2596,14 @@ onBeforeUnmount(() => {
 .field-panel__header {
   background: #fafafa;
   padding: 8px 12px;
-  font-size: 12px;
+  font-size: 13px;
   color: #666;
   border-bottom: 1px solid #e8e8e8;
   font-weight: 500;
 }
 .field-panel__list {
-  max-height: 280px;
+  max-height: 420px;
+  min-height: 320px;
   overflow-y: auto;
 }
 .field-panel__empty {
@@ -2612,7 +2613,7 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 .field-item {
-  padding: 8px 12px;
+  padding: 10px 14px;
   cursor: pointer;
   font-size: 13px;
   border-bottom: 1px solid #f5f5f5;

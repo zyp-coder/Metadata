@@ -30,6 +30,7 @@ const router = createRouter({
       children: [
         { path: '', name: 'ArchiveList', component: () => import('@/views/archive/ArchiveList.vue'), meta: { title: '档案管理' } },
         { path: 'api-management', name: 'ApiManagement', component: () => import('@/views/archive/ApiManagement.vue'), meta: { title: 'API管理' } },
+        { path: 'api-management/:apiId', name: 'ApiDataView', component: () => import('@/views/archive/ApiManagement.vue'), meta: { title: 'API数据预览' } },
         { path: 'domain-changes', name: 'DomainChangeOverview', component: () => import('@/views/archive/DomainChangeOverview.vue'), meta: { title: '变更日志' } },
         { path: 'versions', name: 'VersionManagement', component: () => import('@/views/archive/VersionManagement.vue'), meta: { title: '变更日志 — 明细' } },
         { path: ':id/consistency', name: 'ConsistencyCheck', component: () => import('@/views/archive/ConsistencyCheck.vue'), meta: { title: '一致性检查' } },

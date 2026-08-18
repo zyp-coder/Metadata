@@ -159,7 +159,7 @@
             <template v-else>
               <a-input
                 :value="row[column.dataIndex]"
-                size="small"
+                :bordered="false"
                 @change="(e: any) => row[column.dataIndex] = e.target.value"
               />
             </template>

@@ -1,15 +1,16 @@
 # 会话接力 — 主文件（当前状态 + 功能索引）
 > 启动只读本文件（rule §3）。历史详情按模块存于 `.ai/session-details/<模块>.md`（archive / modeling / uxqa / project / early-logs），确认需求后按「模块+功能标签/第N轮」grep 加载，禁止全量读。
 ## 当前会话状态
-- **当前阶段**：第一百七十二轮（测试报告 5 项修复）——问题 1+2 mappings 弹窗加宽、问题 3 api-management 数据预览重设计（ArchiveDetail 风格）、问题 4 archive/3 表格 scroll.y、问题 5 config-tables 编辑弹窗化；全部完成，待部署验证
+- **当前阶段**：第一百七十三轮（测试报告2 四项修复）——问题 1 ConfigTables 输入框改无边框、问题 2+3 DomainFieldMapping 字段面板高度一致+1.5倍放大、问题 4 ApiManagement 数据预览从抽屉改为全页导航；全部完成，待部署验证
 - **活跃模块**：archive 同步引擎（诊断+配置分发）、deploy
 ### 最近 3 轮详情（满 3 轮后最旧一轮下沉到详情文件）
-- **本次操作**：2026-08-18 — 第一百七十二轮：测试报告 5 项修复——问题 1+2（DomainFieldMapping 4 弹窗加宽）、问题 3（ApiManagement 数据预览重设计：信息栏+字段导航+数据表格）、问题 4（ArchiveDetail scroll.y 加高）、问题 5（ConfigTables 内联编辑→编辑按钮+大弹窗）；vue-tsc 0 + build 7.55s
-- **上次操作**：2026-08-18 — 第一百七十一轮：uxqa 全站巡检批4+批5（详见索引行）
-- **更早操作**：2026-08-18 — 第一百七十轮：uxqa 全站巡检批3（详见索引行）
+- **本次操作**：2026-08-18 — 第一百七十三轮：测试报告2 四项修复——ConfigTables 输入框改无边框、DomainFieldMapping 字段面板 min-height 320+max-height 420+字号放大、ApiManagement 数据预览从抽屉改全页导航（新增路由 /archive/api-management/:apiId）；vue-tsc 0 + build 7.83s
+- **上次操作**：2026-08-18 — 第一百七十二轮：测试报告 5 项修复（详见索引行）
+- **更早操作**：2026-08-18 — 第一百七十一轮：uxqa 全站巡检批4+批5（详见索引行）
 ## 功能索引（倒序，每轮一行；完整性/确认点自本次迁移后开始记录）
 | 轮次 | 日期 | 模块 | 功能标签 | 一句话摘要 | 完整性 | 确认点 |
 |------|------|------|----------|------------|--------|--------|
+| 第一百七十三轮 | 2026-08-18 | archive、modeling | 测试报告2、输入框样式、字段面板放大、数据预览全页 | 测试报告2 四项：①ConfigTables 输入框改无边框 ②DomainFieldMapping 字段面板高度一致+1.5倍放大 ③ApiManagement 数据预览从抽屉→全页导航（新增路由） | 闸✓记✓拓✓测✓ | 1问/0改向 |
 | 第一百七十二轮 | 2026-08-18 | archive、modeling | 测试报告修复、数据预览、配置表弹窗 | 测试报告 5 项全改：①mappings 4 弹窗加宽 ②ApiManagement 数据预览重设计（信息栏+字段导航+数据表格，参考 ArchiveDetail）③ArchiveDetail scroll.y 加高 ④ConfigTables 内联编辑→操作列「编辑」+大弹窗 | 闸✓记✓拓✓测✓ | 2问/0改向 |
 | 第一百七十一轮 | 2026-08-18 | modeling、uxqa | UI优化、批4+批5巡检、设置模块 | uxqa 全站巡检批4（设置模块 5 页面）+批5（其余 8 页面）：1P1+3P2 全改——AIConfig 高级设置折叠标题精简、DataSourceList 名称列加 width+scroll.x 调整+h2 统一 20px、TechFunctions h2 统一 20px；批5 巡检通过无新增；vue-tsc 0 + build 通过 | 闸✓记✓拓✓测✓ | 1问/0改向 |
 | 第一百七十轮 | 2026-08-18 | modeling、uxqa | UI优化、批3巡检、档案模块、关系管理 | uxqa 全站巡检批3（ArchiveList+ArchiveDetail+ApiManagement+VersionManagement+ConsistencyCheck）：3项P1+4项P2 全改——操作列宽精简 320→220、scroll.x 消除空白、信息栏结构化展示、字段导航加搜索、变更概况 tooltip、差异列加宽；vue-tsc 0 + build 通过 | 闸✓记✓拓✓测✓ | 1问/0改向 |
