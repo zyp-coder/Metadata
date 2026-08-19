@@ -1,12 +1,18 @@
-# dev.ps1 - MetaData002 前后端一键启动/停止/状态
-# Usage: .\scripts\dev.ps1 start|stop|status
+﻿# dev.ps1 - MetaData002 前后端一键启动/停止/状态/看护
+# Usage: .\scripts\dev.ps1 start|stop|status|watch
 #   start  : 后台启动前后端（不随终端退出），日志写入 output/logs/
-#   stop   : 停止前后端（按 PID 文件）
-#   status : 查看前后端运行状态
+#   stop   : 停止前后端（按端口监听进程兜底清理）
+#   status : 查看前后端运行状态（含真实 PID + HTTP 健康检查）
+#   watch  : 前台看护循环，进程掉线自动拉起（Ctrl+C 退出）
 # 幂等：端口已监听则跳过启动，重复执行安全
+#
+# 2026-08-19 加固：
+#   - PID 一律以「实际监听端口进程」为准（Get-NetTCPConnection 反查），不再信任 Start-Process 返回值
+#   - status 对后端做 HTTP 探活（区分「在跑/挂起/已停」），前端做首页探活
+#   - 新增 watch 看护，自动拉起掉线进程，避免再出现「无声掉线」
 
 param(
-    [ValidateSet('start', 'stop', 'status')]
+    [ValidateSet('start', 'stop', 'status', 'watch')]
     [string]$Action = 'status'
 )
 
@@ -24,24 +30,70 @@ function Test-Port {
     return [bool]$conn
 }
 
-function Get-RunningPid {
-    param([string]$PidFile)
-    if (-not (Test-Path $PidFile)) { return $null }
-    $savedPid = (Get-Content $PidFile).Trim()
-    if (-not $savedPid) { return $null }
-    if (Get-Process -Id $savedPid -ErrorAction SilentlyContinue) { return $savedPid }
-    return $null
-}
-
-# 停止指定端口的监听进程（npm.cmd/python 拉起后实际监听是子进程，兜底清理）
-function Stop-PortOwner {
+# 返回监听指定端口的真实 PID 列表（去重）
+function Get-PortPids {
     param([int]$Port)
     $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    if ($conn) {
-        foreach ($c in $conn) {
-            Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
-            Write-Host "  port ${Port}: killed listener PID=$($c.OwningProcess)" -ForegroundColor Green
-        }
+    if (-not $conn) { return @() }
+    return @($conn | Select-Object -ExpandProperty OwningProcess -Unique)
+}
+
+# HTTP 健康检查：能拿到 HTTP 响应（含 401 等状态码）即视为存活
+function Test-Health {
+    param([int]$Port, [string]$Path)
+    try {
+        Invoke-WebRequest -Uri "http://127.0.0.1:$Port$Path" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        # 401/403 等 HTTP 错误仍证明服务在响应
+        if ($_.Exception.Response) { return $true }
+        return $false
+    }
+}
+
+# 停止指定端口的监听进程
+function Stop-PortOwner {
+    param([int]$Port)
+    $pids = Get-PortPids $Port
+    foreach ($pid_ in $pids) {
+        Stop-Process -Id $pid_ -Force -ErrorAction SilentlyContinue
+        Write-Host "  port ${Port}: killed listener PID=$pid_" -ForegroundColor Green
+    }
+}
+
+# 记录真实监听 PID 到 pid 文件（启动后轮询等待端口就绪）
+function Save-RealPid {
+    param([int]$Port, [string]$PidFile, [string]$Name)
+    $pids = @()
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 500
+        $pids = Get-PortPids $Port
+        if ($pids.Count -gt 0) { break }
+    }
+    if ($pids.Count -gt 0) {
+        $pids[0] | Set-Content $PidFile
+        Write-Host "  $Name : listening on :$Port PID=$($pids[0])" -ForegroundColor Green
+        return $true
+    } else {
+        if (Test-Path $PidFile) { Remove-Item $PidFile -ErrorAction SilentlyContinue }
+        Write-Host "  $Name : FAILED to start on :$Port (check logs)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Write-HealthStatus {
+    param([string]$Name, [int]$Port, [string]$HealthPath)
+    $pids = Get-PortPids $Port
+    if ($pids.Count -eq 0) {
+        Write-Host "  $Name : STOPPED" -ForegroundColor Red
+        return
+    }
+    $alive = Test-Health $Port $HealthPath
+    $pidStr = ($pids -join ',')
+    if ($alive) {
+        Write-Host "  $Name : RUNNING  PID=$pidStr  health=OK  (port $Port)" -ForegroundColor Green
+    } else {
+        Write-Host "  $Name : LISTENING but NOT RESPONDING  PID=$pidStr  (port $Port)" -ForegroundColor Yellow
     }
 }
 
@@ -53,23 +105,24 @@ switch ($Action) {
 
         # 后端
         if (Test-Port 8000) {
-            Write-Host 'Backend  : already running on :8000 (skip)' -ForegroundColor DarkYellow
+            $pids = Get-PortPids 8000
+            Write-Host "Backend  : already running on :8000 PID=$($pids -join ',') (skip)" -ForegroundColor DarkYellow
         } else {
             $py = Join-Path $root 'backend\venv\Scripts\python.exe'
             $managePy = Join-Path $root 'backend\manage.py'
             $outLog = Join-Path $logDir 'backend.out.log'
             $errLog = Join-Path $logDir 'backend.err.log'
-            $p = Start-Process -FilePath $py -ArgumentList @($managePy, 'runserver', '8000', '--noreload') `
+            Start-Process -FilePath $py -ArgumentList @($managePy, 'runserver', '8000', '--noreload') `
                 -WorkingDirectory (Join-Path $root 'backend') `
                 -RedirectStandardOutput $outLog -RedirectStandardError $errLog `
-                -WindowStyle Hidden -PassThru
-            $p.Id | Set-Content $backendPidFile
-            Write-Host "Backend  : started PID=$($p.Id) -> http://localhost:8000" -ForegroundColor Green
+                -WindowStyle Hidden
+            Save-RealPid -Port 8000 -PidFile $backendPidFile -Name 'Backend'
         }
 
         # 前端
         if (Test-Port 3000) {
-            Write-Host 'Frontend : already running on :3000 (skip)' -ForegroundColor DarkYellow
+            $pids = Get-PortPids 3000
+            Write-Host "Frontend : already running on :3000 PID=$($pids -join ',') (skip)" -ForegroundColor DarkYellow
         } else {
             $npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
             if (-not $npm) {
@@ -77,12 +130,11 @@ switch ($Action) {
             } else {
                 $outLog = Join-Path $logDir 'frontend.out.log'
                 $errLog = Join-Path $logDir 'frontend.err.log'
-                $p = Start-Process -FilePath $npm -ArgumentList @('run', 'dev') `
+                Start-Process -FilePath $npm -ArgumentList @('run', 'dev') `
                     -WorkingDirectory (Join-Path $root 'frontend') `
                     -RedirectStandardOutput $outLog -RedirectStandardError $errLog `
-                    -WindowStyle Hidden -PassThru
-                $p.Id | Set-Content $frontendPidFile
-                Write-Host "Frontend : started PID=$($p.Id) -> http://localhost:3000" -ForegroundColor Green
+                    -WindowStyle Hidden
+                Save-RealPid -Port 3000 -PidFile $frontendPidFile -Name 'Frontend'
             }
         }
 
@@ -96,32 +148,69 @@ switch ($Action) {
 
     'stop' {
         Write-Host 'Stopping MetaData002 dev services...'
-        $stopped = 0
-        foreach ($entry in @(@{Name='Backend'; File=$backendPidFile; Port=8000}, @{Name='Frontend'; File=$frontendPidFile; Port=3000})) {
-            $procId = Get-RunningPid $entry.File
-            if ($procId) {
-                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-                Remove-Item $entry.File -ErrorAction SilentlyContinue
-                Write-Host "  $($entry.Name): stopped PID=$procId" -ForegroundColor Green
-                $stopped++
-            }
-            # 兜底：父进程可能已退、子进程仍占端口（npm.cmd -> node 等）
+        foreach ($entry in @(@{Name='Backend'; Port=8000; File=$backendPidFile}, @{Name='Frontend'; Port=3000; File=$frontendPidFile})) {
+            if (Test-Path $entry.File) { Remove-Item $entry.File -ErrorAction SilentlyContinue }
             Stop-PortOwner $entry.Port
         }
-        if ($stopped -eq 0) { Write-Host 'Done (no pid files found, port owners cleaned if any).' -ForegroundColor DarkGray }
+        Write-Host 'Done.'
     }
 
     'status' {
         Write-Host 'MetaData002 dev services status:'
-        foreach ($entry in @(@{Name='Backend'; File=$backendPidFile; Port=8000}, @{Name='Frontend'; File=$frontendPidFile; Port=3000})) {
-            $procId = Get-RunningPid $entry.File
-            if ($procId) {
-                Write-Host "  $($entry.Name): RUNNING PID=$procId (port $($entry.Port))" -ForegroundColor Green
-            } elseif (Test-Port $entry.Port) {
-                Write-Host "  $($entry.Name): RUNNING on port $($entry.Port) (not via this script)" -ForegroundColor DarkYellow
-            } else {
-                Write-Host "  $($entry.Name): STOPPED" -ForegroundColor Red
+        Write-HealthStatus -Name 'Backend ' -Port 8000 -HealthPath '/api/domains/'
+        Write-HealthStatus -Name 'Frontend' -Port 3000 -HealthPath '/'
+    }
+
+    'watch' {
+        Write-Host '========================================' -ForegroundColor Cyan
+        Write-Host '  Watchdog: 每 10 秒探活，掉线自动拉起' -ForegroundColor Cyan
+        Write-Host '  按 Ctrl+C 退出' -ForegroundColor Cyan
+        Write-Host '========================================' -ForegroundColor Cyan
+
+        $py = Join-Path $root 'backend\venv\Scripts\python.exe'
+        $managePy = Join-Path $root 'backend\manage.py'
+        $npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+        $backendOut = Join-Path $logDir 'backend.out.log'
+        $backendErr = Join-Path $logDir 'backend.err.log'
+        $frontendOut = Join-Path $logDir 'frontend.out.log'
+        $frontendErr = Join-Path $logDir 'frontend.err.log'
+
+        function Start-Backend {
+            Start-Process -FilePath $py -ArgumentList @($managePy, 'runserver', '8000', '--noreload') `
+                -WorkingDirectory (Join-Path $root 'backend') `
+                -RedirectStandardOutput $backendOut -RedirectStandardError $backendErr -WindowStyle Hidden
+            $ok = Save-RealPid -Port 8000 -PidFile $backendPidFile -Name 'Backend'
+            Write-Host "  [$(Get-Date -Format HH:mm:ss)] backend auto-restarted" -ForegroundColor Green
+        }
+        function Start-Frontend {
+            if (-not $npm) { Write-Host 'Frontend : npm not found' -ForegroundColor Red; return }
+            Start-Process -FilePath $npm -ArgumentList @('run', 'dev') `
+                -WorkingDirectory (Join-Path $root 'frontend') `
+                -RedirectStandardOutput $frontendOut -RedirectStandardError $frontendErr -WindowStyle Hidden
+            $ok = Save-RealPid -Port 3000 -PidFile $frontendPidFile -Name 'Frontend'
+            Write-Host "  [$(Get-Date -Format HH:mm:ss)] frontend auto-restarted" -ForegroundColor Green
+        }
+
+        try {
+            while ($true) {
+                if (-not (Test-Port 8000)) {
+                    Write-Host "  [$(Get-Date -Format HH:mm:ss)] backend DOWN -> restarting" -ForegroundColor Yellow
+                    Start-Backend
+                } elseif (-not (Test-Health 8000 '/api/domains/')) {
+                    Write-Host "  [$(Get-Date -Format HH:mm:ss)] backend not responding -> restarting" -ForegroundColor Yellow
+                    Stop-PortOwner 8000
+                    Start-Sleep -Seconds 1
+                    Start-Backend
+                }
+                if (-not (Test-Port 3000)) {
+                    Write-Host "  [$(Get-Date -Format HH:mm:ss)] frontend DOWN -> restarting" -ForegroundColor Yellow
+                    Start-Frontend
+                }
+                Start-Sleep -Seconds 10
             }
+        } finally {
+            Write-Host ''
+            Write-Host 'Watchdog stopped.' -ForegroundColor DarkGray
         }
     }
 }

@@ -144,7 +144,7 @@
     </a-drawer>
 
     <!-- 子表注册管理弹窗（预组合=头表+明细表） -->
-    <a-modal v-model:open="dcModalVisible" :title="dcEditingId ? '编辑子表配置' : '新建子表注册（预组合）'" @ok="handleDcSubmit" :confirmLoading="dcSaving" width="860px" :destroyOnClose="true">
+    <a-modal v-model:open="dcModalVisible" :title="dcEditingId ? '编辑子表配置' : '新建子表注册（预组合）'" @ok="handleDcSubmit" :confirmLoading="dcSaving" width="1120px" :destroyOnClose="true">
       <a-alert v-if="!dcEditingId" type="info" show-icon style="margin-bottom: 16px"
         message="预组合 = 头表 + 明细表"
         description="先选头表和明细表（如 价目表 + 价目表明细），再配头↔明细关联字段；后续挂载时用整个预组合体关联主表" />
@@ -171,7 +171,7 @@
           <!-- 左侧：头表列表 + 头表关联字段列表 -->
           <a-col :span="11">
             <a-row :gutter="8">
-              <a-col :span="8">
+              <a-col :span="10">
                 <div class="field-panel">
                   <div class="field-panel__header">头表（点击选择）</div>
                   <div class="field-panel__list">
@@ -186,7 +186,7 @@
                   </div>
                 </div>
               </a-col>
-              <a-col :span="16">
+              <a-col :span="14">
                 <div class="field-panel">
                   <div class="field-panel__header">头表关联字段</div>
                   <div class="field-panel__list">
@@ -211,7 +211,7 @@
           <!-- 右侧：明细表列表 + 明细表关联字段列表 -->
           <a-col :span="11">
             <a-row :gutter="8">
-              <a-col :span="8">
+              <a-col :span="10">
                 <div class="field-panel">
                   <div class="field-panel__header">明细表（点击选择）</div>
                   <div class="field-panel__list">
@@ -230,7 +230,7 @@
                   </div>
                 </div>
               </a-col>
-              <a-col :span="16">
+              <a-col :span="14">
                 <div class="field-panel">
                   <div class="field-panel__header">明细表关联字段</div>
                   <div class="field-panel__list">
@@ -2592,6 +2592,9 @@ onBeforeUnmount(() => {
   border: 1px solid #e8e8e8;
   border-radius: 4px;
   overflow: hidden;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 .field-panel__header {
   background: #fafafa;
@@ -2602,6 +2605,8 @@ onBeforeUnmount(() => {
   font-weight: 500;
 }
 .field-panel__list {
+  flex: 1;
+  min-height: 0;
   max-height: 280px;
   overflow-y: auto;
 }

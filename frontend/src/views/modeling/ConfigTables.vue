@@ -33,7 +33,6 @@
       :pagination="false"
       rowKey="id"
       :scroll="{ x: 800 }"
-      :customRow="(record: ConfigTable) => ({ onClick: () => selectTable(record), style: { cursor: 'pointer', background: selectedId === record.id ? '#e6f4ff' : '' } })"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'status'">
@@ -47,117 +46,123 @@
           />
         </template>
         <template v-if="column.key === 'action'">
-          <a style="color: #ff4d4f" @click.stop="confirmDelete(record)">删除</a>
+          <a-space :size="8">
+            <a @click.stop="openEditor(record)">编辑</a>
+            <a style="color: #ff4d4f" @click.stop="confirmDelete(record)">删除</a>
+          </a-space>
         </template>
       </template>
     </a-table>
 
-    <!-- 数据编辑区（选中配置表后展开） -->
-    <div v-if="selectedTable" class="data-editor">
-      <div class="data-editor-header">
-        <div>
-          <strong>{{ selectedTable.name }}</strong>
-          <span style="color: #888; margin-left: 8px; font-size: 12px">编码：{{ selectedTable.code }}</span>
-          <span v-if="selectedTable.last_synced_at" style="color: #52c41a; margin-left: 12px; font-size: 12px">
-            最后同步：{{ formatDateTime(selectedTable.last_synced_at) }}
-          </span>
+    <!-- 数据编辑弹窗（操作列「编辑」打开） -->
+    <a-modal v-model:open="editorVisible" width="780px" :footer="null" :destroyOnClose="false">
+      <template #title>
+        <span>{{ selectedTable?.name }}</span>
+        <span style="color: #888; margin-left: 8px; font-size: 13px; font-weight: 400">编码：{{ selectedTable?.code }}</span>
+      </template>
+
+      <div v-if="selectedTable" class="data-editor">
+        <div v-if="selectedTable.last_synced_at" style="font-size: 12px; color: #52c41a; margin-bottom: 12px">
+          最后同步：{{ formatDateTime(selectedTable.last_synced_at) }}
         </div>
-        <a-space>
-          <a-button size="small" @click="addRow">+ 添加行</a-button>
-          <a-button size="small" type="primary" :loading="savingRows" @click="saveRows">保存</a-button>
-          <a-button size="small" @click="selectedId = null">收起</a-button>
-        </a-space>
-      </div>
 
-      <!-- 数据源同步配置区 -->
-      <div class="sync-section">
-        <a-collapse :bordered="false" v-model:activeKey="syncExpanded">
-          <a-collapse-panel key="sync" header="数据源同步配置">
-            <a-space direction="vertical" style="width: 100%" :size="12">
-              <div style="display: flex; gap: 12px; align-items: end">
-                <a-form-item label="数据源" style="margin-bottom: 0; flex: 1">
-                  <a-select
-                    v-model:value="syncForm.data_source"
-                    placeholder="选择数据源"
-                    allowClear
-                    style="width: 100%"
-                    @change="onDataSourceChange"
-                  >
-                    <a-select-option v-for="ds in dataSources" :key="ds.id" :value="ds.id">
-                      {{ ds.name }} ({{ ds.db_type }}:{{ ds.host }}/{{ ds.db_name }})
-                    </a-select-option>
-                  </a-select>
+        <!-- 数据源同步配置区 -->
+        <div class="sync-section">
+          <a-collapse :bordered="false" v-model:activeKey="syncExpanded">
+            <a-collapse-panel key="sync" header="数据源同步配置">
+              <a-space direction="vertical" style="width: 100%" :size="12">
+                <div style="display: flex; gap: 12px; align-items: end">
+                  <a-form-item label="数据源" style="margin-bottom: 0; flex: 1">
+                    <a-select
+                      v-model:value="syncForm.data_source"
+                      placeholder="选择数据源"
+                      allowClear
+                      style="width: 100%"
+                      @change="onDataSourceChange"
+                    >
+                      <a-select-option v-for="ds in dataSources" :key="ds.id" :value="ds.id">
+                        {{ ds.name }} ({{ ds.db_type }}:{{ ds.host }}/{{ ds.db_name }})
+                      </a-select-option>
+                    </a-select>
+                  </a-form-item>
+                  <a-button size="small" :loading="previewing" @click="doPreview" :disabled="!syncForm.data_source || !syncForm.sync_sql.trim()">
+                    预览结果
+                  </a-button>
+                  <a-button size="small" type="primary" :loading="syncing" @click="doSync" :disabled="!syncForm.data_source || !syncForm.sync_sql.trim()">
+                    执行同步
+                  </a-button>
+                </div>
+                <a-form-item label="SQL 查询（结果前两列作为 Key-Value）" style="margin-bottom: 0">
+                  <a-textarea
+                    v-model:value="syncForm.sync_sql"
+                    :rows="3"
+                    placeholder="如：SELECT DISTINCT SUBSTRING(code, -3) AS key, name AS value FROM product_table ORDER BY key"
+                    style="font-family: monospace; font-size: 12px"
+                  />
                 </a-form-item>
-                <a-button size="small" :loading="previewing" @click="doPreview" :disabled="!syncForm.data_source || !syncForm.sync_sql.trim()">
-                  预览结果
-                </a-button>
-                <a-button size="small" type="primary" :loading="syncing" @click="doSync" :disabled="!syncForm.data_source || !syncForm.sync_sql.trim()">
-                  执行同步
-                </a-button>
-              </div>
-              <a-form-item label="SQL 查询（结果前两列作为 Key-Value）" style="margin-bottom: 0">
-                <a-textarea
-                  v-model:value="syncForm.sync_sql"
-                  :rows="3"
-                  placeholder="如：SELECT DISTINCT SUBSTRING(code, -3) AS key, name AS value FROM product_table ORDER BY key"
-                  style="font-family: monospace; font-size: 12px"
+                <div v-if="syncForm.data_source" style="font-size: 12px; color: #888">
+                  提示：只允许 SELECT 查询，超时 30 秒，最多返回 10000 行
+                </div>
+              </a-space>
+              <!-- 预览结果 -->
+              <div v-if="previewResult" style="margin-top: 12px">
+                <div style="font-size: 12px; color: #888; margin-bottom: 4px">
+                  预览结果（{{ previewResult.row_count }} 行）
+                  <span v-if="previewResult.truncated" style="color: #faad14">（已截断）</span>
+                </div>
+                <a-table
+                  :dataSource="previewRows"
+                  :columns="previewColumns"
+                  :pagination="false"
+                  :scroll="{ y: 200 }"
+                  size="small"
+                  rowKey="_idx"
                 />
-              </a-form-item>
-              <div v-if="syncForm.data_source" style="font-size: 12px; color: #888">
-                提示：只允许 SELECT 查询，超时 30 秒，最多返回 10000 行
               </div>
-            </a-space>
-            <!-- 预览结果 -->
-            <div v-if="previewResult" style="margin-top: 12px">
-              <div style="font-size: 12px; color: #888; margin-bottom: 4px">
-                预览结果（{{ previewResult.row_count }} 行）
-                <span v-if="previewResult.truncated" style="color: #faad14">（已截断）</span>
-              </div>
-              <a-table
-                :dataSource="previewRows"
-                :columns="previewColumns"
-                :pagination="false"
-                :scroll="{ y: 200 }"
-                size="small"
-                rowKey="_idx"
-              />
-            </div>
-          </a-collapse-panel>
-        </a-collapse>
-      </div>
+            </a-collapse-panel>
+          </a-collapse>
+        </div>
 
-      <div style="font-size: 12px; color: #888; margin-bottom: 8px; margin-top: 12px">
-        共 {{ dataRows.length }} 行 · 第一列为查找键（Key），第二列为映射结果（Value）
+        <div style="font-size: 12px; color: #888; margin-bottom: 8px; margin-top: 12px">
+          共 {{ dataRows.length }} 行 · 第一列为查找键（Key），第二列为映射结果（Value）
+        </div>
+        <a-table
+          :dataSource="dataRows"
+          :columns="dataColumns"
+          :pagination="false"
+          rowKey="_idx"
+          size="small"
+          :scroll="{ y: 400 }"
+        >
+          <template #bodyCell="{ column, record: row, index }">
+            <template v-if="column.dataIndex === '__action__'">
+              <a-popconfirm
+                title="确定删除此行？保存后生效"
+                @confirm="dataRows.splice(index, 1)"
+                ok-text="确定"
+                cancel-text="取消"
+              >
+                <a style="color: #ff4d4f">删除</a>
+              </a-popconfirm>
+            </template>
+            <template v-else>
+              <a-input
+                :value="row[column.dataIndex]"
+                size="small"
+                class="cell-input"
+                @change="(e: any) => row[column.dataIndex] = e.target.value"
+              />
+            </template>
+          </template>
+        </a-table>
+        <div style="text-align: right; margin-top: 12px">
+          <a-space>
+            <a-button size="small" @click="addRow">+ 添加行</a-button>
+            <a-button size="small" type="primary" :loading="savingRows" @click="saveRows">保存</a-button>
+          </a-space>
+        </div>
       </div>
-      <a-table
-        :dataSource="dataRows"
-        :columns="dataColumns"
-        :pagination="false"
-        rowKey="_idx"
-        size="small"
-        :scroll="{ y: 400 }"
-      >
-        <template #bodyCell="{ column, record: row, index }">
-          <template v-if="column.dataIndex === '__action__'">
-            <a-popconfirm
-              title="确定删除此行？保存后生效"
-              @confirm="dataRows.splice(index, 1)"
-              ok-text="确定"
-              cancel-text="取消"
-            >
-              <a style="color: #ff4d4f">删除</a>
-            </a-popconfirm>
-          </template>
-          <template v-else>
-            <a-input
-              :value="row[column.dataIndex]"
-              size="small"
-              @change="(e: any) => row[column.dataIndex] = e.target.value"
-            />
-          </template>
-        </template>
-      </a-table>
-    </div>
+    </a-modal>
 
     <!-- 删除确认 -->
     <a-modal
@@ -216,7 +221,7 @@ const listColumns = [
   { title: '状态', key: 'status', width: 100 },
   { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 160,
     customRender: ({ text }: any) => formatDateTime(text) },
-  { title: '操作', key: 'action', width: 80, fixed: 'right' as const },
+  { title: '操作', key: 'action', width: 120, fixed: 'right' as const },
 ]
 
 // ── 新建 ──
@@ -265,13 +270,11 @@ async function doCreate() {
       rows: [],
       status: 'active',
     })
-    message.success('创建成功，请在下方表格中填写映射数据')
+    message.success('创建成功，请在编辑弹窗中填写映射数据')
     showCreateForm.value = false
     await loadData()
-    // 自动选中新建的表
-    selectedId.value = res.data.id
-    selectedTable.value = res.data
-    openDataEditor(res.data)
+    // 自动打开新建表编辑弹窗
+    openEditor(res.data)
   } catch (e: any) {
     message.error(extractApiError(e) || '创建失败')
   } finally {
@@ -295,9 +298,9 @@ async function doDelete() {
   try {
     await configTableApi.delete(deletingTable.value.id)
     message.success('删除成功')
-    if (selectedId.value === deletingTable.value.id) {
-      selectedId.value = null
+    if (selectedTable.value?.id === deletingTable.value.id) {
       selectedTable.value = null
+      editorVisible.value = false
       dataRows.value = []
     }
     await loadData()
@@ -310,8 +313,8 @@ async function doDelete() {
   }
 }
 
-// ── 选中 & 数据编辑 ──
-const selectedId = ref<number | null>(null)
+// ── 选中 & 数据编辑（弹窗） ──
+const editorVisible = ref(false)
 const selectedTable = ref<ConfigTable | null>(null)
 const dataRows = ref<Record<string, any>[]>([])
 const savingRows = ref(false)
@@ -394,14 +397,13 @@ const dataColumns = [
   { title: '', dataIndex: '__action__', key: '__action__', width: 60 },
 ]
 
-function selectTable(record: ConfigTable) {
-  if (selectedId.value === record.id) return
-  selectedId.value = record.id
+function openEditor(record: ConfigTable) {
   selectedTable.value = record
   // 填充同步表单
   syncForm.value.data_source = record.data_source
   syncForm.value.sync_sql = record.sync_sql || ''
   previewResult.value = null
+  editorVisible.value = true
   openDataEditor(record)
 }
 
@@ -466,17 +468,11 @@ async function saveRows() {
   margin-bottom: 16px;
 }
 .data-editor {
-  margin-top: 20px;
+  margin-top: 0;
   background: #fff;
   border: 1px solid #eef0f4;
   border-radius: 6px;
   padding: 16px;
-}
-.data-editor-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
 }
 .sync-section {
   background: #fafbfc;
@@ -487,5 +483,16 @@ async function saveRows() {
 .sync-section :deep(.ant-collapse-header) {
   font-weight: 500;
   font-size: 13px;
+}
+.cell-input :deep(.ant-input) {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.cell-input :deep(.ant-input:hover),
+.cell-input :deep(.ant-input:focus) {
+  border: none;
+  box-shadow: none;
+  background: #fafbfc;
 }
 </style>
